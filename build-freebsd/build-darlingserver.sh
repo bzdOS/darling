@@ -56,17 +56,22 @@ add_definitions(
   -DDSERVER_SINGLE_THREADED=1
 )
 
-# Support library: libsimple lock + FreeBSD POSIX compat (eventfd, timerfd) + dtape stubs
+# Support library: libsimple lock + FreeBSD POSIX compat (eventfd, timerfd)
 add_library(simple STATIC
   ${SRC}/libsimple/src/lock.c
   ${SRC}/startup/bsdos_posix_compat.c
-  ${SRC}/startup/dtape_stubs.c
 )
 target_include_directories(simple PUBLIC
   ${SRC}/libsimple/include
   ${COMPAT}
 )
 target_compile_definitions(simple PUBLIC LIBSIMPLE_FREEBSD=1)
+
+# Prebuilt duct-tape (real XNU Mach IPC emulation, replaces dtape_stubs.c)
+add_library(dtape STATIC IMPORTED)
+set_target_properties(dtape PROPERTIES
+  IMPORTED_LOCATION /var/darling-build/dtape/dtape-build/libdtape.a
+)
 
 set(DS_SRCS
   ${DS}/src/utility.cpp
@@ -84,7 +89,7 @@ set(DS_SRCS
 )
 
 add_executable(darlingserver ${DS_SRCS})
-target_link_libraries(darlingserver simple -L/usr/local/lib -lepoll-shim -lutil -ljail -lpthread)
+target_link_libraries(darlingserver simple dtape -L/usr/local/lib -lepoll-shim -lutil -ljail -lpthread -lc++)
 CMEOF
 
 cmake .
