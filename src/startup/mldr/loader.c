@@ -1,3 +1,13 @@
+#ifdef DARLING_FREEBSD
+/* FreeBSD does not have MAP_FIXED_NOREPLACE or MAP_GROWSDOWN */
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE MAP_FIXED
+#endif
+#ifndef MAP_GROWSDOWN
+#define MAP_GROWSDOWN 0
+#endif
+#endif
+
 #include <stdint.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>

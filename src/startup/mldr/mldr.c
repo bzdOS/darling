@@ -31,15 +31,24 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <dlfcn.h>
+#ifdef DARLING_FREEBSD
+#include <sys/endian.h>
+#include <sys/sysctl.h>
+#else
 #include <endian.h>
+#endif
 #include "commpage.h"
 #include "loader.h"
 #include <sys/resource.h>
+#ifndef DARLING_FREEBSD
 #include <sys/prctl.h>
+#endif
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <darlingserver/rpc.h>
+#ifndef DARLING_FREEBSD
 #include <sys/ptrace.h>
+#endif
 #include <pthread.h>
 #include <sys/utsname.h>
 
@@ -156,7 +165,9 @@ int main(int argc, char** argv, char** envp)
 	// allow any process to ptrace us
 	// the only process we really care about being able to do this is the server,
 	// but we can't just use the server's PID, since it lies outside our PID namespace.
+#ifndef DARLING_FREEBSD
 	ptrace(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
 
 	process_special_env(&mldr_load_results);
 
@@ -479,12 +490,24 @@ static void reexec32(char** argv)
 	char selfpath[1024];
 	ssize_t len;
 
+#ifdef DARLING_FREEBSD
+	{
+		int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+		size_t sz = sizeof(selfpath) - 3;
+		if (sysctl(mib, 4, selfpath, &sz, NULL, 0) == -1) {
+			perror("Cannot sysctl kern.proc.pathname");
+			abort();
+		}
+		len = (ssize_t)sz - 1; /* sz includes NUL */
+	}
+#else
 	len = readlink("/proc/self/exe", selfpath, sizeof(selfpath)-3);
 	if (len == -1)
 	{
 		perror("Cannot readlink /proc/self/exe");
 		abort();
 	}
+#endif
 
 	selfpath[len] = '\0';
 	strcat(selfpath, "32");
@@ -762,10 +785,12 @@ void __mldr_close_rpc_socket(int socket) {
 int __mldr_create_process_lifetime_pipe(int* fds) {
 	// These pipes are not required for Linux 5.3 or newer,
 	// we already have pidfd_open.
+#ifndef DARLING_FREEBSD
 	if (is_kernel_at_least(5, 3)) {
 		fds[0] = fds[1] = -1;
 		return 0;
 	}
+#endif
 
 	int pre_fds[2];
 	if (pipe(pre_fds) == -1) {
@@ -834,7 +859,13 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 		size = limit.rlim_cur;
 	}
 
-	if (compatible_mmap((void*)(lr->stack_top - size), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_GROWSDOWN, -1, 0) == MAP_FAILED) {
+	if (compatible_mmap((void*)(lr->stack_top - size), size, PROT_READ | PROT_WRITE,
+#ifdef DARLING_FREEBSD
+	        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+#else
+	        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_GROWSDOWN,
+#endif
+	        -1, 0) == MAP_FAILED) {
 		fprintf(stderr, "Failed to allocate stack of %lu bytes: %d (%s)\n", size, errno, strerror(errno));
 		exit(1);
 	}
@@ -953,6 +984,11 @@ static void start_thread(struct load_results* lr) {
 };
 
 static bool is_kernel_at_least(int major, int minor) {
+#ifdef DARLING_FREEBSD
+	(void)major; (void)minor;
+	return false;
+#endif
+
 	if (kernel_major == -1) {
 		struct utsname uname_info;
 		if (uname(&uname_info) == -1) {

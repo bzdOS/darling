@@ -9,10 +9,15 @@
 #include <cpuid.h>
 #endif
 #include <unistd.h>
+#ifdef DARLING_FREEBSD
+#include <sys/sysctl.h>
+#include <sys/elf_common.h>
+#else
 #include <sys/sysinfo.h>
 #if defined(__aarch64__)
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
+#endif
 #endif
 
 // Include commpage definitions
@@ -41,7 +46,14 @@ void commpage_setup(bool _64bit)
 	uint8_t *ncpus, *nactivecpus;
 	uint8_t *physcpus, *logcpus;
 	uint8_t *user_page_shift, *kernel_page_shift;
+#ifndef DARLING_FREEBSD
 	struct sysinfo si;
+#endif
+
+#if defined(DARLING_FREEBSD) && defined(__aarch64__)
+	/* 32-bit commpage address 0xFFFF4000 is in kernel VA space on FreeBSD ARM64 — force 64-bit only */
+	_64bit = true;
+#endif
 
 	commpage = (uint8_t*) mmap((void*)(_64bit ? _COMM_PAGE64_BASE_ADDRESS : _COMM_PAGE32_BASE_ADDRESS),
 			_64bit ? _COMM_PAGE64_AREA_LENGTH : _COMM_PAGE32_AREA_LENGTH, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
@@ -85,11 +97,22 @@ void commpage_setup(bool _64bit)
 	*cpu_caps = (uint32_t) my_caps;
 	*cpu_caps64 = my_caps;
 
+#ifdef DARLING_FREEBSD
+	{
+		uint64_t physmem = 0;
+		size_t physmem_size = sizeof(physmem);
+		if (sysctlbyname("hw.physmem", &physmem, &physmem_size, NULL, 0) == 0) {
+			uint64_t* memsize = (uint64_t*)CGET(_COMM_PAGE_MEMORY_SIZE);
+			*memsize = physmem;
+		}
+	}
+#else
 	if (sysinfo(&si) == 0)
 	{
 		uint64_t* memsize = (uint64_t*)CGET(_COMM_PAGE_MEMORY_SIZE);
 		*memsize = si.totalram * si.mem_unit;
 	}
+#endif
 }
 
 uint64_t get_cpu_caps(void)
@@ -97,13 +120,19 @@ uint64_t get_cpu_caps(void)
 	uint64_t caps = 0;
 
 #if defined(__aarch64__)
+#ifdef DARLING_FREEBSD
+	unsigned long hwcap = 0;
+	elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap));
+#else
 	unsigned long hwcap = getauxval(AT_HWCAP);
+#endif
 
 	// NEON/Advanced SIMD is always present on ARM64
 	caps |= kHasNeon;
 	caps |= kHasVfp;
 	caps |= kHasFMA;
 
+#ifndef DARLING_FREEBSD
 	if (hwcap & HWCAP_FP)
 		caps |= kHasVfp;
 	if (hwcap & HWCAP_FPHP)
@@ -128,6 +157,7 @@ uint64_t get_cpu_caps(void)
 #endif
 	if (hwcap & HWCAP_EVTSTRM)
 		caps |= kHasEvent;
+#endif /* DARLING_FREEBSD */
 
 #else /* x86 */
 	{
