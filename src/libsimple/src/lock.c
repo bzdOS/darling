@@ -33,6 +33,11 @@ struct timespec;
 	#include <unistd.h>
 #elif LIBSIMPLE_DARLING
 	extern int __linux_futex_reterr(int* uaddr, int op, int val, const struct timespec* timeout, int* uaddr2, int val3);
+#elif LIBSIMPLE_FREEBSD
+	#include <sys/types.h>  /* u_long */
+	#include <stddef.h>     /* NULL */
+	#include <sys/umtx.h>
+	#include <errno.h>
 #endif
 
 #if LIBSIMPLE_DARLING
@@ -41,6 +46,29 @@ struct timespec;
 static int linux_futex(int* uaddr, int op, int val, const struct timespec* timeout, int* uaddr2, int val3) {
 #if LIBSIMPLE_LINUX
 	return syscall(SYS_futex, uaddr, op, val, timeout, uaddr2, val3);
+#elif LIBSIMPLE_FREEBSD
+	/* FreeBSD _umtx_op() is the native futex equivalent.
+	 * Mapping: FUTEX_WAIT→WAIT_UINT, FUTEX_WAKE→WAKE, FUTEX_REQUEUE→REQUEUE.
+	 * FUTEX_PRIVATE_FLAG has no meaning on FreeBSD (all ops are per-process). */
+	int base_op = op & ~FUTEX_PRIVATE_FLAG;
+	switch (base_op) {
+	case FUTEX_WAIT:
+		return _umtx_op(uaddr, UMTX_OP_WAIT_UINT, (u_long)(uint32_t)val, NULL, (void*)timeout);
+	case FUTEX_WAKE:
+		return _umtx_op(uaddr, UMTX_OP_WAKE, (u_long)val, NULL, NULL);
+	case FUTEX_WAIT_BITSET:
+		/* val3 is the bitmask; FreeBSD uses UMTX_OP_WAIT_UINT with uaddr (bitset ignored — safe approx) */
+		return _umtx_op(uaddr, UMTX_OP_WAIT_UINT, (u_long)(uint32_t)val, NULL, (void*)timeout);
+	case FUTEX_WAKE_BITSET:
+		return _umtx_op(uaddr, UMTX_OP_WAKE, (u_long)val, NULL, NULL);
+	case FUTEX_REQUEUE:
+		/* FreeBSD has no REQUEUE equivalent.  Approximate by waking all
+		 * waiters on uaddr (safe: spurious wakeups are tolerated by callers). */
+		return _umtx_op(uaddr, UMTX_OP_WAKE_PRIVATE, INT_MAX, NULL, NULL);
+	default:
+		errno = ENOSYS;
+		return -1;
+	}
 #else
 	#error linux_futex not implemented for this platform
 #endif
