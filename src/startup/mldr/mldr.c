@@ -56,6 +56,9 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 #include <pthread.h>
 #include <sys/utsname.h>
+#ifdef DARLING_FREEBSD
+#include "freebsd_syscall_trap.h"
+#endif
 
 #ifndef PAGE_SIZE
 #	define PAGE_SIZE	4096
@@ -297,6 +300,14 @@ int main(int argc, char** argv, char** envp)
 #endif // !DARLING_FREEBSD
 
 	__mldr_main_stack_top = (void*)mldr_load_results.stack_top;
+
+#ifdef DARLING_FREEBSD
+	/* Install macOS BSD syscall interception via SIGSYS before handing
+	 * control to the Mach-O binary.  Without this, every macOS `syscall`
+	 * instruction (eax = 0x2000000 | nr) causes an unhandled SIGSYS
+	 * because FreeBSD does not know those syscall numbers. */
+	setup_macos_syscall_trap();
+#endif
 
 	start_thread(&mldr_load_results);
 

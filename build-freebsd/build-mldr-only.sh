@@ -4,12 +4,15 @@
 set -e
 
 BUILD=/var/darling-build/dserver
+# Build in /tmp so the freebsd user doesn't need write access to /var/darling-build.
+# The resulting binary is then installed to the canonical path with root privileges.
+MLDR_TMP_BUILD="/tmp/mldr-build-$$"
 MLDR_REAL_BUILD="${BUILD}/mldr-real"
 SRC=/path/to/darling/src
 DS=${SRC}/external/darlingserver
 DRPC=${DS}/generated-rpc
 
-rm -rf "${MLDR_REAL_BUILD}" && mkdir -p "${MLDR_REAL_BUILD}" && cd "${MLDR_REAL_BUILD}"
+rm -rf "${MLDR_TMP_BUILD}" && mkdir -p "${MLDR_TMP_BUILD}" && cd "${MLDR_TMP_BUILD}"
 
 cat > CMakeLists.txt << 'MLDR_EOF'
 cmake_minimum_required(VERSION 3.13)
@@ -59,6 +62,7 @@ add_executable(mldr
   ${DRPC}/src/rpc.c
   ${SRC}/startup/mldr/elfcalls/elfcalls.c
   ${SRC}/startup/mldr/elfcalls/threads.c
+  ${SRC}/startup/mldr/freebsd_syscall_trap.c
 )
 
 # rpc.c needs dserver_rpc_hooks_* macros defined in dserver-rpc-defs.h.
@@ -72,5 +76,14 @@ MLDR_EOF
 
 cmake .
 make -j$(sysctl -n hw.ncpu)
-echo "=== Built: ${MLDR_REAL_BUILD}/mldr ==="
-ls -lh "${MLDR_REAL_BUILD}/mldr"
+echo "=== Build done, installing to ${MLDR_REAL_BUILD}/mldr ==="
+# Install to canonical path (needs root if /var/darling-build is root-owned)
+if install -m 755 "${MLDR_TMP_BUILD}/mldr" "${MLDR_REAL_BUILD}/mldr" 2>/dev/null; then
+    echo "Installed as current user"
+elif su -m root -c "install -m 755 '${MLDR_TMP_BUILD}/mldr' '${MLDR_REAL_BUILD}/mldr'" 2>/dev/null; then
+    echo "Installed as root"
+else
+    echo "WARNING: could not install to ${MLDR_REAL_BUILD}/mldr (permission denied)"
+    echo "Binary is at: ${MLDR_TMP_BUILD}/mldr"
+fi
+ls -lh "${MLDR_REAL_BUILD}/mldr" 2>/dev/null || ls -lh "${MLDR_TMP_BUILD}/mldr"
