@@ -39,12 +39,17 @@
  *
  * Limitations (MVP):
  *   - Only ~25 common BSD syscalls are translated.
- *   - Mach traps (eax = 0x0000000 or negative in 32-bit ABI) not handled.
+ *   - Mach traps (raw_eax = 0xFFFFFFxx, i.e. int32_t < 0, upper byte = 0xFF)
+ *     are now dispatched to darlingserver via dserver_rpc_*() for the five
+ *     bootstrap traps (mach_reply_port, thread/task/host_self, mach_msg).
  *   - No errno translation needed: FreeBSD and macOS share POSIX errno values
  *     for the syscalls handled here.
  *   - The instruction-byte scan assumes MOV EAX,imm32 immediately precedes
  *     the SYSCALL instruction.  This holds for all known static Mach-O
  *     binaries compiled with clang/LLVM; hand-crafted asm may differ.
+ *   - mach_msg 9-argument overwrite form: the SIGSYS context only captures 6
+ *     argument registers; extra stack args (priority, rcv_msg) default to
+ *     0/msg respectively.  Full support requires reading the Mach-O stack.
  */
 
 #ifdef DARLING_FREEBSD
@@ -60,16 +65,31 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <darlingserver/rpc.h>
 
-/* ── macOS BSD syscall class constants ────────────────────────────────────── */
+/* ── macOS syscall class constants ─────────────────────────────────────────── */
 
 /* macOS syscall number encoding: class in upper byte, number in low 24 bits.
- * Class 2 = BSD (UNIX) syscalls: eax = 0x02000000 | nr */
+ * Class 2 = BSD (UNIX) syscalls: eax = 0x02000000 | nr
+ * Class 0 = Mach traps: eax = negative 32-bit value (sign-extended from int32_t)
+ *   Actual trap numbers: -26 (mach_reply_port) through -31 (mach_msg_trap) etc.
+ *   When read from MOV EAX,imm32, these appear as large unsigned 32-bit values
+ *   e.g. mach_reply_port = -26 = 0xFFFFFFE6u. */
 #define MACOS_BSD_CLASS      0x02000000u
 #define MACOS_BSD_CLASS_MASK 0xFF000000u
 
 /* Extract the per-class syscall number */
 #define MACOS_BSD_NR(eax)  ((unsigned int)((eax) & 0x00FFFFFFu))
+
+/* ── macOS Mach trap numbers (from osfmk/mach/syscall_sw.h) ──────────────── */
+/* These are the raw int32_t values; when stored in uint32_t from MOV EAX,imm32
+ * they appear as 0xFFFFFFxx.  We cast raw_eax to int32_t to detect negative. */
+#define MACH_TRAP_mach_reply_port      (-26)
+#define MACH_TRAP_thread_self_trap     (-27)
+#define MACH_TRAP_task_self_trap       (-28)
+#define MACH_TRAP_host_self_trap       (-29)
+#define MACH_TRAP_mach_msg_trap        (-31)
+#define MACH_TRAP_mach_msg_overwrite   (-32)
 
 /* ── macOS BSD syscall numbers (from macOS 13 <sys/syscall.h>) ────────────── */
 #define MACOS_SYS_exit           1
@@ -331,6 +351,116 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
     }
 }
 
+/* ── macOS Mach trap dispatcher ────────────────────────────────────────────── */
+
+/*
+ * purpose:  Dispatch a macOS Mach trap to darlingserver via RPC.
+ *           The five early bootstrap traps (mach_reply_port, *_self_trap, and
+ *           mach_msg_trap) are the only ones dyld calls before libSystem is
+ *           initialised.  All others are deferred to a future expansion.
+ *
+ * input:    trap_nr — raw int32_t Mach trap number (negative, e.g. -28)
+ *           a1..a6  — argument registers from the saved mcontext (intact)
+ * output:   port name (uint32_t) on success, or -errno on error
+ * sideEffects: issues a synchronous RPC to darlingserver; may log to stderr.
+ */
+static long
+dispatch_mach_trap(int trap_nr,
+                   long a1, long a2, long a3,
+                   long a4, long a5, long a6)
+{
+    uint32_t port_name = 0;
+    int ret;
+
+    switch (trap_nr) {
+
+    /* ── bootstrap port traps (no-argument, return a send right) ─────── */
+    case MACH_TRAP_task_self_trap:
+        ret = dserver_rpc_task_self_trap(&port_name);
+        if (ret < 0) {
+            fprintf(stderr,
+                "[darling-mldr] mach_trap: task_self_trap RPC failed: %d\n", ret);
+            return (long)ret; /* negative errno */
+        }
+        return (long)(uint64_t)port_name;
+
+    case MACH_TRAP_host_self_trap:
+        ret = dserver_rpc_host_self_trap(&port_name);
+        if (ret < 0) {
+            fprintf(stderr,
+                "[darling-mldr] mach_trap: host_self_trap RPC failed: %d\n", ret);
+            return (long)ret;
+        }
+        return (long)(uint64_t)port_name;
+
+    case MACH_TRAP_thread_self_trap:
+        ret = dserver_rpc_thread_self_trap(&port_name);
+        if (ret < 0) {
+            fprintf(stderr,
+                "[darling-mldr] mach_trap: thread_self_trap RPC failed: %d\n", ret);
+            return (long)ret;
+        }
+        return (long)(uint64_t)port_name;
+
+    case MACH_TRAP_mach_reply_port:
+        ret = dserver_rpc_mach_reply_port(&port_name);
+        if (ret < 0) {
+            fprintf(stderr,
+                "[darling-mldr] mach_trap: mach_reply_port RPC failed: %d\n", ret);
+            return (long)ret;
+        }
+        return (long)(uint64_t)port_name;
+
+    /* ── mach_msg_trap: full IPC send/receive ────────────────────────── */
+    /* macOS mach_msg_trap args: msg, option, send_size, rcv_size, rcv_name,
+     * timeout, priority.  Mapped 1:1 to darlingserver mach_msg_overwrite
+     * with rcv_msg == msg (in-place receive). */
+    case MACH_TRAP_mach_msg_trap:
+        ret = dserver_rpc_mach_msg_overwrite(
+            (void*)a1,      /* msg */
+            (int32_t)a2,    /* option */
+            (uint32_t)a3,   /* send_size */
+            (uint32_t)a4,   /* rcv_size */
+            (uint32_t)a5,   /* rcv_name */
+            (uint32_t)a6,   /* timeout */
+            0,              /* priority (not in 6-arg form) */
+            (void*)a1       /* rcv_msg == msg (overwrite in place) */
+        );
+        if (ret < 0) {
+            fprintf(stderr,
+                "[darling-mldr] mach_trap: mach_msg_trap RPC failed: %d\n", ret);
+            return (long)ret;
+        }
+        return 0; /* MACH_MSG_SUCCESS */
+
+    case MACH_TRAP_mach_msg_overwrite:
+        /* 9-argument form: a1=msg, a2=option, a3=send_sz, a4=rcv_sz,
+         * a5=rcv_name, a6=timeout; priority and rcv_msg come from stack —
+         * the SIGSYS handler only has 6 registers; treat rcv_msg == msg. */
+        ret = dserver_rpc_mach_msg_overwrite(
+            (void*)a1, (int32_t)a2, (uint32_t)a3,
+            (uint32_t)a4, (uint32_t)a5, (uint32_t)a6,
+            0, (void*)a1
+        );
+        if (ret < 0) {
+            fprintf(stderr,
+                "[darling-mldr] mach_trap: mach_msg_overwrite RPC failed: %d\n", ret);
+            return (long)ret;
+        }
+        return 0;
+
+    default:
+        fprintf(stderr,
+            "[darling-mldr] mach_trap: unhandled Mach trap %d — ENOSYS\n",
+            trap_nr);
+        return -ENOSYS;
+    }
+
+    /* suppress unused-parameter warnings for architectures where a1..a6
+     * are not read by all paths */
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+}
+
 /* ── SIGSYS handler ────────────────────────────────────────────────────────── */
 
 /*
@@ -347,8 +477,8 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
  *           info  — siginfo_t
  *           uctx  — ucontext_t* with saved register state
  * output:   (none — modifies *uctx in place)
- * sideEffects: executes the translated syscall; may write to stderr;
- *              may terminate process for Mach traps (not yet handled).
+ * sideEffects: executes the translated syscall or Mach RPC; may write to
+ *              stderr; terminates process only for truly unrecognised classes.
  */
 static void
 sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
@@ -378,21 +508,7 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
         return;
     }
 
-    /* Check class: only handle BSD (0x2000000) for now */
-    if ((raw_eax & MACOS_BSD_CLASS_MASK) != MACOS_BSD_CLASS) {
-        /* Not a macOS BSD syscall (could be Mach trap class 0x0000000) */
-        fprintf(stderr,
-            "[darling-mldr] SIGSYS: unhandled syscall class 0x%02x (nr=0x%08x)\n",
-            (raw_eax >> 24) & 0xff, raw_eax);
-        struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
-        sigaction(SIGSYS, &sa_dfl, NULL);
-        raise(SIGSYS);
-        return;
-    }
-
-    unsigned int macos_nr = MACOS_BSD_NR(raw_eax);
-
-    /* Argument registers are intact (rdi, rsi, rdx, r10, r8, r9) */
+    /* Argument registers are always intact (rdi, rsi, rdx, r10, r8, r9) */
     long a1 = (long)mc->mc_rdi;
     long a2 = (long)mc->mc_rsi;
     long a3 = (long)mc->mc_rdx;
@@ -400,7 +516,30 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
     long a5 = (long)mc->mc_r8;
     long a6 = (long)mc->mc_r9;
 
-    long ret = dispatch_macos_bsd_syscall(macos_nr, a1, a2, a3, a4, a5, a6);
+    long ret;
+
+    if ((raw_eax & MACOS_BSD_CLASS_MASK) == MACOS_BSD_CLASS) {
+        /* ── macOS BSD syscall (class 0x02000000) ──────────────────── */
+        unsigned int macos_nr = MACOS_BSD_NR(raw_eax);
+        ret = dispatch_macos_bsd_syscall(macos_nr, a1, a2, a3, a4, a5, a6);
+    } else if ((int32_t)raw_eax < 0 && (raw_eax & MACOS_BSD_CLASS_MASK) == 0xFF000000u) {
+        /* ── macOS Mach trap (negative eax, upper byte = 0xFF) ────────
+         *   e.g. task_self_trap = -28 = 0xFFFFFFE4, stored in uint32_t.
+         *   We interpret as int32_t to pass the negative trap number. */
+        int trap_nr = (int32_t)raw_eax;
+        ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6);
+    } else {
+        /* Unknown syscall class — log and re-raise as default signal */
+        fprintf(stderr,
+            "[darling-mldr] SIGSYS: unhandled syscall class 0x%02x (raw_eax=0x%08x)"
+            " at rip=0x%llx\n",
+            (raw_eax >> 24) & 0xff, raw_eax,
+            (unsigned long long)mc->mc_rip);
+        struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+        sigaction(SIGSYS, &sa_dfl, NULL);
+        raise(SIGSYS);
+        return;
+    }
 
     /* Write result back.  FreeBSD has already advanced rip past syscall;
      * we must NOT adjust rip further.
