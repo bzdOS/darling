@@ -47,9 +47,11 @@
  *   - The instruction-byte scan assumes MOV EAX,imm32 immediately precedes
  *     the SYSCALL instruction.  This holds for all known static Mach-O
  *     binaries compiled with clang/LLVM; hand-crafted asm may differ.
- *   - mach_msg 9-argument overwrite form: the SIGSYS context only captures 6
- *     argument registers; extra stack args (priority, rcv_msg) default to
- *     0/msg respectively.  Full support requires reading the Mach-O stack.
+ *   - mach_msg_trap (-31): the 7th argument (rcv_msg) is now read from the
+ *     Mach-O caller's stack at mc_rsp+8 and passed correctly to the RPC.
+ *   - mach_msg_overwrite (-32): the 7th argument (priority) is read from
+ *     mc_rsp+8; the 8th argument (rcv_msg at mc_rsp+16) still defaults to
+ *     msg (in-place receive).  Full 9-arg support is a future TODO.
  */
 
 #ifdef DARLING_FREEBSD
@@ -359,15 +361,21 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
  *           mach_msg_trap) are the only ones dyld calls before libSystem is
  *           initialised.  All others are deferred to a future expansion.
  *
- * input:    trap_nr — raw int32_t Mach trap number (negative, e.g. -28)
- *           a1..a6  — argument registers from the saved mcontext (intact)
+ * input:    trap_nr    — raw int32_t Mach trap number (negative, e.g. -28)
+ *           a1..a6     — argument registers from the saved mcontext (intact)
+ *           stack_arg1 — first stack argument from the Mach-O caller's stack
+ *                        (read from mc_rsp+8, past the return address).
+ *                        For mach_msg_trap (-31): rcv_msg (7th argument).
+ *                        For mach_msg_overwrite (-32): priority (7th argument);
+ *                        rcv_msg (8th) would need a separate stack read.
  * output:   port name (uint32_t) on success, or -errno on error
  * sideEffects: issues a synchronous RPC to darlingserver; may log to stderr.
  */
 static long
 dispatch_mach_trap(int trap_nr,
                    long a1, long a2, long a3,
-                   long a4, long a5, long a6)
+                   long a4, long a5, long a6,
+                   uintptr_t stack_arg1)
 {
     uint32_t port_name = 0;
     int ret;
@@ -412,19 +420,22 @@ dispatch_mach_trap(int trap_nr,
         return (long)(uint64_t)port_name;
 
     /* ── mach_msg_trap: full IPC send/receive ────────────────────────── */
-    /* macOS mach_msg_trap args: msg, option, send_size, rcv_size, rcv_name,
-     * timeout, priority.  Mapped 1:1 to darlingserver mach_msg_overwrite
-     * with rcv_msg == msg (in-place receive). */
+    /* macOS mach_msg_trap (-31) args:
+     *   rdi=msg, rsi=option, rdx=send_size, r10=rcv_size, r8=rcv_name,
+     *   r9=timeout, [rsp+8]=rcv_msg  (7th arg — first stack slot).
+     * We pass rcv_msg from the Mach-O caller's stack (stack_arg1) rather
+     * than duplicating msg, which is only correct for in-place receive.
+     * priority defaults to 0 (not present in the 7-argument trap form). */
     case MACH_TRAP_mach_msg_trap:
         ret = dserver_rpc_mach_msg_overwrite(
-            (void*)a1,      /* msg */
-            (int32_t)a2,    /* option */
-            (uint32_t)a3,   /* send_size */
-            (uint32_t)a4,   /* rcv_size */
-            (uint32_t)a5,   /* rcv_name */
-            (uint32_t)a6,   /* timeout */
-            0,              /* priority (not in 6-arg form) */
-            (void*)a1       /* rcv_msg == msg (overwrite in place) */
+            (void*)a1,               /* msg */
+            (int32_t)a2,             /* option */
+            (uint32_t)a3,            /* send_size */
+            (uint32_t)a4,            /* rcv_size */
+            (uint32_t)a5,            /* rcv_name */
+            (uint32_t)a6,            /* timeout */
+            0,                       /* priority (absent in 7-arg form) */
+            (void*)stack_arg1        /* rcv_msg from caller's stack */
         );
         if (ret < 0) {
             fprintf(stderr,
@@ -435,12 +446,17 @@ dispatch_mach_trap(int trap_nr,
 
     case MACH_TRAP_mach_msg_overwrite:
         /* 9-argument form: a1=msg, a2=option, a3=send_sz, a4=rcv_sz,
-         * a5=rcv_name, a6=timeout; priority and rcv_msg come from stack —
-         * the SIGSYS handler only has 6 registers; treat rcv_msg == msg. */
+         * a5=rcv_name, a6=timeout; [rsp+8]=priority (7th, stack_arg1),
+         * [rsp+16]=rcv_msg (8th — not yet read; default to msg). */
         ret = dserver_rpc_mach_msg_overwrite(
-            (void*)a1, (int32_t)a2, (uint32_t)a3,
-            (uint32_t)a4, (uint32_t)a5, (uint32_t)a6,
-            0, (void*)a1
+            (void*)a1,               /* msg */
+            (int32_t)a2,             /* option */
+            (uint32_t)a3,            /* send_size */
+            (uint32_t)a4,            /* rcv_size */
+            (uint32_t)a5,            /* rcv_name */
+            (uint32_t)a6,            /* timeout */
+            (uint32_t)stack_arg1,    /* priority from caller's stack */
+            (void*)a1                /* rcv_msg: default to msg (stack+16 TODO) */
         );
         if (ret < 0) {
             fprintf(stderr,
@@ -459,6 +475,7 @@ dispatch_mach_trap(int trap_nr,
     /* suppress unused-parameter warnings for architectures where a1..a6
      * are not read by all paths */
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)stack_arg1;
 }
 
 /* ── SIGSYS handler ────────────────────────────────────────────────────────── */
@@ -516,6 +533,14 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
     long a5 = (long)mc->mc_r8;
     long a6 = (long)mc->mc_r9;
 
+    /* Read the first stack argument from the Mach-O caller's stack.
+     * Under System V AMD64 ABI, [rsp+0] holds the return address pushed by
+     * the `call` instruction, so the first stack-passed argument lives at
+     * [rsp+8].  This is used by Mach traps that have more than 6 arguments:
+     *   mach_msg_trap (-31):      arg7 = rcv_msg   at [rsp+8]
+     *   mach_msg_overwrite (-32): arg7 = priority  at [rsp+8] */
+    uintptr_t stack_arg1 = *((const uintptr_t *)(uintptr_t)(mc->mc_rsp + 8));
+
     long ret;
 
     if ((raw_eax & MACOS_BSD_CLASS_MASK) == MACOS_BSD_CLASS) {
@@ -527,7 +552,7 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
          *   e.g. task_self_trap = -28 = 0xFFFFFFE4, stored in uint32_t.
          *   We interpret as int32_t to pass the negative trap number. */
         int trap_nr = (int32_t)raw_eax;
-        ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6);
+        ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6, stack_arg1);
     } else {
         /* Unknown syscall class — log and re-raise as default signal */
         fprintf(stderr,
