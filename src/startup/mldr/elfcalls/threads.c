@@ -374,7 +374,7 @@ int __darling_thread_terminate(void* stackaddr,
 		__mldr_close_rpc_socket(t_server_socket);
 	}
 
-	if (getpid() == syscall(SYS_gettid))
+	if (__darling_is_main_thread())
 	{
 		// dispatch_main() calls pthread_exit(NULL) on the main thread,
 		// which turns our process into a zombie on Linux.
@@ -405,7 +405,7 @@ extern int __dserver_main_thread_socket_fd;
 
 int __darling_thread_rpc_socket(void) {
 	if (t_server_socket == -1) {
-		if (getpid() == syscall(SYS_gettid)) {
+		if (__darling_is_main_thread()) {
 			// this is the main thread
 			t_server_socket = __dserver_main_thread_socket_fd;
 		} else {
@@ -425,7 +425,7 @@ void __darling_thread_rpc_socket_refresh(void) {
 	t_server_socket = new_rpc_fd;
 
 	// if this is the main thread, also update the socket used by mldr
-	if (getpid() == syscall(SYS_gettid)) {
+	if (__darling_is_main_thread()) {
 		__dserver_main_thread_socket_fd = t_server_socket;
 	}
 };
