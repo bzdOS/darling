@@ -112,9 +112,12 @@ set(DS   /path/to/darling/src/external/darlingserver)
 set(DRPC ${DS}/generated-rpc)
 
 include_directories(
+  # cctools/include must come BEFORE mldr/include: mldr/include/mach-o/ contains
+  # a symlink that exits the 9p mount boundary on the VM, causing EMSGSIZE.
+  # Putting cctools first lets the compiler find the real headers directly.
+  ${SRC}/external/cctools-port/cctools/include
   ${SRC}/startup/mldr/include
   ${SRC}/startup/mldr
-  ${SRC}/external/cctools-port/cctools/include
   ${DRPC}/include
   ${DS}/include
 )

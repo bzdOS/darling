@@ -30,6 +30,11 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdbool.h>
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
+#ifdef DARLING_FREEBSD
+/* cctools-port loader.h doesn't include mach/machine.h; add CPU_TYPE_* and VM_PROT_* */
+#include <mach/machine.h>
+#include <mach/vm_prot.h>
+#endif
 #include <dlfcn.h>
 #ifdef DARLING_FREEBSD
 #include <sys/endian.h>
@@ -1016,6 +1021,14 @@ static bool is_kernel_at_least(int major, int minor) {
 }
 
 void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+#ifdef DARLING_FREEBSD
+	// On FreeBSD, MAP_FIXED_NOREPLACE = MAP_FIXED | MAP_EXCL (compat-includes/sys/mman.h).
+	// The kernel handles both correctly; the WSL1 hack must NOT run here because
+	// (flags & MAP_FIXED_NOREPLACE) is truthy whenever MAP_FIXED is set, and
+	// is_kernel_at_least() always returns false on FreeBSD — which would strip
+	// MAP_FIXED from every fixed-address mapping and silently break them all.
+	return mmap(addr, length, prot, flags, fd, offset);
+#else
 	// MAP_FIXED_NOREPLACE is not supported on WSL1 (Linux < 4.17).
 	bool fixed_noreplace_hack = false;
 	if ((flags & MAP_FIXED_NOREPLACE) && !is_kernel_at_least(4, 17)) {
@@ -1035,6 +1048,7 @@ void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, of
 		}
 	}
 	return result;
+#endif // !DARLING_FREEBSD
 }
 
 static void vchroot_unexpand_interpreter(struct load_results* lr) {
