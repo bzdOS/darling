@@ -10,10 +10,27 @@
  * sideEffects:
  *   - Installs a SIGSYS sigaction(SA_SIGINFO | SA_ONSTACK).
  *   - Allocates and activates an alternate signal stack (64 KiB).
- *   - All macOS BSD syscalls not in the dispatch table return ENOSYS in rax.
+ *   - All macOS BSD syscalls not in the dispatch table return ENOSYS in rax/x0.
  *
- * Architecture: x86_64 only in this revision.  aarch64 requires reading
- *               the syscall number from x16/x8 in the saved mcontext.
+ * Architecture: x86_64 + aarch64 supported.
+ *
+ *   aarch64 macOS syscall ABI (XNU/iOS/macOS):
+ *     x16 = 0x2000000 | syscall_number  (BSD class)
+ *         = negative 32-bit value         (Mach trap — stored in low 32 bits of x16)
+ *     x0..x5 = args 1-6
+ *     svc #0x80  — the trap instruction (NOT svc #0 which is Linux)
+ *
+ *   FreeBSD aarch64 SIGSYS delivery:
+ *     mc_gpregs.gp_elr points PAST the svc instruction (already advanced).
+ *     mc_gpregs.gp_x[16] holds the original x16 — the macOS syscall class+number.
+ *       (FreeBSD does NOT overwrite x16 with ENOSYS before signal delivery,
+ *        unlike x86-64 where rax is clobbered.  x16 is intact.)
+ *     mc_gpregs.gp_x[0..5] = args 1-6 (intact).
+ *     Stack arg7: [sp+0] — no return-address slot on aarch64 (LR in register).
+ *
+ *   macOS error return (aarch64):
+ *     CPSR carry flag (bit 29) set → x0 = positive errno.
+ *     CPSR carry flag clear      → x0 = return value.
  *
  * Background:
  *   macOS BSD syscall ABI (x86-64):
@@ -167,10 +184,27 @@ freebsd_raw_syscall(long nr, long a1, long a2, long a3,
         : "rcx", "r11", "memory"
     );
 #elif defined(__aarch64__)
-    /* aarch64 stub — implement when aarch64 VM is available */
-    (void)nr; (void)a1; (void)a2; (void)a3;
-    (void)a4; (void)a5; (void)a6;
-    ret = -ENOSYS;
+    /* FreeBSD aarch64 syscall ABI:
+     *   x8 = syscall number, svc #0
+     *   x0..x5 = args; carry flag set on error (x0 = errno).
+     * We negate on error so caller always sees -errno consistently. */
+    register long _nr  __asm__("x8")  = nr;
+    register long _a1  __asm__("x0")  = a1;
+    register long _a2  __asm__("x1")  = a2;
+    register long _a3  __asm__("x2")  = a3;
+    register long _a4  __asm__("x3")  = a4;
+    register long _a5  __asm__("x4")  = a5;
+    register long _a6  __asm__("x5")  = a6;
+    __asm__ volatile (
+        "svc #0\n\t"
+        "b.cc 1f\n\t"   /* branch if carry clear = success */
+        "neg %0, %0\n\t" /* carry set = error: negate to -errno */
+        "1:"
+        : "=r"(_a1)
+        : "r"(_nr), "0"(_a1), "r"(_a2), "r"(_a3), "r"(_a4), "r"(_a5), "r"(_a6)
+        : "memory"
+    );
+    ret = _a1;
 #else
     #error freebsd_syscall_trap.c: unsupported architecture
 #endif
@@ -581,11 +615,72 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
     /* rip is already past the syscall — no mc_rip adjustment needed */
 
 #elif defined(__aarch64__)
-    /* aarch64: stub — TODO */
-    (void)uctx;
-    struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
-    sigaction(SIGSYS, &sa_dfl, NULL);
-    raise(SIGSYS);
+    /*
+     * aarch64 macOS syscall ABI (XNU):
+     *   x16 = 0x2000000 | bsd_nr  (BSD class), or negative Mach trap number.
+     *   x0..x5 = args 1-6.
+     *   svc #0x80 — the trap instruction.
+     *
+     * FreeBSD SIGSYS delivery on aarch64:
+     *   mc_gpregs.gp_elr is already advanced past the svc instruction.
+     *   mc_gpregs.gp_x[16] is intact — NOT overwritten by the kernel.
+     *   mc_gpregs.gp_x[0..5] hold the argument registers (intact).
+     *   Stack arg7: [sp+0] — no return address slot (LR lives in gp_lr).
+     *
+     * Error return (macOS ABI):
+     *   CPSR carry (bit 29 of gp_spsr) set → x0 = positive errno.
+     *   Carry clear → x0 = return value.
+     */
+    mcontext_t *mc = &uctx->uc_mcontext;
+
+    /* x16 holds the intact macOS syscall class+number */
+    uint32_t raw_x16 = (uint32_t)mc->mc_gpregs.gp_x[16];
+
+    long a1 = (long)mc->mc_gpregs.gp_x[0];
+    long a2 = (long)mc->mc_gpregs.gp_x[1];
+    long a3 = (long)mc->mc_gpregs.gp_x[2];
+    long a4 = (long)mc->mc_gpregs.gp_x[3];
+    long a5 = (long)mc->mc_gpregs.gp_x[4];
+    long a6 = (long)mc->mc_gpregs.gp_x[5];
+
+    /* Stack arg7: [sp+0] — no return-address slot on aarch64 */
+    uintptr_t stack_arg1 = *((const uintptr_t *)(uintptr_t)mc->mc_gpregs.gp_sp);
+
+    long ret;
+
+    if ((raw_x16 & MACOS_BSD_CLASS_MASK) == MACOS_BSD_CLASS) {
+        /* ── macOS BSD syscall (class 0x02000000) ──────────────────── */
+        unsigned int macos_nr = MACOS_BSD_NR(raw_x16);
+        ret = dispatch_macos_bsd_syscall(macos_nr, a1, a2, a3, a4, a5, a6);
+    } else if ((int32_t)raw_x16 < 0 && (raw_x16 & MACOS_BSD_CLASS_MASK) == 0xFF000000u) {
+        /* ── macOS Mach trap (negative x16, upper byte = 0xFF) ────────
+         *   e.g. task_self_trap = -28 = 0xFFFFFFE4 in low 32 bits of x16. */
+        int trap_nr = (int32_t)raw_x16;
+        ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6, stack_arg1);
+    } else {
+        /* Unknown syscall class — log and re-raise as default signal */
+        fprintf(stderr,
+            "[darling-mldr] SIGSYS(aarch64): unhandled class 0x%02x"
+            " (x16=0x%08x) at elr=0x%llx\n",
+            (raw_x16 >> 24) & 0xff, raw_x16,
+            (unsigned long long)mc->mc_gpregs.gp_elr);
+        struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+        sigaction(SIGSYS, &sa_dfl, NULL);
+        raise(SIGSYS);
+        return;
+    }
+
+    /* Write result back.
+     * macOS ABI on error: carry flag (bit 29 of CPSR/SPSR) set, x0 = errno.
+     * On success: carry cleared, x0 = return value.
+     * gp_elr already advanced past svc — no adjustment needed. */
+    if (ret < 0) {
+        mc->mc_gpregs.gp_x[0] = (uint64_t)(long)(-ret); /* positive errno */
+        mc->mc_gpregs.gp_spsr |= (1u << 29);              /* set CPSR carry */
+    } else {
+        mc->mc_gpregs.gp_x[0] = (uint64_t)ret;
+        mc->mc_gpregs.gp_spsr &= ~(1u << 29);             /* clear CPSR carry */
+    }
 #else
     (void)uctx;
     struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
@@ -632,7 +727,15 @@ setup_macos_syscall_trap(void)
             strerror(errno));
     } else {
         fprintf(stderr,
-            "[darling-mldr] macOS BSD syscall trap installed (SIGSYS/x86-64)\n");
+            "[darling-mldr] macOS BSD syscall trap installed (SIGSYS/"
+#if defined(__x86_64__)
+            "x86-64"
+#elif defined(__aarch64__)
+            "aarch64"
+#else
+            "unknown-arch"
+#endif
+            ")\n");
     }
 }
 
