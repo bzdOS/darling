@@ -1,14 +1,22 @@
 #!/bin/sh
 # Minimal darling smoke test: mldr → darlingserver checkin → hello-static-macho
-# Must run as root on FreeBSD 15.1 dev VM.
-# Usage: sh /path/to/darling/tests/run-smoke.sh
+# Must run as root on FreeBSD 15.1.
+# Usage: sh tests/run-smoke.sh
+#
+# Environment (optional):
+#   DARLING_BUILD_DIR — path to build output dir (default: /tmp/darling-build)
+#   DARLING_SRC_DIR   — path to repository root  (default: directory of this script/..)
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BD="${DARLING_BUILD_DIR:-/tmp/darling-build}"
+SD="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 
 PREFIX=/tmp/darling-smoke-prefix
 SOCK="${PREFIX}/.darlingserver.sock"
-MLDR=/var/darling-build/dserver/mldr-real/mldr
-DSERVER=/var/darling-build/dserver/darlingserver
-BINARY=/path/to/darling/tests/hello-static-macho
+MLDR="${BD}/dserver/mldr-real/mldr"
+DSERVER="${BD}/dserver/darlingserver"
+BINARY="${SD}/tests/hello-static-macho"
 
 if [ "$(id -u)" != "0" ]; then
     echo "ERROR: must run as root" >&2
