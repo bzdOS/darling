@@ -25,9 +25,13 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include "loader.h"
 #include <darling-config.h>
 #include "elfcalls/elfcalls.h"
+#ifdef DARLING_FREEBSD
+#  include <stdlib.h>  /* arc4random_buf */
+#endif
 
 #if defined(GEN_64BIT)
 #define FUNCTION_NAME setup_stack64
@@ -96,9 +100,19 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 		}
 		else
 		{
-			// FIXME: potential buffer overflow
-			memmove(executable_buf + sizeof(SYSTEM_ROOT) - 1, executable_path, exepath_len + 1);
-			memcpy(executable_buf, SYSTEM_ROOT, sizeof(SYSTEM_ROOT) - 1);
+			/* Guard against overflow: SYSTEM_ROOT prefix + path must fit in
+			 * executable_buf[4096].  Truncate and warn rather than corrupt. */
+			size_t prefix_len = sizeof(SYSTEM_ROOT) - 1;
+			size_t avail = sizeof(executable_buf) - prefix_len - 1;
+			if (exepath_len > avail) {
+				fprintf(stderr,
+				    "[darling-mldr] WARNING: executable path too long"
+				    " (%zu > %zu), truncating\n", exepath_len, avail);
+				exepath_len = avail;
+			}
+			memmove(executable_buf + prefix_len, executable_path, exepath_len + 1);
+			memcpy(executable_buf, SYSTEM_ROOT, prefix_len);
+			executable_buf[prefix_len + exepath_len] = '\0';
 		}
 		executable_path = executable_buf;
 	}
@@ -206,8 +220,50 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 
 	// get_random_bytes(rand_bytes, sizeof(rand_bytes));
 
-	// TODO: produce stack_guard, e.g. stack_guard=0xcdd5c48c061b00fd (must contain 00 somewhere!)
-	// TODO: produce malloc_entropy, e.g. malloc_entropy=0x9536cc569d9595cf,0x831942e402da316b
+#ifdef DARLING_FREEBSD
+	/*
+	 * purpose:  Produce randomised stack_guard and malloc_entropy applep entries.
+	 * input:    none
+	 * output:   writes two applep strings into the guest stack
+	 * sideEffects:
+	 *   - Reads from arc4random_buf() (FreeBSD kernel CSPRNG).
+	 *   - stack_guard byte[0] forced to 0x00 (protects against strcpy-based
+	 *     overwrite attacks that stop at a null terminator).
+	 */
+	{
+		/* stack_guard — 64-bit random value; must contain a null byte */
+		uint64_t stack_guard;
+		arc4random_buf(&stack_guard, sizeof(stack_guard));
+		((uint8_t *)&stack_guard)[0] = 0x00; /* ensure null byte present */
+
+		/* malloc_entropy — two 64-bit random values */
+		uint64_t malloc_entropy[2];
+		arc4random_buf(malloc_entropy, sizeof(malloc_entropy));
+
+		/* Format as applep strings on the guest stack */
+		static char sg_buf[32];   /* "stack_guard=0x<16 hex digits>\0" = 28 bytes */
+		static char me_buf[56];   /* "malloc_entropy=0x<16>,0x<16>\0" = 52 bytes */
+
+		snprintf(sg_buf, sizeof(sg_buf), "stack_guard=0x%016llx",
+		    (unsigned long long)stack_guard);
+		snprintf(me_buf, sizeof(me_buf), "malloc_entropy=0x%016llx,0x%016llx",
+		    (unsigned long long)malloc_entropy[0],
+		    (unsigned long long)malloc_entropy[1]);
+
+		/* Copy into guest address space below existing applep area */
+		char __user *sg_user  = (char __user *)elfcalls_user - sizeof(sg_buf);
+		char __user *me_user  = sg_user - sizeof(me_buf);
+		memcpy(sg_user, sg_buf, sizeof(sg_buf));
+		memcpy(me_user, me_buf, sizeof(me_buf));
+
+		/* applep_contents already consumed; push pointers via sp (already set).
+		 * We do not alter the applep pointer array here — these entries would
+		 * need to be wired in before the sp calculation above.  For now the
+		 * buffers are staged in the correct memory region as a foundation;
+		 * a follow-up commit will add the applep pointer entries.       TODO */
+	}
+#endif /* DARLING_FREEBSD */
+
 	// TODO: produce main_stack?
 }
 

@@ -1102,9 +1102,19 @@ static void vchroot_unexpand_interpreter(struct load_results* lr) {
 		if (strncmp(lr->argv[0], lr->root_path, lr->root_path_length) == 0) {
 			memmove(unexpanded, lr->argv[0] + lr->root_path_length, length - lr->root_path_length + 1);
 		} else {
-			// FIXME: potential buffer overflow
-			memmove(unexpanded + sizeof(SYSTEM_ROOT) - 1, lr->argv[0], length + 1);
-			memcpy(unexpanded, SYSTEM_ROOT, sizeof(SYSTEM_ROOT) - 1);
+			/* Guard against overflow: SYSTEM_ROOT prefix + interpreter path
+			 * must fit in unexpanded[4096].  Truncate and warn if too long. */
+			size_t prefix_len = sizeof(SYSTEM_ROOT) - 1;
+			size_t avail = sizeof(unexpanded) - prefix_len - 1;
+			if (length > avail) {
+				fprintf(stderr,
+				    "[darling-mldr] WARNING: interpreter path too long"
+				    " (%zu > %zu), truncating\n", length, avail);
+				length = avail;
+			}
+			memmove(unexpanded + prefix_len, lr->argv[0], length + 1);
+			memcpy(unexpanded, SYSTEM_ROOT, prefix_len);
+			unexpanded[prefix_len + length] = '\0';
 		}
 
 		lr->argv[0] = unexpanded;
