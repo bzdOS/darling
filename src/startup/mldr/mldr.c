@@ -284,10 +284,17 @@ int main(int argc, char** argv, char** envp)
 		exit(1);
 	}
 
+#ifndef DARLING_FREEBSD
+	// On FreeBSD, process_vm_readv is shimmed via ptrace(PT_IO) which requires
+	// a stopped process. Since mldr is alive and running when darlingserver tries
+	// to read the path pointer, PT_IO returns EINVAL. The executable path is used
+	// only for debugging; skip this call for now.
+	// TODO: pass path inline via a new RPC body field or use PT_ATTACH/PT_DETACH.
 	if (dserver_rpc_set_executable_path(filename, strlen(filename)) < 0) {
 		fprintf(stderr, "Failed to tell darlingserver about our executable path\n");
 		exit(1);
 	}
+#endif // !DARLING_FREEBSD
 
 	__mldr_main_stack_top = (void*)mldr_load_results.stack_top;
 
@@ -761,10 +768,27 @@ int __mldr_create_rpc_socket(void) {
 		goto err_out;
 	}
 
+#ifdef DARLING_FREEBSD
+	// FreeBSD has no abstract UNIX socket namespace; autobind is unsupported.
+	// Create a unique filesystem socket path instead.
+	static char __mldr_rpc_sock_path[108];
+	snprintf(__mldr_rpc_sock_path, sizeof(__mldr_rpc_sock_path),
+	         "/tmp/darling-mldr-%d", (int)getpid());
+	struct sockaddr_un sa_client;
+	memset(&sa_client, 0, sizeof(sa_client));
+	sa_client.sun_family = AF_UNIX;
+	strlcpy(sa_client.sun_path, __mldr_rpc_sock_path, sizeof(sa_client.sun_path));
+	sa_client.sun_len = sizeof(sa_client);
+	unlink(__mldr_rpc_sock_path); // remove stale socket if any
+	if (bind(fd, (const struct sockaddr*)&sa_client, sizeof(sa_client)) < 0) {
+		goto err_out;
+	}
+#else
 	sa_family_t family = AF_UNIX;
 	if (bind(fd, (const struct sockaddr*)&family, sizeof(family)) < 0) {
 		goto err_out;
 	}
+#endif // !DARLING_FREEBSD
 
 out:
 	return fd;
@@ -785,6 +809,12 @@ err_out:
 void __mldr_close_rpc_socket(int socket) {
 	close(socket);
 	socket_bitmap_put(&socket_bitmap, socket);
+#ifdef DARLING_FREEBSD
+	// Clean up the filesystem socket created in __mldr_create_rpc_socket.
+	char path[108];
+	snprintf(path, sizeof(path), "/tmp/darling-mldr-%d", (int)getpid());
+	unlink(path);
+#endif
 };
 
 int __mldr_create_process_lifetime_pipe(int* fds) {

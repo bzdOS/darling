@@ -56,7 +56,7 @@ static int get_errno(void)
 	return errno;
 }
 
-extern struct sockaddr_un __dserver_socket_address_data[];
+extern struct sockaddr_un __dserver_socket_address_data;
 
 static const void* __dserver_socket_address(void) {
 	return &__dserver_socket_address_data;
