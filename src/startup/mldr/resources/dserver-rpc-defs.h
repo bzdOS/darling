@@ -1,7 +1,6 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <sys/syscall.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -10,7 +9,23 @@
 
 #include <darlingserver/rpc-supplement.h>
 
+#ifdef DARLING_FREEBSD
+/* FreeBSD: no rtsig.h; define LINUX_SIGRTMIN as Linux uses value 32 */
+#define LINUX_SIGRTMIN 32
+#include <sys/thr.h>
+#include <pthread_np.h>
+static inline pid_t __freebsd_gettid(void) {
+	long id;
+	thr_self(&id);
+	return (pid_t)id;
+}
+/* Main-thread check: on Linux pid==tid for main thread; FreeBSD uses pthread_main_np() */
+#define __darling_is_main_thread() (pthread_main_np() != 0)
+#else
+#include <sys/syscall.h>
 #include <rtsig.h>
+#define __darling_is_main_thread() (getpid() == syscall(SYS_gettid))
+#endif
 
 #define dserver_rpc_hooks_msghdr_t struct msghdr
 #define dserver_rpc_hooks_iovec_t struct iovec
@@ -25,7 +40,11 @@
 
 #define dserver_rpc_hooks_get_pid getpid
 
+#ifdef DARLING_FREEBSD
+#define dserver_rpc_hooks_get_tid() __freebsd_gettid()
+#else
 #define dserver_rpc_hooks_get_tid() ((pid_t)syscall(SYS_gettid))
+#endif
 
 #if __x86_64__
 	#define dserver_rpc_hooks_get_architecture() dserver_rpc_architecture_x86_64
@@ -76,7 +95,12 @@ static long int dserver_rpc_hooks_receive_message(int socket, dserver_rpc_hooks_
 
 #define dserver_rpc_hooks_get_bad_message_status() (-EBADMSG)
 
+/* ECOMM is Linux-only; map to ECONNRESET on FreeBSD */
+#ifdef ECOMM
 #define dserver_rpc_hooks_get_communication_error_status() (-ECOMM)
+#else
+#define dserver_rpc_hooks_get_communication_error_status() (-ECONNRESET)
+#endif
 
 #define dserver_rpc_hooks_get_broken_pipe_status() (-EPIPE)
 

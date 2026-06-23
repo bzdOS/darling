@@ -7,7 +7,7 @@
 #pragma once
 #include_next <sys/uio.h>
 
-#ifdef DARLING_FREEBSD
+#if defined(DARLING_FREEBSD) && !defined(KERNEL)
 #include <sys/ptrace.h>
 #include <sys/types.h>
 
