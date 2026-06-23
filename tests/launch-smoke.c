@@ -3,8 +3,12 @@
  * Starts darlingserver in a subprocess (proper pipefd handshake),
  * waits for it to bind its socket, then execs mldr on a static Mach-O.
  *
- * Build: cc -o /tmp/launch-smoke /path/to/darling/tests/launch-smoke.c
- * Run as root on FreeBSD 15.1 dev VM.
+ * Build: cc -o /tmp/launch-smoke tests/launch-smoke.c
+ * Run as root on FreeBSD 15.1.
+ *
+ * Environment (optional):
+ *   DARLING_BUILD_DIR — path to build output dir (default: /tmp/darling-build)
+ *   DARLING_SRC_DIR   — path to repository root  (default: derived from binary path)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,9 +23,13 @@
 
 #define PREFIX        "/tmp/darling-smoke"
 #define SOCK_PATH     PREFIX "/.darlingserver.sock"
-#define DSERVER       "/var/darling-build/dserver/darlingserver"
-#define MLDR          "/var/darling-build/dserver/mldr-real/mldr"
-#define BINARY        "/path/to/darling/tests/hello-static-macho"
+
+/* Paths resolved at runtime from DARLING_BUILD_DIR / DARLING_SRC_DIR env vars.
+ * Defaults:  build_dir = /tmp/darling-build,  src_dir = two dirs above this file. */
+static const char *build_dir(void) {
+    const char *v = getenv("DARLING_BUILD_DIR");
+    return v ? v : "/tmp/darling-build";
+}
 
 static void cleanup(void) {
     system("pkill -9 darlingserver 2>/dev/null");
@@ -33,6 +41,18 @@ int main(void) {
         fprintf(stderr, "Must run as root\n");
         return 1;
     }
+
+    /* Build runtime paths from environment or defaults */
+    char dserver[512], mldr[512], binary[512];
+    const char *bd = build_dir();
+    const char *sd = getenv("DARLING_SRC_DIR");
+    /* If DARLING_SRC_DIR not set, assume tests/ is next to the repo root
+     * (user compiled with: cc -o /tmp/launch-smoke tests/launch-smoke.c). */
+    if (!sd) sd = "..";
+
+    snprintf(dserver, sizeof(dserver), "%s/dserver/darlingserver", bd);
+    snprintf(mldr,    sizeof(mldr),    "%s/dserver/mldr-real/mldr", bd);
+    snprintf(binary,  sizeof(binary),  "%s/tests/hello-static-macho", sd);
 
     cleanup();
     mkdir(PREFIX, 0755);
@@ -60,7 +80,7 @@ int main(void) {
         snprintf(uidstr, sizeof(uidstr), "%d", (int)getuid());
         snprintf(gidstr, sizeof(gidstr), "%d", (int)getgid());
 
-        execl(DSERVER, "darlingserver",
+        execl(dserver, "darlingserver",
               PREFIX, uidstr, gidstr, pipestr, "0",
               (char*)NULL);
         perror("execl darlingserver");
@@ -96,10 +116,10 @@ int main(void) {
     setenv("__mldr_sockpath", SOCK_PATH, 1);
     setenv("__mldr_DYLD_ROOT_PATH", PREFIX, 1);
 
-    printf("Running: %s %s\n", MLDR, BINARY);
+    printf("Running: %s %s\n", mldr, binary);
     fflush(stdout);
 
-    execl(MLDR, MLDR, BINARY, (char*)NULL);
+    execl(mldr, mldr, binary, (char*)NULL);
     perror("execl mldr");
     cleanup();
     return 1;

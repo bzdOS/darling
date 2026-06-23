@@ -1,72 +1,93 @@
-# Darling
+# darling-freebsd
 
-![Darling logo](https://darlinghq.org/img/darling250.png)
+FreeBSD port of Darling — a macOS compatibility layer for BSD systems.
 
-Darling is a runtime environment for macOS applications.
+Runs static Mach-O x86-64 binaries on FreeBSD 15.1 using:
+- darlingserver (Mach IPC, thread management)
+- mldr (Mach-O loader)
+- SIGSYS-based macOS syscall interception (~25 BSD syscalls translated)
 
-Please note that most GUI applications will not run at the moment.
+## Status
 
-## Download
+- [x] darlingserver compiles on FreeBSD 15.1
+- [x] mldr compiles on FreeBSD 15.1
+- [x] Static Mach-O x86-64 loads and runs
+- [x] macOS BSD syscall ABI intercepted (write, exit, mmap, sysctl, ...)
+- [ ] dyld / dynamic linking
+- [ ] aarch64
 
-Packages for some distributions are available for download
-under [releases](https://github.com/darlinghq/darling/releases).
+## Building on FreeBSD 15.1
 
-## Build Instructions
-
-For build instructions, visit [Darling Docs](https://docs.darlinghq.org/build-instructions.html).
-
-### Prefixes
-
-Darling has support for DPREFIXes, which are very similar to WINEPREFIXes. They are virtual “chroot” environments with an macOS-like filesystem structure, where you can install software safely. The default DPREFIX location is `~/.darling`, but this can be changed by exporting an identically named environment variable. A prefix is automatically created and initialized on first use.
-
-Please note that we use `overlayfs` for creating prefixes, and so we cannot support putting prefix on a filesystem like NFS or eCryptfs. In particular, the default prefix location won't work if you have an encrypted home directory.
-
-### Hello world
-
-Let's start with a Hello world:
-
-````
-$ darling shell echo Hello world
-Hello world
-````
-
-Congratulations, you have printed Hello world through Darling's OS X system call emulation and runtime libraries.
-
-### Installing software
-
-You can install `.pkg` packages with the installer tool available inside shell. It is a somewhat limited cousin of OS X's installer:
-
-````
-$ darling shell
-Darling [~]$ installer -pkg mc-4.8.7-0.pkg -target /
-````
-
-The Midnight Commander package from the above example is [available for download](https://darling-misc.s3.eu-central-1.amazonaws.com/mc-4.8.7-0.pkg).
-
-You can uninstall and list packages with the `uninstaller` command.
-
-### Working with DMG images
-
-DMG images can be attached and detached from inside `darling shell` with `hdiutil`. This is how you can install Xcode along with its toolchain and SDKs (note that Xcode itself doesn't run yet):
-
-````
-Darling [~]$ hdiutil attach Xcode_7.2.dmg
-/Volumes/Xcode_7.2
-Darling [~]$ cp -r /Volumes/Xcode_7.2/Xcode.app /Applications
-Darling [~]$ export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk
-Darling [~]$ echo 'void main() { puts("Hello world"); }' > helloworld.c
-Darling [~]$ /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang helloworld.c -o helloworld
-Darling [~]$ ./helloworld
-Hello world
-````
-
-Congratulations, you have just compiled and run your own Hello world application with Apple's toolchain.
-
-### Working with XIP archives
-
-Xcode is now distributed in `.xip` files. These can be installed using `unxip`:
+### Prerequisites
 
 ```
-cd /Applications
-unxip Xcode_11.3.xip
+pkg install cmake ninja llvm git bison flex epoll-shim
 ```
+
+### duct-tape (Mach IPC emulation — build first)
+
+```
+su -m root -c 'sh build-freebsd/build-dtape.sh 2>&1 | tee /tmp/dtape-build.log'
+```
+
+### darlingserver + mldr
+
+```
+sh build-freebsd/build-darlingserver.sh
+```
+
+Build output goes to `${DARLING_BUILD_DIR:-/tmp/darling-build}`.
+
+To use a custom build directory:
+
+```
+export DARLING_BUILD_DIR=/your/build/dir
+sh build-freebsd/build-darlingserver.sh
+```
+
+To build against a checkout at a non-default location:
+
+```
+export DARLING_SRC_DIR=/path/to/darling-freebsd
+sh build-freebsd/build-darlingserver.sh
+```
+
+### mldr only (darlingserver already built)
+
+```
+sh build-freebsd/build-mldr-only.sh
+```
+
+## Running the smoke test
+
+```
+cd tests
+cc -o /tmp/launch-smoke launch-smoke.c
+sudo /tmp/launch-smoke
+# Expected: "hello" printed to stdout
+```
+
+Or use the shell wrapper:
+
+```
+sudo sh tests/run-smoke.sh
+```
+
+Both scripts respect `DARLING_BUILD_DIR` and `DARLING_SRC_DIR`.
+
+## Architecture
+
+FreeBSD differences from Linux Darling:
+
+- No `/proc/task/` — thread IDs via kqueue/`thr_self()`
+- No abstract UNIX sockets — filesystem socket `/tmp/darling-mldr-<pid>`
+- No seccomp/ptrace on live process — SIGSYS handler recovers macOS syscall
+  number by scanning `MOV EAX,imm32` bytes preceding `SYSCALL` opcode
+- `MAP_FIXED_NOREPLACE` = `MAP_FIXED|MAP_EXCL` on FreeBSD — WSL1 hack bypassed
+
+FreeBSD-specific sources live in `src/startup/` (`bsdos_posix_compat.c`,
+`freebsd_syscall_trap.c`) and build scripts in `build-freebsd/`.
+
+## License
+
+GPL-3 (see `LICENSE`). Upstream Darling components are LGPLv2.1.

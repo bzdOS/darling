@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build duct-tape (XNU Mach IPC) for FreeBSD 15.1.
-# Run on the build VM:
-#   su -m root -c 'sh /path/to/darling/build-freebsd/build-dtape.sh 2>&1 | tee /tmp/dtape-build.log'
+# Usage:
+#   su -m root -c 'sh build-freebsd/build-dtape.sh 2>&1 | tee /tmp/dtape-build.log'
 #
 # Steps:
 #   1. Build mig (Mach Interface Generator) from bootstrap_cmds
@@ -9,14 +9,19 @@
 #   3. Compile all duct-tape source files, report errors per file
 #
 # Requires: pkg install cmake bison flex llvm
+#
+# Environment:
+#   DARLING_BUILD_DIR  — where build artefacts go (default: /tmp/darling-build)
+#   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 set -e
 
-ROOT=/path/to/darling/src
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src"
 DS=${ROOT}/external/darlingserver
 DT=${DS}/duct-tape
 BOOT=${ROOT}/external/bootstrap_cmds
 COMPAT=${ROOT}/startup/compat-includes
-BUILD=/var/darling-build/dtape
+BUILD="${DARLING_BUILD_DIR:-/tmp/darling-build}/dtape"
 
 mkdir -p "${BUILD}"
 
@@ -433,8 +438,8 @@ COMPAT_FLAGS="\
 compile_one "${DT}/src/freebsd_compat.c" "${COMPAT_FLAGS}"
 
 # kern_synch.c: use pre-staged headers to avoid 9p EMSGSIZE on pthread/kern symlinks.
-# pthread-staged/ is committed to host /path/to/workspace and visible via 9p without broken symlinks.
-PTHREAD_STAGED="/path/to/darling/build-freebsd/pthread-staged"
+# pthread-staged/ is committed to the repo to avoid broken symlinks.
+PTHREAD_STAGED="${SCRIPT_DIR}/build-freebsd/pthread-staged"
 
 OBJ="${DTBUILD}/objs/kern_synch.o"
 # Compile staged kern_synch.c so "kern/..." includes resolve from PTHREAD_STAGED
