@@ -1,5 +1,51 @@
 cmake_minimum_required(VERSION 3.13)
 
+# FreeBSD compat — must come before project() so pkg-config paths and
+# disabled components are in effect for all subsequent find_package() calls.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FreeBSD.cmake OPTIONAL)
+
+# BSDOS_STARTUP_ONLY: build only the darling startup binary + freebsd_jail.c.
+# Used for the FreeBSD incremental port: avoids pulling in 100+ uninitialized
+# submodules.  Set via: cmake -DBSDOS_STARTUP_ONLY=ON ...
+option(BSDOS_STARTUP_ONLY "Build only the darling startup binary (FreeBSD port)" OFF)
+
+if(BSDOS_STARTUP_ONLY AND FREEBSD_COMPAT)
+    project(darling-freebsd-startup C ASM)
+
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -ggdb -O0")
+
+    set(GIT_BRANCH "pr-arm64")
+    set(GIT_COMMIT_HASH "freebsd-port")
+    set(CMAKE_INSTALL_LIBDIR "lib")
+    set(SUFFIX "")
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/include/darling-config.h.in
+        ${CMAKE_BINARY_DIR}/darling-config.h
+    )
+
+    include_directories(
+        ${DARLING_FREEBSD_SHIM_INCLUDES}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/external/darlingserver/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/startup
+        ${CMAKE_BINARY_DIR}
+    )
+
+    add_definitions(-DINSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}" -D_GNU_SOURCE -DMLDR_BUILD)
+
+    add_executable(darling
+        src/startup/darling.c
+        src/startup/freebsd_jail.c
+    )
+    target_link_libraries(darling -lutil -ljail)
+
+    install(TARGETS darling DESTINATION bin
+        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                    GROUP_READ GROUP_EXECUTE
+                    WORLD_READ WORLD_EXECUTE SETUID)
+
+    return()
+endif()
+
 SET(CMAKE_SYSTEM_NAME Linux)
 
 # Detect host architecture before project() since CMAKE_HOST_SYSTEM_PROCESSOR
@@ -203,7 +249,13 @@ if(BUILD_METAL STREQUAL "auto")
 endif()
 
 FindDsymutil()
-find_package(Setcap REQUIRED)
+if(FREEBSD_COMPAT)
+    # FreeBSD uses setuid bits instead of Linux capabilities; setcap not needed.
+    set(SETCAP_FOUND TRUE)
+    set(SETCAP_EXECUTABLE "/usr/bin/true")
+else()
+    find_package(Setcap REQUIRED)
+endif()
 
 # Missing CMakeLists.txt must trigger an error
 cmake_policy(SET CMP0014 NEW)
