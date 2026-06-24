@@ -220,10 +220,14 @@ freebsd_raw_syscall(long nr, long a1, long a2, long a3,
  *
  *           On FreeBSD, mc_rip points past the `syscall` instruction when
  *           SIGSYS is delivered, and mc_rax has been overwritten with ENOSYS.
- *           To recover the original number we scan back for:
- *             rip[-7] = 0xb8          (MOV EAX, imm32)
- *             rip[-6..rip-3] = imm32  (the macOS syscall class+number)
- *             rip[-2..rip-1] = 0f 05  (SYSCALL opcode)
+ *           We scan backward from rip for:
+ *             rip[-7-N] = 0xb8          (MOV EAX, imm32)
+ *             rip[-6-N..rip-3-N] = imm32 (the macOS syscall class+number)
+ *             rip[-2-N..rip-1-N] = padding (N bytes; NOP/alignment/REX)
+ *             rip[-2..-1] = 0f 05       (SYSCALL opcode)
+ *           where N is 0..32 (handles NOP alignment pads in dyld stubs).
+ *           The recovered imm32 must have class byte 0x02 (BSD) or 0xFF (Mach)
+ *           to distinguish from false 0xB8 hits in instruction operands.
  *
  * input:    rip_ptr — mc_rip as a byte pointer (points past SYSCALL)
  * output:   recovered eax value, or 0 if the pattern is not found
@@ -236,12 +240,33 @@ recover_macos_syscall_nr(const uint8_t *rip_ptr)
     if (rip_ptr[-2] != 0x0f || rip_ptr[-1] != 0x05) {
         return 0;
     }
-    /* Check for MOV EAX, imm32 (opcode 0xB8) 5 bytes earlier */
-    if (rip_ptr[-7] == 0xb8) {
-        uint32_t nr;
-        memcpy(&nr, rip_ptr - 6, 4);
-        return nr;
+
+    /* Scan backward up to 32 bytes for MOV EAX, imm32 (0xB8 followed by 4
+     * immediate bytes) with N bytes of padding between the end of MOV and the
+     * start of SYSCALL.  For N=0 this is the standard 7-byte stub pattern.
+     *
+     * Layout for given N:
+     *   rip[-7-N] = 0xB8           (MOV EAX opcode)
+     *   rip[-6-N..-3-N] = imm32    (macOS syscall number)
+     *   rip[-2-N..-1-N] = padding  (N bytes; NOP/alignment/REX prefixes)
+     *   rip[-2..-1] = 0F 05        (SYSCALL — already confirmed above)
+     *
+     * We gate on the class byte (imm32 >> 24) being 0x02 (BSD) or 0xFF (Mach)
+     * to reject false 0xB8 hits from unrelated instruction operands. */
+#define SCAN_MAX 32
+    for (int n = 0; n <= SCAN_MAX; n++) {
+        const uint8_t *p = rip_ptr - 7 - n;
+        if (*p == 0xb8) {
+            uint32_t nr;
+            memcpy(&nr, p + 1, 4);
+            uint8_t cls = (uint8_t)(nr >> 24);
+            if (cls == 0x02 || cls == 0xFF) {
+                return nr;
+            }
+        }
     }
+#undef SCAN_MAX
+
     return 0;
 }
 #endif /* __x86_64__ */
@@ -521,8 +546,8 @@ dispatch_mach_trap(int trap_nr,
  *             - mc_rip is already advanced past the syscall instruction.
  *             - mc_rax has been overwritten with ENOSYS by the kernel.
  *             - Argument registers (rdi, rsi, rdx, r10, r8, r9) are intact.
- *             - The original eax is recovered from instruction bytes at
- *               rip[-7..rip-3] (MOV EAX, imm32 opcode + immediate).
+ *             - The original eax is recovered by scanning backward from rip
+ *               for B8 (MOV EAX, imm32) with a valid macOS class byte.
  *
  * input:    signo — SIGSYS
  *           info  — siginfo_t
@@ -547,12 +572,15 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
     uint32_t raw_eax = recover_macos_syscall_nr(rip);
 
     if (raw_eax == 0) {
-        /* Could not recover — fallback to default handler */
+        /* Could not recover — dump 16 bytes before rip for diagnosis */
         fprintf(stderr,
-            "[darling-mldr] SIGSYS: cannot recover syscall nr at rip=0x%llx "
-            "(bytes[-2]=0x%02x [-1]=0x%02x [-7]=0x%02x)\n",
-            (unsigned long long)mc->mc_rip,
-            rip[-2], rip[-1], rip[-7]);
+            "[darling-mldr] SIGSYS: cannot recover syscall nr at rip=0x%llx\n"
+            "  bytes[-16..+1]:",
+            (unsigned long long)mc->mc_rip);
+        for (int i = -16; i <= 1; i++) {
+            fprintf(stderr, " %02x", (unsigned)rip[i]);
+        }
+        fprintf(stderr, "\n");
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
         sigaction(SIGSYS, &sa_dfl, NULL);
         raise(SIGSYS);
@@ -700,6 +728,42 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
  *   - Allocates and activates an alternate signal stack.
  *   - Installs SIGSYS handler with SA_SIGINFO | SA_ONSTACK | SA_RESTART.
  */
+/* ── SIGBUS/SIGSEGV debug handler ─────────────────────────────────────────── */
+
+#if defined(__x86_64__)
+static void
+crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
+{
+    ucontext_t *uctx = (ucontext_t *)uctx_void;
+    mcontext_t *mc   = &uctx->uc_mcontext;
+
+    fprintf(stderr,
+        "[darling-mldr] FATAL signal %d (code=%d) at addr=%p\n"
+        "  rip=0x%016llx  rax=0x%016llx  rbx=0x%016llx\n"
+        "  rcx=0x%016llx  rdx=0x%016llx  rsi=0x%016llx\n"
+        "  rdi=0x%016llx  rbp=0x%016llx  rsp=0x%016llx\n"
+        "  r8 =0x%016llx  r9 =0x%016llx  r10=0x%016llx\n"
+        "  r11=0x%016llx  r12=0x%016llx  r13=0x%016llx\n"
+        "  r14=0x%016llx  r15=0x%016llx\n",
+        signo, info->si_code, info->si_addr,
+        (unsigned long long)mc->mc_rip,
+        (unsigned long long)mc->mc_rax, (unsigned long long)mc->mc_rbx,
+        (unsigned long long)mc->mc_rcx, (unsigned long long)mc->mc_rdx,
+        (unsigned long long)mc->mc_rsi, (unsigned long long)mc->mc_rdi,
+        (unsigned long long)mc->mc_rbp, (unsigned long long)mc->mc_rsp,
+        (unsigned long long)mc->mc_r8,  (unsigned long long)mc->mc_r9,
+        (unsigned long long)mc->mc_r10, (unsigned long long)mc->mc_r11,
+        (unsigned long long)mc->mc_r12, (unsigned long long)mc->mc_r13,
+        (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
+    fflush(stderr);
+
+    /* Re-raise as default action so the process terminates with correct signal */
+    struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+    sigaction(signo, &sa_dfl, NULL);
+    raise(signo);
+}
+#endif /* __x86_64__ */
+
 void
 setup_macos_syscall_trap(void)
 {
@@ -737,6 +801,17 @@ setup_macos_syscall_trap(void)
 #endif
             ")\n");
     }
+
+#if defined(__x86_64__)
+    /* Install SIGBUS/SIGSEGV debug handler to diagnose dyld startup crashes */
+    struct sigaction sa_crash;
+    memset(&sa_crash, 0, sizeof(sa_crash));
+    sa_crash.sa_sigaction = crash_debug_handler;
+    sigemptyset(&sa_crash.sa_mask);
+    sa_crash.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGBUS,  &sa_crash, NULL);
+    sigaction(SIGSEGV, &sa_crash, NULL);
+#endif
 }
 
 #endif /* DARLING_FREEBSD */
