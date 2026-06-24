@@ -39,6 +39,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
 #ifdef DARLING_FREEBSD
 #include <sys/endian.h>
 #include <sys/sysctl.h>
+/* FreeBSD uses bswap32(); provide Linux-compat alias used by SWAP32 macro */
+#define __bswap_32 bswap32
 #else
 #include <endian.h>
 #endif
@@ -307,6 +309,26 @@ int main(int argc, char** argv, char** envp)
 	 * instruction (eax = 0x2000000 | nr) causes an unhandled SIGSYS
 	 * because FreeBSD does not know those syscall numbers. */
 	setup_macos_syscall_trap();
+#endif
+
+#ifdef DARLING_FREEBSD
+	{
+		unsigned long st = mldr_load_results.stack_top;
+		fprintf(stderr,
+		    "[darling-mldr] DEBUG pre-start: mh=0x%lx entry=0x%lx stack_top=0x%lx\n",
+		    (unsigned long)mldr_load_results.mh,
+		    (unsigned long)mldr_load_results.entry_point,
+		    st);
+		/* Dump first 32 slots of the stack to verify applep pointers */
+		unsigned long *sp = (unsigned long *)st;
+		fprintf(stderr, "[darling-mldr] DEBUG stack slots:\n");
+		for (int _i = 0; _i < 32; _i++) {
+		    const char *label = "";
+		    if (_i == 0) label = " (mh)";
+		    else if (_i == 1) label = " (argc)";
+		    fprintf(stderr, "  [%2d] 0x%016lx%s\n", _i, sp[_i], label);
+		}
+	}
 #endif
 
 	start_thread(&mldr_load_results);
