@@ -77,3 +77,6 @@ debian/*.substvars
 
 .idea
 cmake-build-*
+
+.virtfs_metadata/
+build-freebsd/pthread-staged/
