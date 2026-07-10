@@ -234,12 +234,14 @@ freebsd_raw_syscall(long nr, long a1, long a2, long a3,
  * sideEffects: none (read-only access to faulting instruction bytes)
  */
 static uint32_t
-recover_macos_syscall_nr(const uint8_t *rip_ptr)
+recover_macos_syscall_nr(const uint8_t *rip_ptr, const uint8_t *rsp_ptr)
 {
     /* Confirm bytes[-2..-1] are the SYSCALL opcode (0F 05) */
     if (rip_ptr[-2] != 0x0f || rip_ptr[-1] != 0x05) {
         return 0;
     }
+
+#define SCAN_MAX 32
 
     /* Scan backward up to 32 bytes for MOV EAX, imm32 (0xB8 followed by 4
      * immediate bytes) with N bytes of padding between the end of MOV and the
@@ -253,7 +255,6 @@ recover_macos_syscall_nr(const uint8_t *rip_ptr)
      *
      * We gate on the class byte (imm32 >> 24) being 0x02 (BSD) or 0xFF (Mach)
      * to reject false 0xB8 hits from unrelated instruction operands. */
-#define SCAN_MAX 32
     for (int n = 0; n <= SCAN_MAX; n++) {
         const uint8_t *p = rip_ptr - 7 - n;
         if (*p == 0xb8) {
@@ -265,6 +266,32 @@ recover_macos_syscall_nr(const uint8_t *rip_ptr)
             }
         }
     }
+
+    /* Fallback: generic/variadic syscall wrappers (e.g. libSystem's
+     * `syscall(2)`, which dyld's own bootstrap uses) take the macOS syscall
+     * number as a caller-supplied RUNTIME value, not a compile-time constant,
+     * so they cannot use MOV EAX,imm32. The observed pattern instead spills
+     * the number to a stack slot in the prologue and reloads it right before
+     * the trap:
+     *   8B 44 24 disp8   MOV EAX, [RSP+disp8]   (reload syscall nr)
+     *   ...                                      (e.g. MOV R10, RCX — syscall-ABI reg fixup)
+     *   0F 05            SYSCALL                 (already confirmed above)
+     * RSP is intact at signal-delivery time (only RAX is clobbered by the
+     * kernel's ENOSYS), so [RSP+disp8] still holds the real value — read it
+     * from the saved context instead of decoding an immediate. */
+    for (int n = 0; n <= SCAN_MAX; n++) {
+        const uint8_t *p = rip_ptr - 4 - n;
+        if (p[0] == 0x8b && p[1] == 0x44 && p[2] == 0x24) {
+            int8_t disp8 = (int8_t)p[3];
+            uint32_t nr;
+            memcpy(&nr, rsp_ptr + disp8, 4);
+            uint8_t cls = (uint8_t)(nr >> 24);
+            if (cls == 0x02 || cls == 0xFF) {
+                return nr;
+            }
+        }
+    }
+
 #undef SCAN_MAX
 
     return 0;
@@ -567,9 +594,11 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
 #if defined(__x86_64__)
     mcontext_t *mc = &uctx->uc_mcontext;
 
-    /* Recover the original macOS syscall number from instruction bytes */
+    /* Recover the original macOS syscall number from instruction bytes
+     * (or, for variadic wrappers, from the saved stack — see the function). */
     const uint8_t *rip = (const uint8_t *)(uintptr_t)mc->mc_rip;
-    uint32_t raw_eax = recover_macos_syscall_nr(rip);
+    const uint8_t *rsp = (const uint8_t *)(uintptr_t)mc->mc_rsp;
+    uint32_t raw_eax = recover_macos_syscall_nr(rip, rsp);
 
     if (raw_eax == 0) {
         /* Could not recover — dump 16 bytes before rip for diagnosis */
@@ -756,6 +785,19 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
         (unsigned long long)mc->mc_r12, (unsigned long long)mc->mc_r13,
         (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
     fflush(stderr);
+
+    /* DEBUG (dyld M0 investigation, temporary): dump the stack at rsp — if the
+     * crashing function was entered via a plain `call` with no prologue yet
+     * (rbp==rsp, as observed for this crash), *(uint64_t*)rsp is the caller's
+     * return address, identifying WHO calls into the crashing function. */
+    {
+        fprintf(stderr, "  stack dump at rsp=0x%016llx:\n", (unsigned long long)mc->mc_rsp);
+        volatile unsigned long long *sp = (unsigned long long *)(uintptr_t)mc->mc_rsp;
+        for (int i = 0; i < 16; i++) {
+            fprintf(stderr, "  [rsp+%3d] 0x%016llx\n", i * 8, sp[i]);
+        }
+        fflush(stderr);
+    }
 
     /* Re-raise as default action so the process terminates with correct signal */
     struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
