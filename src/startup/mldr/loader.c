@@ -168,9 +168,25 @@ void FUNCTION_NAME(int fd, bool expect_dylinker, struct load_results* lr)
 			next_low_addr = (slide + mmapSize + 0xffffff) & ~0xffffffULL;
 #endif
 
+#ifndef DARLING_FREEBSD
 		// unmap it so we can map the actual segments later using MAP_FIXED_NOREPLACE;
 		// we're the only thread running, so there's no chance this memory range will become occupied from now until then
 		munmap((void*)slide, mmapSize);
+#else
+		// #197 (ASLR-dependent SIGBUS): on FreeBSD MAP_FIXED_NOREPLACE is aliased
+		// to plain MAP_FIXED (see the top of this file) -- it has no EEXIST-style
+		// collision detection. If we release this reservation now, the "only
+		// thread running" assumption above is the sole thing protecting the
+		// address range until the per-segment mmaps below claim it; anything
+		// that sneaks a mapping into that window (this loop calls fprintf on
+		// error paths, and multi-dylib loads recurse into this same function)
+		// would get silently clobbered by MAP_FIXED instead of a loud EEXIST.
+		// Keep the PROT_NONE placeholder mapped instead: each segment's own
+		// MAP_FIXED mmap unconditionally replaces whatever is at that address
+		// (that's MAP_FIXED's actual guarantee), so overwriting pieces of our
+		// own still-held reservation is exactly as correct and removes the
+		// race window entirely -- nothing else can grab it while we hold it.
+#endif
 
 		if (slide + mmapSize > lr->vm_addr_max)
 			lr->vm_addr_max = lr->base = slide + mmapSize;
