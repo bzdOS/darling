@@ -69,6 +69,30 @@
  *   - mach_msg_overwrite (-32): the 7th argument (priority) is read from
  *     mc_rsp+8; the 8th argument (rcv_msg at mc_rsp+16) still defaults to
  *     msg (in-place receive).  Full 9-arg support is a future TODO.
+ *
+ * Third class (x86-64 only, #198): raw Linux-ABI syscalls from the upstream
+ * dyld/libdyld.dylib overlay binary.
+ *   The overlay binaries under artefacts/darling-overlay/ (confirmed via
+ *   `strings` — paths under /home/runner/work/darling/darling/, symbols like
+ *   _oflags_bsd_to_linux) are genuine upstream Darling CI builds compiled to
+ *   run ON LINUX.  dyld itself makes raw `syscall` instructions using LINUX
+ *   syscall numbers baked into its machine code before any dylib (including
+ *   our libsystem_kernel shim) is loaded — this can't be fixed by porting
+ *   source, since this specific already-compiled binary isn't rebuilt from
+ *   this tree.  x86-64 argument registers (rdi,rsi,rdx,r10,r8,r9) are
+ *   byte-identical between Linux and FreeBSD raw syscall ABI, so only the
+ *   syscall *number* needs translating.  Detected as a third class: neither
+ *   MACOS_BSD_CLASS (0x02xxxxxx) nor a Mach trap (0xFFxxxxxx), but a small
+ *   plain integer (<1024) recovered by the same MOV EAX,imm32 byte-scan.
+ *   MVP: only the syscalls dyld's early bootstrap plausibly needs are
+ *   translated (see dispatch_linux_syscall); arch_prctl(ARCH_SET_FS) is
+ *   bridged to FreeBSD's sysarch(AMD64_SET_FSBASE) since dyld needs a working
+ *   %fs-relative TLS base before it can do much else.  clone/futex/brk are
+ *   deliberately left ENOSYS — they need real semantic redesign (rfork/
+ *   pthread, _umtx_op, no direct brk equivalent), not a number swap.
+ *   NOT YET DYNAMICALLY VERIFIED: written from Linux x86-64 syscall ABI
+ *   reference numbers + FreeBSD <sys/syscall.h>/<machine/sysarch.h>, without
+ *   a live build+truss pass on 185 in this session (see hub #198 note).
  */
 
 #ifdef DARLING_FREEBSD
@@ -84,7 +108,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h> /* AT_FDCWD / AT_SYMLINK_NOFOLLOW — #198 stat/lstat via fstatat */
 #include <darlingserver/rpc.h>
+#if defined(__x86_64__)
+#include <machine/sysarch.h> /* AMD64_{SET,GET}_{FS,GS}BASE — #198 arch_prctl bridge */
+#endif
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
 
@@ -148,6 +176,42 @@
 #define MACOS_SYS_bind         104
 #define MACOS_SYS_listen       106
 #define MACOS_SYS_accept        30
+
+/* ── Linux x86-64 syscall numbers (from Linux's stable syscall ABI table,
+ * arch/x86/entry/syscalls/syscall_64.tbl) — used only for #198's third
+ * dispatch class (raw Linux-ABI syscalls from the upstream dyld overlay).
+ * Kept to the syscalls dyld's early bootstrap plausibly needs; see the file
+ * header comment for what's deliberately left untranslated and why. ────── */
+#define LINUX_SYS_read           0
+#define LINUX_SYS_write          1
+#define LINUX_SYS_open           2
+#define LINUX_SYS_close          3
+#define LINUX_SYS_stat           4
+#define LINUX_SYS_fstat          5
+#define LINUX_SYS_lstat          6
+#define LINUX_SYS_lseek          8
+#define LINUX_SYS_mmap           9
+#define LINUX_SYS_mprotect      10
+#define LINUX_SYS_munmap        11
+#define LINUX_SYS_rt_sigaction  13
+#define LINUX_SYS_rt_sigprocmask 14
+#define LINUX_SYS_ioctl         16
+#define LINUX_SYS_access        21
+#define LINUX_SYS_dup           32
+#define LINUX_SYS_dup2          33
+#define LINUX_SYS_getpid        39
+#define LINUX_SYS_exit          60
+#define LINUX_SYS_wait4         61
+#define LINUX_SYS_kill          62
+#define LINUX_SYS_arch_prctl   158
+#define LINUX_SYS_gettid       186
+#define LINUX_SYS_exit_group   231
+
+/* Linux arch_prctl(2) op codes (uapi/asm/prctl.h) */
+#define LINUX_ARCH_SET_GS 0x1001
+#define LINUX_ARCH_SET_FS 0x1002
+#define LINUX_ARCH_GET_FS 0x1003
+#define LINUX_ARCH_GET_GS 0x1004
 
 /* ── alternate signal stack ────────────────────────────────────────────────── */
 
@@ -261,7 +325,10 @@ recover_macos_syscall_nr(const uint8_t *rip_ptr, const uint8_t *rsp_ptr)
             uint32_t nr;
             memcpy(&nr, p + 1, 4);
             uint8_t cls = (uint8_t)(nr >> 24);
-            if (cls == 0x02 || cls == 0xFF) {
+            /* #198: also accept a plain small integer (no class prefix) —
+             * a raw Linux-ABI syscall number from the upstream dyld overlay.
+             * nr!=0 excludes zero-byte padding false-hits. */
+            if (cls == 0x02 || cls == 0xFF || (cls == 0x00 && nr != 0 && nr < 1024)) {
                 return nr;
             }
         }
@@ -286,7 +353,10 @@ recover_macos_syscall_nr(const uint8_t *rip_ptr, const uint8_t *rsp_ptr)
             uint32_t nr;
             memcpy(&nr, rsp_ptr + disp8, 4);
             uint8_t cls = (uint8_t)(nr >> 24);
-            if (cls == 0x02 || cls == 0xFF) {
+            /* #198: also accept a plain small integer (no class prefix) —
+             * a raw Linux-ABI syscall number from the upstream dyld overlay.
+             * nr!=0 excludes zero-byte padding false-hits. */
+            if (cls == 0x02 || cls == 0xFF || (cls == 0x00 && nr != 0 && nr < 1024)) {
                 return nr;
             }
         }
@@ -564,6 +634,149 @@ dispatch_mach_trap(int trap_nr,
     (void)stack_arg1;
 }
 
+#if defined(__x86_64__)
+/* ── Linux-ABI syscall dispatcher (x86-64 only, #198) ─────────────────────── */
+
+/*
+ * purpose:  Translate a raw Linux x86-64 syscall (as made directly by the
+ *           upstream dyld/libdyld.dylib overlay binary, which was compiled
+ *           to run on Linux) to a FreeBSD equivalent and execute it.
+ * input:    linux_nr — Linux syscall number; a1..a6 — arguments (already in
+ *           the right registers: Linux and FreeBSD raw syscall ABI share the
+ *           same argument-register convention on x86-64).
+ * output:   FreeBSD kernel retval (negative = -errno) or 0/positive on success
+ * sideEffects: performs the requested kernel operation; arch_prctl additionally
+ *              stores a local variable whose address is passed to sysarch().
+ */
+static long
+dispatch_linux_syscall(unsigned int linux_nr,
+                       long a1, long a2, long a3,
+                       long a4, long a5, long a6)
+{
+    switch (linux_nr) {
+
+    case LINUX_SYS_read:
+        return freebsd_raw_syscall(SYS_read, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_write:
+        return freebsd_raw_syscall(SYS_write, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_open:
+        return freebsd_raw_syscall(SYS_open, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_close:
+        return freebsd_raw_syscall(SYS_close, a1, 0, 0, 0, 0, 0);
+    case LINUX_SYS_stat:
+        /* FreeBSD 15 dropped SYS_stat entirely (11-compat only, old ABI
+         * struct); fstatat(AT_FDCWD, path, buf, 0) is the modern ino64
+         * equivalent (mirrors the MACOS_SYS_fstat comment above). */
+        return freebsd_raw_syscall(SYS_fstatat, AT_FDCWD, a1, a2, 0, 0, 0);
+    case LINUX_SYS_fstat:
+        return freebsd_raw_syscall(SYS_fstat, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_lstat:
+        /* Same as LINUX_SYS_stat but AT_SYMLINK_NOFOLLOW (don't follow the
+         * final symlink component) — that's the only difference between
+         * stat(2) and lstat(2). */
+        return freebsd_raw_syscall(SYS_fstatat, AT_FDCWD, a1, a2,
+                                   AT_SYMLINK_NOFOLLOW, 0, 0);
+    case LINUX_SYS_lseek:
+        return freebsd_raw_syscall(SYS_lseek, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_mmap:
+        /* Linux mmap(addr,len,prot,flags,fd,off) — same arg layout as FreeBSD,
+         * but MAP_* flag *values* differ between the two OSes. dyld's own
+         * bootstrap mmaps are anonymous+private (flag bits that happen to
+         * coincide), so pass through as-is for now; a real flag-value
+         * translation table is a follow-up if a differing-flag mmap is ever
+         * observed to misbehave. */
+        return freebsd_raw_syscall(SYS_mmap, a1, a2, a3, a4, a5, a6);
+    case LINUX_SYS_mprotect:
+        return freebsd_raw_syscall(SYS_mprotect, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_munmap:
+        return freebsd_raw_syscall(SYS_munmap, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_ioctl:
+        return freebsd_raw_syscall(SYS_ioctl, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_access:
+        return freebsd_raw_syscall(SYS_access, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_dup:
+        return freebsd_raw_syscall(SYS_dup, a1, 0, 0, 0, 0, 0);
+    case LINUX_SYS_dup2:
+        return freebsd_raw_syscall(SYS_dup2, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_getpid:
+        return freebsd_raw_syscall(SYS_getpid, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_gettid:
+        /* FreeBSD has no 1:1 gettid; thr_self(2) returns the equivalent
+         * lightweight-thread id via an out-pointer. */
+        {
+            long tid = 0;
+            long r = freebsd_raw_syscall(SYS_thr_self, (long)&tid, 0, 0, 0, 0, 0);
+            return (r < 0) ? r : tid;
+        }
+    case LINUX_SYS_wait4:
+        return freebsd_raw_syscall(SYS_wait4, a1, a2, a3, a4, 0, 0);
+    case LINUX_SYS_kill:
+        return freebsd_raw_syscall(SYS_kill, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_rt_sigaction:
+        /* Signal *numbers* differ between Linux and macOS/FreeBSD; passing
+         * through is only correct for numbers that happen to coincide
+         * (mirrors the same caveat already noted on MACOS_SYS_sigprocmask). */
+        return freebsd_raw_syscall(SYS_sigaction, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_rt_sigprocmask:
+        return freebsd_raw_syscall(SYS_sigprocmask, a1, a2, a3, 0, 0, 0);
+
+    case LINUX_SYS_exit:
+        freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
+        __builtin_unreachable();
+    case LINUX_SYS_exit_group:
+        /* FreeBSD has no process-group exit_group; _exit(2) is the closest
+         * single-thread-process equivalent dyld's bootstrap needs. */
+        freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
+        __builtin_unreachable();
+
+    case LINUX_SYS_arch_prctl:
+        /* Linux arch_prctl(ARCH_SET_FS, addr) takes addr *directly* as a2.
+         * FreeBSD's sysarch(2) takes a *pointer to* the value instead:
+         *   int sysarch(int op, void *parms);  // parms -> the addr itself
+         * dyld needs a working %fs-relative TLS base before it can do much
+         * else, so this one is worth getting right rather than ENOSYS. */
+        if (a1 == LINUX_ARCH_SET_FS) {
+            long fsbase = a2;
+            return freebsd_raw_syscall(SYS_sysarch, AMD64_SET_FSBASE,
+                                       (long)&fsbase, 0, 0, 0, 0);
+        } else if (a1 == LINUX_ARCH_GET_FS) {
+            long fsbase = 0;
+            long r = freebsd_raw_syscall(SYS_sysarch, AMD64_GET_FSBASE,
+                                         (long)&fsbase, 0, 0, 0, 0);
+            if (r < 0) return r;
+            *(long *)a2 = fsbase;
+            return 0;
+        } else if (a1 == LINUX_ARCH_SET_GS) {
+            long gsbase = a2;
+            return freebsd_raw_syscall(SYS_sysarch, AMD64_SET_GSBASE,
+                                       (long)&gsbase, 0, 0, 0, 0);
+        } else if (a1 == LINUX_ARCH_GET_GS) {
+            long gsbase = 0;
+            long r = freebsd_raw_syscall(SYS_sysarch, AMD64_GET_GSBASE,
+                                         (long)&gsbase, 0, 0, 0, 0);
+            if (r < 0) return r;
+            *(long *)a2 = gsbase;
+            return 0;
+        }
+        fprintf(stderr,
+            "[darling-mldr] arch_prctl: unhandled op 0x%lx — ENOSYS\n", a1);
+        return -ENOSYS;
+
+    /* Deliberately NOT translated (need real semantic redesign, not a
+     * number swap — see file header comment):
+     *   clone   — thread/process creation semantics differ fundamentally
+     *             from FreeBSD rfork(2)/thr_new(2); no 1:1 mapping.
+     *   futex   — FreeBSD's equivalent is _umtx_op(2), different op encoding.
+     *   brk     — FreeBSD has no program-break syscall in the modern ABI;
+     *             callers need to be steered to mmap(MAP_ANON) instead. */
+    default:
+        fprintf(stderr,
+            "[darling-mldr] unhandled Linux syscall %u — ENOSYS\n", linux_nr);
+        return -ENOSYS;
+    }
+}
+#endif /* __x86_64__ */
+
 /* ── SIGSYS handler ────────────────────────────────────────────────────────── */
 
 /*
@@ -644,6 +857,9 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
          *   We interpret as int32_t to pass the negative trap number. */
         int trap_nr = (int32_t)raw_eax;
         ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6, stack_arg1);
+    } else if (raw_eax != 0 && raw_eax < 1024) {
+        /* ── raw Linux-ABI syscall (#198, upstream dyld overlay binary) ── */
+        ret = dispatch_linux_syscall(raw_eax, a1, a2, a3, a4, a5, a6);
     } else {
         /* Unknown syscall class — log and re-raise as default signal */
         fprintf(stderr,
