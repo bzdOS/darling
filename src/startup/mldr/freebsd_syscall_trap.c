@@ -117,6 +117,7 @@
 #include <time.h> /* CLOCK_MONOTONIC — #198 clock_gettime translation */
 #include <sys/mman.h> /* mprotect — #198 raw-syscall trampoline patching */
 #include <dirent.h> /* native struct dirent — #198 getdents64 translation */
+#include <sys/resource.h> /* struct rlimit, getrlimit/setrlimit — #198 prlimit64 translation */
 #include <darlingserver/rpc.h>
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
@@ -221,6 +222,7 @@
 #define LINUX_SYS_gettid       186
 #define LINUX_SYS_exit_group   231
 #define LINUX_SYS_getdents64   217
+#define LINUX_SYS_prlimit64    302
 #define LINUX_SYS_faccessat    269
 #define LINUX_SYS_getcpu       309
 #define LINUX_SYS_getrandom    318
@@ -1045,6 +1047,54 @@ dispatch_linux_syscall(unsigned int linux_nr,
         /* Identical signature (buf, buflen, flags) AND identical GRND_*
          * bit values on both OSes — pure passthrough. */
         return freebsd_raw_syscall(SYS_getrandom, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_prlimit64: {
+        /*
+         * prlimit64(pid, resource, new_limit, old_limit). struct rlimit64 is
+         * binary-identical on both OSes (two 8-byte {rlim_cur, rlim_max}
+         * fields), but the RESOURCE NUMBERS diverge from index 5 onward
+         * (Linux RSS=5,NPROC=6,NOFILE=7,MEMLOCK=8,AS=9 vs FreeBSD
+         * RSS=5,MEMLOCK=6,NPROC=7,NOFILE=8,...,AS=10) — passing the number
+         * through would silently target the wrong limit. Only self (pid==0)
+         * is handled: that's the only case dyld/libSystem's startup path
+         * exercises (querying/adjusting the calling thread's own stack
+         * limit), and FreeBSD's getrlimit/setrlimit have no "target another
+         * pid" form to translate the general case into anyway.
+         */
+        if (a1 != 0) {
+            return -ESRCH;
+        }
+        static const int resource_map[] = {
+            /* Linux index -> FreeBSD RLIMIT_* */
+            RLIMIT_CPU,      /* 0 */
+            RLIMIT_FSIZE,    /* 1 */
+            RLIMIT_DATA,     /* 2 */
+            RLIMIT_STACK,    /* 3 */
+            RLIMIT_CORE,     /* 4 */
+            RLIMIT_RSS,      /* 5 */
+            RLIMIT_NPROC,    /* 6 */
+            RLIMIT_NOFILE,   /* 7 */
+            RLIMIT_MEMLOCK,  /* 8 */
+            RLIMIT_AS,       /* 9 */
+        };
+        if (a2 >= (long)(sizeof(resource_map) / sizeof(resource_map[0]))) {
+            return -EINVAL;
+        }
+        int freebsd_resource = resource_map[a2];
+        struct rlimit rl;
+        if (a4 != 0) {
+            if (getrlimit(freebsd_resource, &rl) < 0) {
+                return -errno;
+            }
+            memcpy((void *)a4, &rl, sizeof(rl));
+        }
+        if (a3 != 0) {
+            memcpy(&rl, (const void *)a3, sizeof(rl));
+            if (setrlimit(freebsd_resource, &rl) < 0) {
+                return -errno;
+            }
+        }
+        return 0;
+    }
     case LINUX_SYS_faccessat: {
         /* faccessat(dirfd, path, mode, flags). R_OK/W_OK/X_OK/F_OK coincide,
          * but the AT_* flag VALUES are swapped between the two OSes:
