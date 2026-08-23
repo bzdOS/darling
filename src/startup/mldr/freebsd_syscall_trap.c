@@ -200,6 +200,7 @@
 #define LINUX_SYS_dup           32
 #define LINUX_SYS_dup2          33
 #define LINUX_SYS_getpid        39
+#define LINUX_SYS_sendmsg       46
 #define LINUX_SYS_exit          60
 #define LINUX_SYS_wait4         61
 #define LINUX_SYS_kill          62
@@ -700,6 +701,13 @@ dispatch_linux_syscall(unsigned int linux_nr,
         return freebsd_raw_syscall(SYS_dup2, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_getpid:
         return freebsd_raw_syscall(SYS_getpid, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_sendmsg:
+        /* sendmsg(int, const struct msghdr *, int) — same signature and
+         * struct msghdr layout on Linux and FreeBSD for the plain-data case;
+         * dyld/libSystem use this to talk to darlingserver over its RPC
+         * socket. cmsg (SCM_RIGHTS fd-passing) framing differs between the
+         * two OSes, so revisit if an fd-passing sendmsg ever misbehaves. */
+        return freebsd_raw_syscall(SYS_sendmsg, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_gettid:
         /* FreeBSD has no 1:1 gettid; thr_self(2) returns the equivalent
          * lightweight-thread id via an out-pointer. */
