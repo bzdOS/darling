@@ -103,56 +103,9 @@ make -j$(sysctl -n hw.ncpu)
 echo "=== Built: ${BUILD}/darlingserver ==="
 ls -lh "${BUILD}/darlingserver"
 
-# ── Build real mldr ───────────────────────────────────────────────────────────
-MLDR_REAL_BUILD="${BUILD}/mldr-real"
-rm -rf "${MLDR_REAL_BUILD}" && mkdir -p "${MLDR_REAL_BUILD}" && cd "${MLDR_REAL_BUILD}"
-
-cat > CMakeLists.txt << MLDR_CMEOF
-cmake_minimum_required(VERSION 3.13)
-project(mldr_real C)
-
-set(CMAKE_C_FLAGS "\${CMAKE_C_FLAGS} -std=gnu11 -ggdb -O2")
-
-set(SRC  ${SRC})
-set(DS   ${DS})
-set(DRPC \${DS}/generated-rpc)
-
-include_directories(
-  # cctools/include must come BEFORE mldr/include: mldr/include/mach-o/ contains
-  # a symlink that exits the 9p mount boundary on the VM, causing EMSGSIZE.
-  # Putting cctools first lets the compiler find the real headers directly.
-  \${SRC}/external/cctools-port/cctools/include
-  \${SRC}/startup/mldr/include
-  \${SRC}/startup/mldr
-  \${DRPC}/include
-  \${DS}/include
-)
-
-add_definitions(
-  -DDARLING_FREEBSD
-  -D_GNU_SOURCE
-  -DINSTALL_PREFIX=\"/usr/local/darling-overlay\"
-  -DSYSTEM_ROOT=\"/Volumes/SystemRoot\"
-  -DLIBEXEC_PATH=\"/usr/local/darling-overlay/libexec/darling\"
-)
-
-# mldr sources (mldr.c includes loader.c and stack.c at the end, so only add these two)
-add_executable(mldr
-  \${SRC}/startup/mldr/mldr.c
-  \${SRC}/startup/mldr/commpage.c
-)
-
-target_link_libraries(mldr PRIVATE -lc -lpthread)
-MLDR_CMEOF
-
-cmake .
-make -j$(sysctl -n hw.ncpu)
-echo "=== Built: ${MLDR_REAL_BUILD}/mldr (real) ==="
-ls -lh "${MLDR_REAL_BUILD}/mldr"
-
-# Install real mldr to replace stub
-MLDR_DEST="/usr/local/libexec/darling/usr/libexec/darling/mldr"
-mkdir -p "$(dirname ${MLDR_DEST})"
-install -m 755 "${MLDR_REAL_BUILD}/mldr" "${MLDR_DEST}"
-echo "=== Installed: ${MLDR_DEST} (real mldr) ==="
-ls -lh "${MLDR_DEST}"
+# mldr is built separately by build-mldr-only.sh (the complete recipe: includes
+# freebsd_syscall_trap.c, elfcalls.c, threads.c and generates darling-config.h).
+# This script used to also build an mldr here, but that copy predated
+# freebsd_syscall_trap.c and had drifted into a stale, incomplete duplicate
+# that `rm -rf`'d and clobbered build-mldr-only.sh's output. Removed — run
+# build-mldr-only.sh after this script instead.
