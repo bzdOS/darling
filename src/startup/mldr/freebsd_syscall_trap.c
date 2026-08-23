@@ -1306,6 +1306,31 @@ mldr_patch_linux_raw_syscalls(void *base, size_t size)
         fprintf(stderr,
             "[darling-mldr] patched raw-syscall trampolines to ud2:"
             " generic-thunk=%zu sigreturn-tramp=%zu\n", n1, n2);
+    } else if (size > MLDR_PATCH_PAGE_SIZE) {
+        /*
+         * Both signatures are exact byte matches against ONE specific dyld
+         * build (see #198's finding: a naive scan for bare `0F 05` bytes
+         * false-positives constantly on unrelated code, e.g. the trailing
+         * bytes of `CALL rel32`, so this only ever checks the two known
+         * fixed signatures — never a heuristic byte scan).
+         *
+         * A different dyld build can legitimately compile these trampolines
+         * with different register allocation or instruction order, in which
+         * case neither signature matches and this image's raw Linux-ABI
+         * syscalls silently fall back to the broken SIGSYS-collision path
+         * (see this file's header comment) instead of failing loudly. Log it
+         * so that failure mode is visible instead of silent — this is a
+         * multi-page executable mapping (i.e. a real dylib, not some small
+         * anonymous helper stub) that mldr expected to find at least one
+         * trampoline in and found none.
+         */
+        fprintf(stderr,
+            "[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall"
+            " trampoline signature matched in a %zu-byte executable mapping"
+            " at %p — if this dylib makes raw Linux-ABI syscalls, they will"
+            " silently run as FreeBSD syscalls under Linux numbers instead"
+            " of failing (see freebsd_syscall_trap.c's file header)\n",
+            size, base);
     }
 
     if (mprotect((void *)page_start, map_len, PROT_READ | PROT_EXEC) < 0) {
