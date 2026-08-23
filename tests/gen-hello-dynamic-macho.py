@@ -87,7 +87,12 @@ def pad_to(buf, length, byte=b'\x00'):
 
 HELLO_MSG = b"hello-dynamic\n"
 CODE = (
-    b"\x48\x8d\x35\x0a\x00\x00\x00"   # lea rsi, [rip+10] → hello_msg
+    # lea rsi, [rip+26] → hello_msg.
+    # The displacement is relative to the END of this 7-byte instruction, and
+    # hello_msg starts at offset 33 of CODE, so it must be 33-7 = 26. It used
+    # to be 10, which made the stub write 14 bytes of its own machine code to
+    # stdout instead of the message.
+    b"\x48\x8d\x35\x1a\x00\x00\x00"
     b"\xba" + struct.pack("<I", len(HELLO_MSG)) +  # mov edx, 14
     b"\xbf\x01\x00\x00\x00"           # mov edi, 1
     b"\xb8\x04\x00\x00\x02"           # mov eax, 0x2000004  (write)
@@ -173,6 +178,23 @@ def lc_version_min_macosx(version=0x000A0900, sdk=0x000A0900):
     """Return packed LC_VERSION_MIN_MACOSX (version_min_command, 16 bytes)."""
     return struct.pack("<IIII", LC_VERSION_MIN_MACOSX, 16, version, sdk)
 
+# ── Build helper: LC_SYMTAB / LC_DYSYMTAB ───────────────────────────────────
+# dyld requires at least one of LC_SYMTAB/LC_DYLD_INFO/LC_DYLD_CHAINED_FIXUPS,
+# and separately requires LC_DYSYMTAB, to consider __LINKEDIT's content
+# valid (ImageLoaderMachO.cpp). This binary defines no symbols and does no
+# rebasing/binding, so both commands point at zero-length regions inside
+# the (otherwise empty) __LINKEDIT segment — enough to satisfy the
+# structural checks without any real symbol/string table content.
+
+def lc_symtab(symoff, nsyms, stroff, strsize):
+    """Return packed LC_SYMTAB (symtab_command, 24 bytes)."""
+    return struct.pack("<IIIIII", LC_SYMTAB, 24, symoff, nsyms, stroff, strsize)
+
+def lc_dysymtab():
+    """Return packed LC_DYSYMTAB (dysymtab_command, 80 bytes) — all-zero
+    tables/counts (no locals, externs, undefs, TOC, module table, etc)."""
+    return struct.pack("<IIIIIIIIIIIIIIIIIIII", LC_DYSYMTAB, 80, *([0] * 18))
+
 # ── Assemble the binary ───────────────────────────────────────────────────────
 
 def build():
@@ -209,6 +231,17 @@ def build():
     DATA_VMSIZE      = PAGE
     DATA_FILEOFF     = TEXT_FILEOFF + TEXT_VMSIZE  # 0x00002000
 
+    # dyld refuses to load any Mach-O without a __LINKEDIT segment (see
+    # ImageLoaderMachO.cpp / MachOAnalyzer.cpp: "missing __LINKEDIT
+    # segment") — real binaries always have one (symtab/strtab, rebase/
+    # bind info, export trie, etc). This synthetic binary has none of that
+    # content to link, so LINKEDIT is present but empty; it just needs to
+    # exist as a non-overlapping segment for dyld's structural checks.
+    LINKEDIT_VMADDR  = DATA_VMADDR + DATA_VMSIZE   # 0x100003000
+    LINKEDIT_VMSIZE  = PAGE
+    LINKEDIT_FILEOFF = DATA_FILEOFF + PAGE         # 0x00003000
+    LINKEDIT_FILESIZE = PAGE
+
     # ── Load commands ────────────────────────────────────────────────────
 
     seg_pagezero = lc_segment_64(
@@ -239,6 +272,12 @@ def build():
         DATA_FILEOFF, 0,
         VM_PROT_RW, VM_PROT_RW)
 
+    seg_linkedit = lc_segment_64(
+        "__LINKEDIT",
+        LINKEDIT_VMADDR, LINKEDIT_VMSIZE,
+        LINKEDIT_FILEOFF, LINKEDIT_FILESIZE,
+        VM_PROT_READ, VM_PROT_READ)
+
     lc_dylinker = lc_load_dylinker("/usr/lib/dyld")
     lc_dylib    = lc_load_dylib("/usr/lib/libSystem.B.dylib",
                                  timestamp=2,
@@ -249,11 +288,19 @@ def build():
     lc_main_cmd  = lc_main(code_vmaddr - TEXT_VMADDR)   # = PAGE = 0x1000
     lc_vermin    = lc_version_min_macosx()
 
-    lc_all = (seg_pagezero + seg_text + seg_data +
+    # Empty symbol/string tables, placed at the start of __LINKEDIT's
+    # (all-zero) content — nsyms=0 and strsize=0 mean nothing is ever
+    # actually read from these offsets.
+    lc_symtab_cmd   = lc_symtab(LINKEDIT_FILEOFF, 0, LINKEDIT_FILEOFF, 0)
+    lc_dysymtab_cmd = lc_dysymtab()
+
+    lc_all = (seg_pagezero + seg_text + seg_data + seg_linkedit +
               lc_dylinker + lc_dylib +
+              lc_symtab_cmd + lc_dysymtab_cmd +
               lc_main_cmd + lc_vermin)
 
-    ncmds       = 7   # __PAGEZERO, __TEXT, __DATA, dylinker, dylib, LC_MAIN, LC_VERSION_MIN
+    ncmds       = 10  # __PAGEZERO, __TEXT, __DATA, __LINKEDIT, dylinker, dylib,
+                       # LC_SYMTAB, LC_DYSYMTAB, LC_MAIN, LC_VERSION_MIN
     sizeofcmds  = len(lc_all)
     flags       = MH_TWOLEVEL | MH_PIE
 
@@ -283,7 +330,10 @@ def build():
     # to keep file offsets consistent (loader doesn't care: filesize=0).
     data_page = b'\x00' * PAGE
 
-    return header_page + text_page + data_page
+    # ── LINKEDIT page (empty placeholder — see seg_linkedit comment above) ─
+    linkedit_page = b'\x00' * LINKEDIT_FILESIZE
+
+    return header_page + text_page + data_page + linkedit_page
 
 
 def main():
