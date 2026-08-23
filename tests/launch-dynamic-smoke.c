@@ -125,9 +125,16 @@ int main(void) {
     const char *od = overlay_dir();
     const char *sd = src_dir();
 
-    snprintf(dserver, sizeof(dserver), "%s/dserver/darlingserver",     bd);
-    snprintf(mldr,    sizeof(mldr),    "%s/dserver/mldr-real/mldr",    bd);
-    snprintf(binary,  sizeof(binary),  "%s/tests/hello-dynamic-macho", sd);
+    /* DARLING_TEST_BINARY selects which generated test binary to run —
+     * e.g. hello-bind-macho, which exercises real symbol binding against
+     * libSystem rather than hello-dynamic-macho's raw syscalls. */
+    const char *test_bin = getenv("DARLING_TEST_BINARY");
+    if (!test_bin || !test_bin[0])
+        test_bin = "hello-dynamic-macho";
+
+    snprintf(dserver, sizeof(dserver), "%s/dserver/darlingserver",  bd);
+    snprintf(mldr,    sizeof(mldr),    "%s/dserver/mldr-real/mldr", bd);
+    snprintf(binary,  sizeof(binary),  "%s/tests/%s", sd, test_bin);
 
     /* Sanity-check that all three files exist */
     struct stat st;
@@ -205,12 +212,14 @@ int main(void) {
         }
 
         /* Copy the Mach-O test binary too — it's on the same 9p mount */
-        if (copy_file(binary, LOCAL_OVERLAY "/hello-dynamic-macho") != 0) {
-            fprintf(stderr, "Failed to copy hello-dynamic-macho\n");
+        char local_binary[512];
+        snprintf(local_binary, sizeof(local_binary), "%s/%s", LOCAL_OVERLAY, test_bin);
+        if (copy_file(binary, local_binary) != 0) {
+            fprintf(stderr, "Failed to copy %s\n", test_bin);
             return 1;
         }
         /* Redirect binary to local copy */
-        snprintf(binary, sizeof(binary), LOCAL_OVERLAY "/hello-dynamic-macho");
+        snprintf(binary, sizeof(binary), "%s", local_binary);
         printf("binary cached locally: %s\n", binary);
 
         /* update od to point to the local copy */
