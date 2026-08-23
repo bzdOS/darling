@@ -1,0 +1,313 @@
+/*
+ * launch-dynamic-smoke.c — dynamic Mach-O smoke test.
+ *
+ * purpose:    Verify that mldr can load a dynamically-linked Mach-O through dyld.
+ * input:      None (paths resolved from env or defaults).
+ * output:     "hello-dynamic\n" printed to stdout if dyld load succeeds;
+ *             mldr exits non-zero on failure.
+ * sideEffects: Spawns darlingserver child; cleans up on exit.
+ *
+ * Build: cc -o /tmp/launch-dynamic /path/to/darling/tests/launch-dynamic-smoke.c
+ * Run as root on FreeBSD 15.1.
+ *
+ * Environment (optional):
+ *   DARLING_BUILD_DIR  — build output dir   (default: /var/darling-build)
+ *   DARLING_OVERLAY    — darling overlay dir (default: /path/to/darling-overlay)
+ *   DARLING_SRC_DIR    — repo root           (default: /path/to/darling)
+ *
+ * Note on 9p/p9fs + mmap: FreeBSD's virtio-9p driver may return BUS_OBJERR
+ * when page-faulting into mmap'd files on the 9p mount.  To avoid this, dyld
+ * is copied from the overlay (9p) to /tmp before exec'ing mldr.  Only dyld
+ * itself needs copying because it is mmap'd with PROT_EXEC; libSystem and other
+ * dylibs are loaded later by dyld using the overlay root path (DYLD_ROOT_PATH),
+ * and dyld opens them with read() + mmap() using the file descriptor — which
+ * may also fault.  The safest approach is to shadow the critical files.
+ *
+ * How it differs from launch-smoke.c:
+ *   1. Sets __mldr_DYLD_ROOT_PATH to the darling overlay (not PREFIX), so dyld
+ *      and libSystem.B.dylib are found at their Mach-O paths.
+ *   2. Runs hello-dynamic-macho (LC_LOAD_DYLINKER + LC_LOAD_DYLIB) instead of
+ *      the static binary.
+ *   3. Uses /var/darling-build as default build dir (matches VM deploy path).
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+
+#define PREFIX        "/tmp/darling-dynamic-smoke"
+#define SOCK_PATH     PREFIX "/.darlingserver.sock"
+#define LOCAL_OVERLAY "/tmp/darling-local-overlay"
+
+static const char *build_dir(void) {
+    const char *v = getenv("DARLING_BUILD_DIR");
+    return v ? v : "/var/darling-build";
+}
+
+static const char *overlay_dir(void) {
+    const char *v = getenv("DARLING_OVERLAY");
+    return v ? v : "/path/to/darling-overlay";
+}
+
+static const char *src_dir(void) {
+    const char *v = getenv("DARLING_SRC_DIR");
+    return v ? v : "/path/to/darling";
+}
+
+static void cleanup(void) {
+    system("pkill -9 darlingserver 2>/dev/null");
+    system("rm -rf " PREFIX);
+    system("rm -rf " LOCAL_OVERLAY);
+}
+
+/*
+ * purpose:  Copy a single file from src to dst (mkdir -p for dst parent).
+ * input:    src — source path, dst — destination path
+ * output:   0 on success, -1 on error (message to stderr)
+ * sideEffects: creates dst and all parent directories
+ */
+static int copy_file(const char *src, const char *dst) {
+    /* mkdir -p for the parent directory of dst */
+    char parent[512];
+    snprintf(parent, sizeof(parent), "%s", dst);
+    char *slash = strrchr(parent, '/');
+    if (slash) {
+        *slash = '\0';
+        /* create directory tree (simplified: only one level deep for our use) */
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", parent);
+        if (system(cmd) != 0) {
+            fprintf(stderr, "mkdir -p %s failed\n", parent);
+            return -1;
+        }
+    }
+
+    int fdin  = open(src, O_RDONLY);
+    if (fdin < 0) { perror(src); return -1; }
+
+    /* get size for progress */
+    struct stat st;
+    if (fstat(fdin, &st) < 0) { perror("fstat"); close(fdin); return -1; }
+
+    int fdout = open(dst, O_WRONLY|O_CREAT|O_TRUNC, 0755);
+    if (fdout < 0) { perror(dst); close(fdin); return -1; }
+
+    char buf[65536];
+    ssize_t nr;
+    while ((nr = read(fdin, buf, sizeof(buf))) > 0) {
+        const char *p = buf;
+        while (nr > 0) {
+            ssize_t nw = write(fdout, p, (size_t)nr);
+            if (nw < 0) { perror(dst); close(fdin); close(fdout); return -1; }
+            p  += nw;
+            nr -= nw;
+        }
+    }
+    close(fdin);
+    close(fdout);
+    return nr < 0 ? (perror("read"), -1) : 0;
+}
+
+int main(void) {
+    if (getuid() != 0) {
+        fprintf(stderr, "Must run as root\n");
+        return 1;
+    }
+
+    char dserver[512], mldr[512], binary[512];
+    const char *bd = build_dir();
+    const char *od = overlay_dir();
+    const char *sd = src_dir();
+
+    snprintf(dserver, sizeof(dserver), "%s/dserver/darlingserver",     bd);
+    snprintf(mldr,    sizeof(mldr),    "%s/dserver/mldr-real/mldr",    bd);
+    snprintf(binary,  sizeof(binary),  "%s/tests/hello-dynamic-macho", sd);
+
+    /* Sanity-check that all three files exist */
+    struct stat st;
+    int missing = 0;
+    if (stat(dserver, &st) < 0) { fprintf(stderr, "Missing: %s\n", dserver); missing = 1; }
+    if (stat(mldr,    &st) < 0) { fprintf(stderr, "Missing: %s\n", mldr);    missing = 1; }
+    if (stat(binary,  &st) < 0) { fprintf(stderr, "Missing: %s\n", binary);  missing = 1; }
+    if (stat(od,      &st) < 0) { fprintf(stderr, "Missing overlay: %s\n", od); missing = 1; }
+    if (missing) return 1;
+
+    printf("darlingserver : %s\n", dserver);
+    printf("mldr          : %s\n", mldr);
+    printf("binary        : %s\n", binary);
+    printf("overlay       : %s\n", od);
+
+    cleanup();
+    mkdir(PREFIX, 0755);
+
+    /*
+     * Copy dyld and libSystem.B.dylib from the overlay (9p/p9fs mount) to a
+     * local tmpfs path.  FreeBSD's virtio-9p driver may return BUS_OBJERR on
+     * page-fault reads from mmap'd 9p-backed files; local copies are safe.
+     * We mirror the exact Mach-O paths so __mldr_DYLD_ROOT_PATH still works.
+     */
+    {
+        char src[512], dst[512];
+        struct stat cached;
+
+        /* Reuse an existing local copy. Re-reading the ~80MB tree over
+         * virtiofs on every run retains ~50MB of fuse_msgbuf in the guest
+         * kernel each time (see the FUSE_READLINK note below — the same client
+         * holds on to buffers on plain reads too, just far more slowly).
+         * Set DARLING_SMOKE_REFRESH=1 to force a fresh copy. */
+        if (getenv("DARLING_SMOKE_REFRESH") != NULL ||
+            stat(LOCAL_OVERLAY "/usr/lib/libSystem.B.dylib", &cached) < 0) {
+            system("rm -rf " LOCAL_OVERLAY);
+        }
+
+        /* Copy the whole usr/lib tree (~80MB). Copying only dyld +
+         * libSystem.B.dylib + usr/lib/system/ is not enough: the transitive
+         * dependency closure reaches further (libdispatch.dylib pulls in
+         * libobjc.A.dylib, and so on), and every miss surfaces as an opaque
+         * "image not found" from dyld. */
+        (void)src; (void)dst;
+        {
+            char cmd[1024];
+            snprintf(cmd, sizeof(cmd),
+                     /* Regular files only, via find -type f (which lstat()s and
+                      * never readlink()s).
+                      *
+                      * Do NOT use cp -a / cp -RL here: the overlay lives on the
+                      * virtiofs mount, whose host server returns a malformed
+                      * FUSE_READLINK reply (embedded NUL). Every symlink walked
+                      * fails with EIO *and* leaks a fuse_msgbuf in the FreeBSD
+                      * FUSE client — enough of them wires all of RAM and the
+                      * guest dies in an unrecoverable OOM spiral. */
+                     "mkdir -p '%s/usr/lib' && cd '%s/usr/lib' && "
+                     "find . -type f | pax -rw '%s/usr/lib'",
+                     LOCAL_OVERLAY, od, LOCAL_OVERLAY);
+            /* A cached copy makes this a no-op (the tree already exists).
+             * Verify by checking the two files we cannot run without, rather
+             * than by the copy command's exit status. */
+            (void)system(cmd);
+
+            struct stat lst;
+            if (stat(LOCAL_OVERLAY "/usr/lib/dyld", &lst) < 0) {
+                fprintf(stderr, "Failed to copy dyld to local overlay\n");
+                return 1;
+            }
+            if (stat(LOCAL_OVERLAY "/usr/lib/libSystem.B.dylib", &lst) < 0) {
+                fprintf(stderr, "Failed to copy libSystem.B.dylib to local overlay\n");
+                return 1;
+            }
+            printf("usr/lib cached locally: %s/usr/lib\n", LOCAL_OVERLAY);
+        }
+
+        /* Copy the Mach-O test binary too — it's on the same 9p mount */
+        if (copy_file(binary, LOCAL_OVERLAY "/hello-dynamic-macho") != 0) {
+            fprintf(stderr, "Failed to copy hello-dynamic-macho\n");
+            return 1;
+        }
+        /* Redirect binary to local copy */
+        snprintf(binary, sizeof(binary), LOCAL_OVERLAY "/hello-dynamic-macho");
+        printf("binary cached locally: %s\n", binary);
+
+        /* update od to point to the local copy */
+        od = LOCAL_OVERLAY;
+    }
+
+    /*
+     * Pipe handshake: pass write-end fd to darlingserver as argv[4].
+     * darlingserver writes "." when its child (the real server process) is
+     * ready to accept connections.
+     */
+    int pipefd[2];
+    if (pipe(pipefd) < 0) { perror("pipe"); return 1; }
+
+    pid_t dserver_pid = fork();
+    if (dserver_pid < 0) { perror("fork"); return 1; }
+
+    if (dserver_pid == 0) {
+        /* Child: exec darlingserver */
+        close(pipefd[0]);
+
+        /*
+         * darlingserver hands this path to dyld via the vchroot_path RPC; dyld
+         * then rewrites *every* macOS path it resolves as <vchroot> + <path>.
+         * Without it darlingserver falls back to the installed overlay
+         * (/usr/local/darling-overlay), which does not exist in this harness,
+         * so /usr/lib/libSystem.B.dylib would never be found.
+         */
+        setenv("DARLING_VCHROOT_PATH", od, 1);
+
+        char pipestr[16], uidstr[16], gidstr[16];
+        snprintf(pipestr, sizeof(pipestr), "%d", pipefd[1]);
+        snprintf(uidstr,  sizeof(uidstr),  "%d", (int)getuid());
+        snprintf(gidstr,  sizeof(gidstr),  "%d", (int)getgid());
+
+        /* argv: darlingserver <prefix> <uid> <gid> <pipe_fd> <fix_perms> */
+        execl(dserver, "darlingserver",
+              PREFIX, uidstr, gidstr, pipestr, "0",
+              (char*)NULL);
+        perror("execl darlingserver");
+        _exit(1);
+    }
+
+    /* Parent: wait for darlingserver to signal ready */
+    close(pipefd[1]);
+    char buf[2];
+    ssize_t n = read(pipefd[0], buf, 1);
+    close(pipefd[0]);
+    if (n <= 0) {
+        fprintf(stderr, "darlingserver did not signal readiness (n=%zd)\n", n);
+        cleanup();
+        return 1;
+    }
+    printf("darlingserver signaled ready\n");
+
+    /* Poll for UNIX socket to appear (darlingserver forks a child that binds it) */
+    int waited = 0;
+    while (stat(SOCK_PATH, &st) < 0 || !S_ISSOCK(st.st_mode)) {
+        if (waited++ > 50) {
+            fprintf(stderr, "Socket %s did not appear after 5s\n", SOCK_PATH);
+            cleanup();
+            return 1;
+        }
+        usleep(100000); /* 100 ms */
+    }
+    printf("darlingserver socket ready: %s\n", SOCK_PATH);
+
+    /*
+     * Set up mldr environment:
+     *   __mldr_sockpath       — where mldr finds darlingserver
+     *   __mldr_DYLD_ROOT_PATH — mldr prepends this to LC_LOAD_DYLINKER path
+     *                           ("/usr/lib/dyld") → overlay/usr/lib/dyld
+     *                           mldr also rewrites this to DYLD_ROOT_PATH so
+     *                           dyld itself resolves libSystem.B.dylib correctly.
+     */
+    setenv("__mldr_sockpath",       SOCK_PATH, 1);
+    setenv("__mldr_DYLD_ROOT_PATH", od, 1);
+
+    printf("Running: %s %s\n", mldr, binary);
+    fflush(stdout);
+
+    /*
+     * Put mldr in its own process group before exec.
+     *
+     * When dyld halts it calls abort_with_payload(), whose Darling
+     * implementation ends in kill(0, SIGABRT) — pid 0 meaning *the entire
+     * process group*. Without this, that blast also takes out darlingserver
+     * (forked above, so same group), the invoking shell, and any truss
+     * attached — which drops dyld's diagnostics before they reach the log and
+     * yields nonsense exit codes, making one deterministic failure look like a
+     * flaky one.
+     */
+    if (setpgid(0, 0) < 0)
+        perror("setpgid");
+
+    execl(mldr, mldr, binary, (char*)NULL);
+    perror("execl mldr");
+    cleanup();
+    return 1;
+}

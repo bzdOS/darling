@@ -282,6 +282,18 @@ no_slide:
 
 					if (seg->fileoff == 0)
 						mappedHeader = (struct MACH_HEADER_STRUCT*) (seg->vmaddr + slide);
+
+#if defined(DARLING_FREEBSD) && defined(__x86_64__) && defined(GEN_64BIT)
+					// #198: the upstream dyld overlay makes raw Linux-ABI
+					// syscalls that mostly collide with real FreeBSD syscall
+					// numbers, so SIGSYS never fires for them (see
+					// freebsd_syscall_trap.c's file header). Patch dyld's own
+					// fixed-signature raw-syscall trampolines (syscall -> ud2)
+					// right after mapping its executable content, while we
+					// still know exactly which range came from the dylinker.
+					if (expect_dylinker && (useprot & PROT_EXEC))
+						mldr_patch_linux_raw_syscalls((void*)addr, seg->filesize);
+#endif
 				}
 
 				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
