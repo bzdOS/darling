@@ -126,8 +126,15 @@ void FUNCTION_NAME(const char* filepath, struct load_results* lr)
 	// `argc`-count pointers for arguments (+1 for NULL)
 	// `envc`-count pointers for env vars (+1 for NULL)
 	// `sizeof(applep_contents) / sizeof(*applep_contents)`-count pointers for applep arguments (already includes NULL)
-	// space for exepath, kernfd, and elfcalls
-	sp -= 1 + 1 + (lr->argc + 1) + (lr->envc + 1) + (sizeof(applep_contents) / sizeof(*applep_contents)) + user_long_count(exepath_len + sizeof(EXECUTABLE_PATH) + sizeof(kernfd) + sizeof(elfcalls));
+	// space for exepath, kernfd, elfcalls strings
+#ifdef DARLING_FREEBSD
+	// also space for stack_guard (32 bytes) and malloc_entropy (56 bytes) FreeBSD applep strings
+#	define FREEBSD_EXTRA_STRINGS (32 + 56)
+#else
+#	define FREEBSD_EXTRA_STRINGS 0
+#endif
+	sp -= 1 + 1 + (lr->argc + 1) + (lr->envc + 1) + (sizeof(applep_contents) / sizeof(*applep_contents)) + user_long_count(exepath_len + sizeof(EXECUTABLE_PATH) + sizeof(kernfd) + sizeof(elfcalls) + FREEBSD_EXTRA_STRINGS);
+#undef FREEBSD_EXTRA_STRINGS
 
 	exepath_user = (char __user*) lr->stack_top - exepath_len - sizeof(EXECUTABLE_PATH);
 	memcpy(exepath_user, EXECUTABLE_PATH, sizeof(EXECUTABLE_PATH)-1);
