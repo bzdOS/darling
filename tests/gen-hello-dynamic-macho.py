@@ -178,26 +178,38 @@ def lc_version_min_macosx(version=0x000A0900, sdk=0x000A0900):
 def build():
     PAGE = 0x1000
 
-    # Virtual address layout:
-    #   0x000000000000..0x100000000 → __PAGEZERO
-    #   0x100000000               → __TEXT  (1 page)
-    #   0x100001000               → __DATA  (1 page, empty — satisfies dyld)
+    # Virtual address layout (matches standard macOS binary layout):
+    #
+    #   file off 0x0000: Mach-O header + load commands  (first page of __TEXT)
+    #   file off 0x1000: __text machine code             (second page of __TEXT)
+    #   file off 0x2000: __DATA                          (one page, empty)
+    #
+    #   vmaddr 0x000000000000..0x100000000 → __PAGEZERO  (4 GB guard, no file backing)
+    #   vmaddr 0x100000000                → __TEXT       (2 pages, fileoff=0)
+    #     vmaddr 0x100000000              →   header page (Mach-O header + lcmds)
+    #     vmaddr 0x100001000              →   __text section (code)
+    #   vmaddr 0x100002000                → __DATA       (1 page, anonymous)
+    #
+    # Having __TEXT at fileoff=0 is critical: loader.c sets lr->mh from the
+    # segment that has fileoff==0, so the Mach header address passed to dyld
+    # (via the stack) is TEXT_VMADDR + slide — the correct mapped address.
 
     PAGEZERO_VMADDR  = 0
     PAGEZERO_VMSIZE  = 0x100000000
 
     TEXT_VMADDR      = 0x100000000
-    TEXT_VMSIZE      = PAGE
-    TEXT_FILEOFF     = PAGE          # first file page after header page
+    TEXT_VMSIZE      = 2 * PAGE     # header page + code page
+    TEXT_FILEOFF     = 0            # __TEXT starts at beginning of file
 
-    DATA_VMADDR      = TEXT_VMADDR + TEXT_VMSIZE
+    # The __text section (actual code) lives at page 1 of __TEXT.
+    code_vmaddr   = TEXT_VMADDR + PAGE   # 0x100001000
+    code_fileoff  = TEXT_FILEOFF + PAGE  # 0x00001000
+
+    DATA_VMADDR      = TEXT_VMADDR + TEXT_VMSIZE   # 0x100002000
     DATA_VMSIZE      = PAGE
-    DATA_FILEOFF     = TEXT_FILEOFF + TEXT_VMSIZE
+    DATA_FILEOFF     = TEXT_FILEOFF + TEXT_VMSIZE  # 0x00002000
 
     # ── Load commands ────────────────────────────────────────────────────
-
-    code_vmaddr   = TEXT_VMADDR      # _start at base of __TEXT
-    code_fileoff  = TEXT_FILEOFF     # same in file
 
     seg_pagezero = lc_segment_64(
         "__PAGEZERO",
@@ -217,7 +229,7 @@ def build():
     seg_text = lc_segment_64(
         "__TEXT",
         TEXT_VMADDR, TEXT_VMSIZE,
-        TEXT_FILEOFF, TEXT_VMSIZE,
+        TEXT_FILEOFF, TEXT_VMSIZE,  # fileoff=0, filesize covers both pages
         VM_PROT_RX, VM_PROT_RX,
         sections=[text_section])
 
@@ -232,8 +244,9 @@ def build():
                                  timestamp=2,
                                  current_version=0x051AFF00,
                                  compatibility_version=0x00010000)
-    # LC_MAIN: entry offset relative to TEXT_VMADDR
-    lc_main_cmd  = lc_main(code_vmaddr - TEXT_VMADDR)
+    # LC_MAIN: entry offset is relative to TEXT_VMADDR (not file offset).
+    # code lives at TEXT_VMADDR + PAGE, so entry offset = PAGE.
+    lc_main_cmd  = lc_main(code_vmaddr - TEXT_VMADDR)   # = PAGE = 0x1000
     lc_vermin    = lc_version_min_macosx()
 
     lc_all = (seg_pagezero + seg_text + seg_data +
@@ -256,15 +269,18 @@ def build():
     hdr += b'\x00' * 4  # reserved
 
     # ── Header page (pad to PAGE boundary) ───────────────────────────────
+    # This page is the first page of __TEXT (vmaddr 0x100000000, fileoff 0).
     header_page = hdr + lc_all
     assert len(header_page) <= PAGE, (
         f"header+lcmds overflow one page: {len(header_page)} bytes")
     header_page = pad_to(header_page, PAGE)
 
-    # ── TEXT page (code + zero padding) ──────────────────────────────────
+    # ── CODE page (code at __text section, page 1 of __TEXT) ─────────────
     text_page = pad_to(CODE, PAGE)
 
-    # ── DATA page (empty) ────────────────────────────────────────────────
+    # ── DATA page (empty, anonymous — filesize=0 so no file bytes needed) ─
+    # DATA_FILEOFF is 0x2000 but filesize=0 so we still emit a zero page
+    # to keep file offsets consistent (loader doesn't care: filesize=0).
     data_page = b'\x00' * PAGE
 
     return header_page + text_page + data_page

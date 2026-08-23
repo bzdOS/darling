@@ -55,12 +55,32 @@ void commpage_setup(bool _64bit)
 	_64bit = true;
 #endif
 
-	commpage = (uint8_t*) mmap((void*)(_64bit ? _COMM_PAGE64_BASE_ADDRESS : _COMM_PAGE32_BASE_ADDRESS),
-			_64bit ? _COMM_PAGE64_AREA_LENGTH : _COMM_PAGE32_AREA_LENGTH, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-	if (commpage == MAP_FAILED)
 	{
-		fprintf(stderr, "Cannot mmap commpage: %s\n", strerror(errno));
-		exit(1);
+		void *addr = (void*)(_64bit ? _COMM_PAGE64_BASE_ADDRESS : _COMM_PAGE32_BASE_ADDRESS);
+		size_t len = (size_t)(_64bit ? _COMM_PAGE64_AREA_LENGTH : _COMM_PAGE32_AREA_LENGTH);
+#ifdef DARLING_FREEBSD
+		/* On FreeBSD the commpage must land at the exact macOS-ABI address so
+		 * dyld can access it via its hard-coded constant.  Use MAP_FIXED to
+		 * guarantee placement; MAP_EXCL avoids clobbering existing mappings. */
+		commpage = (uint8_t*) mmap(addr, len, PROT_READ|PROT_WRITE,
+		    MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
+#else
+		commpage = (uint8_t*) mmap(addr, len, PROT_READ|PROT_WRITE,
+		    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+#endif
+		if (commpage == MAP_FAILED)
+		{
+			fprintf(stderr, "Cannot mmap commpage at %p: %s\n", addr, strerror(errno));
+			exit(1);
+		}
+#ifdef DARLING_FREEBSD
+		if ((uintptr_t)commpage != (uintptr_t)addr)
+		{
+			fprintf(stderr, "Commpage mapped at wrong address: expected %p, got %p\n",
+			    addr, (void*)commpage);
+			exit(1);
+		}
+#endif
 	}
 
 	signature = (char*)CGET(_COMM_PAGE_SIGNATURE);
