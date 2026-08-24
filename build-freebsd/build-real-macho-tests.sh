@@ -8,6 +8,8 @@
 #   tests/hello-cctools-macho — trivial puts() program (tests/hello-cctools.c)
 #   tests/sqlite3-real-macho  — the real, unmodified upstream SQLite CLI
 #                               (src/external/sqlite/{sqlite3,shell}.c)
+#   tests/hello-objc-macho    — minimal Objective-C program exercising the
+#                               real libobjc.A.dylib runtime (tests/hello-objc.m)
 #
 # Usage: sh build-freebsd/build-real-macho-tests.sh
 # Run on the FreeBSD dev VM (185) — needs clang and ld64.lld (both ship with
@@ -40,6 +42,8 @@ tar xzf "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" -C "${SDK_FLAT}"
 # --- regular files (same virtiofs-symlink reasoning as launch-dynamic-smoke.c:
 # --- readlink() over the mount is broken, so copy with find|pax, never cp -a). ---
 cp "${OVERLAY}/usr/lib/libSystem.B.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+cp "${OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib"
+ln -sf libobjc.A.dylib "${STAGED_OVERLAY}/usr/lib/libobjc.dylib"
 (cd "${OVERLAY}/usr/lib/system" && find . -maxdepth 1 -type f | pax -rw "${STAGED_OVERLAY}/usr/lib/system")
 
 CLANG_FLAGS="-target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
@@ -70,5 +74,15 @@ ld64.lld ${LD_FLAGS} -o "${SRC}/tests/sqlite3-real-macho" \
 chmod 755 "${SRC}/tests/sqlite3-real-macho"
 file "${SRC}/tests/sqlite3-real-macho"
 
+echo "=== hello-objc-macho ==="
+clang ${CLANG_FLAGS} -fobjc-runtime=macosx-10.12 -x objective-c -O1 -w \
+    -c "${SRC}/tests/hello-objc.m" -o "${BUILD}/hello-objc.o"
+ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-objc-macho" \
+    "${BUILD}/hello-objc.o" "${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" \
+    "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+chmod 755 "${SRC}/tests/hello-objc-macho"
+file "${SRC}/tests/hello-objc-macho"
+
 echo "=== done ==="
 echo "Run with: echo 'select 21*2;' | DARLING_TEST_BINARY=sqlite3-real-macho <launch-dynamic-smoke binary>"
+echo "Run with: DARLING_TEST_BINARY=hello-objc-macho <launch-dynamic-smoke binary>"
