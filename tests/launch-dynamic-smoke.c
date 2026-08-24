@@ -225,6 +225,27 @@ int main(void) {
                 (void)system(fw_cmd);
                 printf("Frameworks cached locally: %s/System/Library/Frameworks\n", LOCAL_OVERLAY);
             }
+
+            /* etc (master.passwd/pwd.db/group) — real Foundation code calls
+             * getpwuid()/getpwnam() (e.g. for NSHomeDirectory()-for-root and
+             * similar lookups) which resolve through the vchroot'd overlay,
+             * not the guest's own /etc. Without a passwd db there the lookup
+             * just fails, but some callers don't handle that failure — worth
+             * caching same as usr/lib/Frameworks above. od's "etc" is a
+             * symlink (Darwin-style etc -> private/etc); go straight to the
+             * real target so this doesn't need a readlink over virtiofs. */
+            char etc_src[512];
+            snprintf(etc_src, sizeof(etc_src), "%s/private/etc", od);
+            struct stat etc_st;
+            if (stat(etc_src, &etc_st) == 0) {
+                char etc_cmd[1024];
+                snprintf(etc_cmd, sizeof(etc_cmd),
+                         "mkdir -p '%s/etc' && cd '%s' && "
+                         "find . -maxdepth 1 -type f | pax -rw '%s/etc'",
+                         LOCAL_OVERLAY, etc_src, LOCAL_OVERLAY);
+                (void)system(etc_cmd);
+                printf("etc cached locally: %s/etc\n", LOCAL_OVERLAY);
+            }
         }
 
         /* Copy the Mach-O test binary too — it's on the same 9p mount */
@@ -331,8 +352,34 @@ int main(void) {
     if (setpgid(0, 0) < 0)
         perror("setpgid");
 
-    execl(mldr, mldr, binary, (char*)NULL);
-    perror("execl mldr");
+    /* DARLING_TEST_ARGS — space-separated argv[1..] for the TARGET binary
+     * (not mldr itself). mldr forwards everything past its own argv[1]
+     * (the target path) straight through as the target's argv — see
+     * mldr.c's "adjust argv (remove mldr's argv[0])" comment. */
+    char *extra_argv[32];
+    int extra_argc = 0;
+    char args_buf[1024];
+    const char *test_args = getenv("DARLING_TEST_ARGS");
+    if (test_args && test_args[0]) {
+        snprintf(args_buf, sizeof(args_buf), "%s", test_args);
+        char *saveptr = NULL;
+        for (char *tok = strtok_r(args_buf, " ", &saveptr);
+             tok != NULL && extra_argc < 30;
+             tok = strtok_r(NULL, " ", &saveptr)) {
+            extra_argv[extra_argc++] = tok;
+        }
+    }
+
+    char *mldr_argv[2 + 32 + 1];
+    int i = 0;
+    mldr_argv[i++] = mldr;
+    mldr_argv[i++] = binary;
+    for (int j = 0; j < extra_argc; j++)
+        mldr_argv[i++] = extra_argv[j];
+    mldr_argv[i] = NULL;
+
+    execv(mldr, mldr_argv);
+    perror("execv mldr");
     cleanup();
     return 1;
 }
