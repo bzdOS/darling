@@ -118,6 +118,7 @@
 #include <sys/mman.h> /* mprotect — #198 raw-syscall trampoline patching */
 #include <dirent.h> /* native struct dirent — #198 getdents64 translation */
 #include <sys/resource.h> /* struct rlimit, getrlimit/setrlimit — #198 prlimit64 translation */
+#include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
 #include <darlingserver/rpc.h>
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
@@ -212,8 +213,15 @@
 #define LINUX_SYS_dup           32
 #define LINUX_SYS_dup2          33
 #define LINUX_SYS_getpid        39
+#define LINUX_SYS_socket        41
+#define LINUX_SYS_connect       42
 #define LINUX_SYS_sendmsg       46
 #define LINUX_SYS_recvmsg       47
+#define LINUX_SYS_setsockopt    54
+#define LINUX_SYS_fcntl         72
+#define LINUX_SYS_eventfd      284
+#define LINUX_SYS_epoll_create1 213
+#define LINUX_SYS_epoll_ctl     233
 #define LINUX_SYS_exit          60
 #define LINUX_SYS_wait4         61
 #define LINUX_SYS_kill          62
@@ -1010,6 +1018,90 @@ dispatch_linux_syscall(unsigned int linux_nr,
         }
 
         return r;
+    }
+    case LINUX_SYS_socket:
+        /* AF_UNIX/AF_INET/AF_INET6 and SOCK_STREAM/SOCK_DGRAM share the same
+         * numeric values on Linux and FreeBSD (both trace back to 4.4BSD),
+         * same as MACOS_SYS_socket above — plain passthrough. */
+        return freebsd_raw_syscall(SYS_socket, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_setsockopt:
+        /* SOL_SOCKET and the common SO_ / IPPROTO_TCP option numbers this
+         * codebase actually uses also share values with FreeBSD, same
+         * BSD lineage as socket() above. */
+        return freebsd_raw_syscall(SYS_setsockopt, a1, a2, a3, a4, a5, 0);
+    case LINUX_SYS_epoll_create1:
+        /* FreeBSD has no epoll — kqueue is the native readiness-notification
+         * primitive. This hands back a real kqueue(2) fd so callers that
+         * only need *a* valid, closeable, pollable fd here (and don't go on
+         * to call epoll_ctl/epoll_wait, which aren't translated) succeed
+         * instead of aborting. epoll_ctl/epoll_wait still fall through to
+         * the unhandled-ENOSYS default below if a caller ever needs them —
+         * revisit with a real epoll-over-kqueue shim if that happens. */
+        return freebsd_raw_syscall(SYS_kqueue, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_epoll_ctl: {
+        /* Translate onto the kqueue fd LINUX_SYS_epoll_create1 handed back
+         * above. Only EPOLLIN/EPOLLOUT are translated (the only readiness
+         * bits this codebase's socket/notification setup registers) —
+         * anything else is silently dropped rather than rejected, matching
+         * this file's general stance of covering the calls actually seen
+         * in practice over a from-scratch semantic redesign. */
+        struct linux_epoll_event {
+            uint32_t events;
+            uint64_t data;
+        } __attribute__((packed));
+
+        enum { LINUX_EPOLL_CTL_ADD = 1, LINUX_EPOLL_CTL_DEL = 2, LINUX_EPOLL_CTL_MOD = 3 };
+        enum { LINUX_EPOLLIN = 0x001, LINUX_EPOLLOUT = 0x004 };
+
+        int epfd = (int)a1;
+        int op = (int)a2;
+        int fd = (int)a3;
+        struct linux_epoll_event *ev = (struct linux_epoll_event *)a4;
+        struct kevent kev[2];
+        int n = 0;
+
+        if (op == LINUX_EPOLL_CTL_DEL) {
+            EV_SET(&kev[n++], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+            EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        } else {
+            if (ev == NULL)
+                return -EFAULT;
+            /* ADD and MOD both map to EV_ADD — kevent(2) upserts registrations. */
+            if (ev->events & LINUX_EPOLLIN)
+                EV_SET(&kev[n++], fd, EVFILT_READ, EV_ADD, 0, 0, (void *)(uintptr_t)ev->data);
+            if (ev->events & LINUX_EPOLLOUT)
+                EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD, 0, 0, (void *)(uintptr_t)ev->data);
+        }
+
+        if (n == 0)
+            return 0;
+
+        long r = freebsd_raw_syscall(SYS_kevent, epfd, (long)kev, n, 0, 0, 0);
+        if (r < 0 && op == LINUX_EPOLL_CTL_DEL)
+            return 0; /* deleting a filter that was never added is a no-op */
+        return (r < 0) ? r : 0;
+    }
+    case LINUX_SYS_connect:
+        /* Same BSD-lineage passthrough as MACOS_SYS_connect above. */
+        return freebsd_raw_syscall(SYS_connect, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_fcntl:
+        /* Same BSD-lineage passthrough as MACOS_SYS_fcntl above. */
+        return freebsd_raw_syscall(SYS_fcntl, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_eventfd: {
+        /* FreeBSD has no eventfd(2) at all — no native counter-semantics fd
+         * exists to translate this to. socketpair(2) gives back a real,
+         * valid fd that (unlike a pipe's two one-directional ends) supports
+         * both read() and write() on the SAME fd, which is the one property
+         * callers actually depend on when they only use an eventfd as a
+         * generic self-wakeup handle rather than for its exact add-to-counter
+         * semantics. initval (a1) is dropped — nothing here recreates the
+         * counter behavior, just a working bidirectional fd. */
+        int fds[2];
+        long r = freebsd_raw_syscall(SYS_socketpair, AF_UNIX, SOCK_STREAM, 0, (long)fds, 0, 0);
+        if (r < 0)
+            return r;
+        freebsd_raw_syscall(SYS_close, fds[1], 0, 0, 0, 0, 0);
+        return fds[0];
     }
     case LINUX_SYS_sigaltstack: {
         /* Linux struct sigaltstack: {void*ss_sp; int ss_flags; size_t ss_size;}
