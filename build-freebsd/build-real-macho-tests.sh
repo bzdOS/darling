@@ -13,6 +13,19 @@
 #   tests/hello-cf-macho      — minimal CoreFoundation program (CFString
 #                               create/uppercase/length) against the real
 #                               CoreFoundation.framework (tests/hello-cf.c)
+#   tests/hello-foundation-macho — NSObject/NSString/NSMutableArray program
+#                               (tests/hello-foundation.m) against a
+#                               Foundation.dylib built from the real,
+#                               unmodified darling-foundation submodule
+#                               sources (233 of 235 — see the exclusions
+#                               noted below). Also INSTALLS that
+#                               Foundation.dylib into
+#                               $DARLING_OVERLAY/System/Library/Frameworks/,
+#                               a persistent side effect (unlike the other
+#                               targets, which only touch tests/) — needed
+#                               so launch-dynamic-smoke.c's own per-run
+#                               System/Library/Frameworks staging step picks
+#                               it up without further changes.
 #
 # Usage: sh build-freebsd/build-real-macho-tests.sh
 # Run on the FreeBSD dev VM (185) — needs clang and ld64.lld (both ship with
@@ -60,7 +73,7 @@ cp "${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/Cor
     "${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
 
 CLANG_FLAGS="-target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
-CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/sdk-flat/usr/include -I${SRC}/tests/vendor/fakesdk"
+CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.12 10.12 -syslibroot ${STAGED_OVERLAY} -Z"
 
 echo "=== hello-cctools-macho ==="
@@ -100,7 +113,7 @@ echo "=== hello-cf-macho ==="
 # Individual headers, not <CoreFoundation/CoreFoundation.h> — that umbrella
 # is a symlink to a file that doesn't exist in the vendored submodule
 # checkout (see tests/hello-cf.c's comment).
-clang ${CLANG_FLAGS} -F"${SDK_FLAT}/sdk-flat/Frameworks" -O1 -w \
+clang ${CLANG_FLAGS} -F"${SDK_FLAT}/Frameworks" -O1 -w \
     -c "${SRC}/tests/hello-cf.c" -o "${BUILD}/hello-cf.o"
 ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-cf-macho" \
     "${BUILD}/hello-cf.o" \
@@ -110,7 +123,90 @@ ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-cf-macho" \
 chmod 755 "${SRC}/tests/hello-cf-macho"
 file "${SRC}/tests/hello-cf-macho"
 
+echo "=== Foundation.dylib + hello-foundation-macho ==="
+FOUND="${SRC}/src/external/foundation"
+CF="${SRC}/src/external/corefoundation"
+FOUND_FLAGS="${CLANG_FLAGS} -fblocks -fconstant-cfstrings -fexceptions -fobjc-runtime=macosx-10.12"
+FOUND_FLAGS="${FOUND_FLAGS} -include ${CF}/CoreFoundation_Prefix.h -include ${CF}/macros.h"
+FOUND_FLAGS="${FOUND_FLAGS} -I${SDK_FLAT}/corefoundation-headers"
+FOUND_FLAGS="${FOUND_FLAGS} -I${FOUND}/include -I${FOUND}/include/Foundation -I${FOUND}/src"
+FOUND_FLAGS="${FOUND_FLAGS} -DNSBUILDINGFOUNDATION=1 -DINCLUDE_OBJC -DDEPLOYMENT_TARGET_MACOSX=1"
+FOUND_FLAGS="${FOUND_FLAGS} -D__CONSTANT_CFSTRINGS__=1 -D__CONSTANT_STRINGS__=1 -DOBJC_OLD_DISPATCH_PROTOTYPES=1"
+FOUND_FLAGS="${FOUND_FLAGS} -DPAGE_SIZE=4096 -DDARLING -F${SDK_FLAT}/Frameworks"
+
+mkdir -p "${BUILD}/found-build"
+found_objs=""
+# Two known, documented exclusions out of 236 source files listed in
+# src/external/foundation/CMakeLists.txt's foundation_sources — both are
+# genuine content gaps, not build-config mistakes:
+#   NSTask.m        needs System/machine/cpu_capabilities.h, which no
+#                    symlink anywhere in the vendored SDK resolves to (not
+#                    a missing submodule init — the file plain isn't there).
+#                    Also moot: NSTask needs fork/exec, unimplemented in
+#                    mldr's syscall layer regardless.
+#   NSNetServices.m  needs CFNetwork/CFNetServices.h, a real functional
+#                    Bonjour/network-service-discovery API — unlike the
+#                    type/constant-only CoreGraphics and CFNetwork-error-
+#                    code stubs elsewhere in tests/vendor/fakesdk, this
+#                    would need an actual implementation, not just headers.
+python3 - "${FOUND}/CMakeLists.txt" <<'PYEOF' > "${BUILD}/foundation_sources.txt"
+import re, sys
+txt = open(sys.argv[1]).read()
+m = re.search(r"set\(foundation_sources\n(.*?)\n\)", txt, re.S)
+excluded = {"src/NSTask.m", "src/NSNetServices.m"}
+seen = set()
+for line in m.group(1).splitlines():
+	f = line.split("#")[0].strip()
+	# NSXPCConnection.m is genuinely listed twice in the vendored
+	# CMakeLists.txt (harmless for CMake's own dedup, but ld64.lld errors
+	# on the resulting duplicate-symbol object file if compiled/linked
+	# twice) — dedupe defensively rather than assuming this is the only case.
+	if f and f not in excluded and f not in seen:
+		seen.add(f)
+		print(f)
+PYEOF
+
+while IFS= read -r rel; do
+	[ -z "${rel}" ] && continue
+	extra=""
+	case "${rel}" in
+		*.c) extra="-x objective-c" ;;
+	esac
+	obj="${BUILD}/found-build/$(echo "${rel}" | tr '/' '_').o"
+	clang ${FOUND_FLAGS} ${extra} -w -O0 -c "${FOUND}/${rel}" -o "${obj}"
+	found_objs="${found_objs} ${obj}"
+done < "${BUILD}/foundation_sources.txt"
+
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C"
+# shellcheck disable=SC2086
+ld64.lld ${LD_FLAGS} -dylib \
+	-install_name /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation \
+	-o "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+	${found_objs} \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libicucore.A.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libc++abi.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+
+mkdir -p "${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+	"${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"
+
+clang ${CLANG_FLAGS} -fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.12 -DDARLING \
+	-F"${SDK_FLAT}/Frameworks" -I"${FOUND}/include" -x objective-c -O1 -w \
+	-c "${SRC}/tests/hello-foundation.m" -o "${BUILD}/hello-foundation.o"
+ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-foundation-macho" \
+	"${BUILD}/hello-foundation.o" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libicucore.A.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libc++abi.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+chmod 755 "${SRC}/tests/hello-foundation-macho"
+file "${SRC}/tests/hello-foundation-macho"
+
 echo "=== done ==="
 echo "Run with: echo 'select 21*2;' | DARLING_TEST_BINARY=sqlite3-real-macho <launch-dynamic-smoke binary>"
 echo "Run with: DARLING_TEST_BINARY=hello-objc-macho <launch-dynamic-smoke binary>"
 echo "Run with: DARLING_TEST_BINARY=hello-cf-macho <launch-dynamic-smoke binary>"
+echo "Run with: DARLING_TEST_BINARY=hello-foundation-macho <launch-dynamic-smoke binary>"
