@@ -222,6 +222,7 @@
 #define LINUX_SYS_gettid       186
 #define LINUX_SYS_exit_group   231
 #define LINUX_SYS_getdents64   217
+#define LINUX_SYS_gettimeofday 96
 #define LINUX_SYS_prlimit64    302
 #define LINUX_SYS_faccessat    269
 #define LINUX_SYS_getcpu       309
@@ -843,6 +844,13 @@ dispatch_linux_syscall(unsigned int linux_nr,
         }
         return freebsd_raw_syscall(SYS_clock_gettime, clockid, a2, 0, 0, 0, 0);
     }
+    case LINUX_SYS_gettimeofday:
+        /* gettimeofday(tv, tz) — struct timeval is the same layout on both
+         * OSes, and the tz argument has been unused/ignored by both kernels
+         * for decades (glibc/libc long ago hardcoded NULL for it) — pure
+         * passthrough. Surfaced by real SQLite (#198): it timestamps its
+         * B-tree/journal operations with this rather than clock_gettime. */
+        return freebsd_raw_syscall(SYS_gettimeofday, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_openat: {
         /* openat(dirfd, path, flags, mode) — dirfd's AT_FDCWD (-100)
          * coincides between the two OSes and access-mode bits (RDONLY/
