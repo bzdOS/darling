@@ -209,6 +209,22 @@ int main(void) {
                 return 1;
             }
             printf("usr/lib cached locally: %s/usr/lib\n", LOCAL_OVERLAY);
+
+            /* Frameworks (e.g. CoreFoundation.framework) — same copy
+             * approach, only staged if the overlay actually has one, since
+             * most test binaries don't need it. */
+            char fw_src[512];
+            snprintf(fw_src, sizeof(fw_src), "%s/System/Library/Frameworks", od);
+            struct stat fw_st;
+            if (stat(fw_src, &fw_st) == 0) {
+                char fw_cmd[1024];
+                snprintf(fw_cmd, sizeof(fw_cmd),
+                         "mkdir -p '%s/System/Library/Frameworks' && cd '%s' && "
+                         "find . -type f | pax -rw '%s/System/Library/Frameworks'",
+                         LOCAL_OVERLAY, fw_src, LOCAL_OVERLAY);
+                (void)system(fw_cmd);
+                printf("Frameworks cached locally: %s/System/Library/Frameworks\n", LOCAL_OVERLAY);
+            }
         }
 
         /* Copy the Mach-O test binary too — it's on the same 9p mount */

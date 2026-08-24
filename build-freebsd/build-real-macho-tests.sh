@@ -10,6 +10,9 @@
 #                               (src/external/sqlite/{sqlite3,shell}.c)
 #   tests/hello-objc-macho    — minimal Objective-C program exercising the
 #                               real libobjc.A.dylib runtime (tests/hello-objc.m)
+#   tests/hello-cf-macho      — minimal CoreFoundation program (CFString
+#                               create/uppercase/length) against the real
+#                               CoreFoundation.framework (tests/hello-cf.c)
 #
 # Usage: sh build-freebsd/build-real-macho-tests.sh
 # Run on the FreeBSD dev VM (185) — needs clang and ld64.lld (both ship with
@@ -44,7 +47,17 @@ tar xzf "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" -C "${SDK_FLAT}"
 cp "${OVERLAY}/usr/lib/libSystem.B.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
 cp "${OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib"
 ln -sf libobjc.A.dylib "${STAGED_OVERLAY}/usr/lib/libobjc.dylib"
+cp "${OVERLAY}/usr/lib/libicucore.A.dylib" "${STAGED_OVERLAY}/usr/lib/libicucore.A.dylib"
+cp "${OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libc++.1.dylib"
+cp "${OVERLAY}/usr/lib/libc++abi.dylib" "${STAGED_OVERLAY}/usr/lib/libc++abi.dylib"
 (cd "${OVERLAY}/usr/lib/system" && find . -maxdepth 1 -type f | pax -rw "${STAGED_OVERLAY}/usr/lib/system")
+# CoreFoundation.framework's actual binary lives at the bottom of a chain of
+# framework-bundle convenience symlinks (Versions/Current -> A, etc.) that
+# virtiofs can't resolve (see tests/vendor/README.md); the real regular file
+# is always at Versions/A/<Name> directly.
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A"
+cp "${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+    "${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
 
 CLANG_FLAGS="-target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/sdk-flat/usr/include -I${SRC}/tests/vendor/fakesdk"
@@ -83,6 +96,21 @@ ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-objc-macho" \
 chmod 755 "${SRC}/tests/hello-objc-macho"
 file "${SRC}/tests/hello-objc-macho"
 
+echo "=== hello-cf-macho ==="
+# Individual headers, not <CoreFoundation/CoreFoundation.h> — that umbrella
+# is a symlink to a file that doesn't exist in the vendored submodule
+# checkout (see tests/hello-cf.c's comment).
+clang ${CLANG_FLAGS} -F"${SDK_FLAT}/sdk-flat/Frameworks" -O1 -w \
+    -c "${SRC}/tests/hello-cf.c" -o "${BUILD}/hello-cf.o"
+ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-cf-macho" \
+    "${BUILD}/hello-cf.o" \
+    "${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+    "${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libicucore.A.dylib" \
+    "${STAGED_OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+chmod 755 "${SRC}/tests/hello-cf-macho"
+file "${SRC}/tests/hello-cf-macho"
+
 echo "=== done ==="
 echo "Run with: echo 'select 21*2;' | DARLING_TEST_BINARY=sqlite3-real-macho <launch-dynamic-smoke binary>"
 echo "Run with: DARLING_TEST_BINARY=hello-objc-macho <launch-dynamic-smoke binary>"
+echo "Run with: DARLING_TEST_BINARY=hello-cf-macho <launch-dynamic-smoke binary>"
