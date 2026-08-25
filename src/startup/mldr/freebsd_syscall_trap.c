@@ -2270,6 +2270,22 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 if (native > 0)
                     sigaddset(&nset, native);
             }
+
+            /*
+             * SIGILL and SIGSYS are not the guest's to block: they are how
+             * every guest syscall reaches mldr (the ud2-patched raw-syscall
+             * trampolines and the macOS syscall trap respectively). The guest
+             * asks to block "all signals" around each RPC, which before this
+             * translation existed always failed with EINVAL and so was
+             * harmless — now that the mask is really applied, honouring it
+             * literally would disarm the syscall mechanism the guest is
+             * itself using, in the middle of using it. Both are synchronous,
+             * thread-generated signals, so blocking them does not defer
+             * anything anyway: the kernel forces the default action and kills
+             * the process.
+             */
+            sigdelset(&nset, SIGILL);
+            sigdelset(&nset, SIGSYS);
         }
 
         long r = freebsd_raw_syscall(SYS_sigprocmask, freebsd_how,
