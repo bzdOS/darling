@@ -36,7 +36,7 @@ su -m root -c 'sh build-freebsd/build-dtape.sh 2>&1 | tee /tmp/dtape-build.log'
 sh build-freebsd/build-darlingserver.sh
 ```
 
-Build output goes to `${DARLING_BUILD_DIR:-/tmp/darling-build}`.
+Build output goes to `${DARLING_BUILD_DIR:-/var/darling-build}`.
 
 To use a custom build directory:
 

@@ -9,7 +9,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BD="${DARLING_BUILD_DIR:-/tmp/darling-build}"
+BD="${DARLING_BUILD_DIR:-/var/darling-build}"
 SD="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 
 PREFIX=/tmp/darling-smoke-prefix

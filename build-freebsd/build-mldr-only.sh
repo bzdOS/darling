@@ -3,12 +3,21 @@
 # Usage: sh build-freebsd/build-mldr-only.sh
 #
 # Environment:
-#   DARLING_BUILD_DIR  — where build artefacts go (default: /tmp/darling-build)
+#   DARLING_BUILD_DIR  — where build artefacts go (default: /var/darling-build,
+#                        the same default tests/launch-dynamic-smoke.c reads
+#                        from — see the note by BUILD below)
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="${DARLING_BUILD_DIR:-/tmp/darling-build}/dserver"
+# /var, not /tmp: this must match tests/launch-dynamic-smoke.c's build_dir()
+# default, which is where every run actually looks for mldr and darlingserver.
+# While these defaults disagreed, a rebuild here installed into a directory
+# nothing reads, the install step below reported only a warning, and the test
+# went on running the previous binary — "edited the source, rebuilt, behaviour
+# unchanged" with no error anywhere. (Same failure mode as build-dtape.sh's
+# libdtape.a being a separately-built prebuilt: see its header.)
+BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/dserver"
 # Build in /tmp so the freebsd user doesn't need write access to the build dir.
 # The resulting binary is then installed to the canonical path with root privileges.
 MLDR_TMP_BUILD="/tmp/mldr-build-$$"
@@ -82,13 +91,24 @@ MLDR_EOF
 cmake .
 make -j$(sysctl -n hw.ncpu)
 echo "=== Build done, installing to ${MLDR_REAL_BUILD}/mldr ==="
-# Install to canonical path (needs root if build dir is root-owned)
+# Install to canonical path (needs root if build dir is root-owned).
+# mkdir -p first: without it a missing target directory made install fail for a
+# reason that had nothing to do with privileges, while the message below blamed
+# permissions.
+mkdir -p "${MLDR_REAL_BUILD}" 2>/dev/null \
+    || su -m root -c "mkdir -p '${MLDR_REAL_BUILD}'"
+
 if install -m 755 "${MLDR_TMP_BUILD}/mldr" "${MLDR_REAL_BUILD}/mldr" 2>/dev/null; then
     echo "Installed as current user"
-elif su -m root -c "install -m 755 '${MLDR_TMP_BUILD}/mldr' '${MLDR_REAL_BUILD}/mldr'" 2>/dev/null; then
+elif su -m root -c "install -m 755 '${MLDR_TMP_BUILD}/mldr' '${MLDR_REAL_BUILD}/mldr'"; then
     echo "Installed as root"
 else
-    echo "WARNING: could not install to ${MLDR_REAL_BUILD}/mldr (permission denied)"
-    echo "Binary is at: ${MLDR_TMP_BUILD}/mldr"
+    # Fatal, not a warning: every consumer runs ${MLDR_REAL_BUILD}/mldr, so a
+    # failed install leaves the PREVIOUS binary in place and the next test runs
+    # stale code while this script still exits 0. That reads as "the change had
+    # no effect" and sends you debugging the source instead of the install.
+    echo "FATAL: could not install to ${MLDR_REAL_BUILD}/mldr" >&2
+    echo "Freshly built binary is at: ${MLDR_TMP_BUILD}/mldr" >&2
+    exit 1
 fi
-ls -lh "${MLDR_REAL_BUILD}/mldr" 2>/dev/null || ls -lh "${MLDR_TMP_BUILD}/mldr"
+ls -lh "${MLDR_REAL_BUILD}/mldr"
