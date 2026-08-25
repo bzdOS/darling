@@ -229,6 +229,9 @@
 #define LINUX_SYS_epoll_create1 291
 #define LINUX_SYS_epoll_wait    232
 #define LINUX_SYS_epoll_ctl     233
+#define LINUX_SYS_timerfd_create 283
+#define LINUX_SYS_timerfd_settime 286
+#define LINUX_SYS_timerfd_gettime 287
 #define LINUX_SYS_futex        202
 #define LINUX_SYS_exit          60
 #define LINUX_SYS_wait4         61
@@ -782,6 +785,106 @@ translate_native_stat_to_linux(const struct stat *nst, struct linux_stat *out)
  * mldr_patch_linux_raw_syscalls further down. */
 #define MLDR_PATCH_PAGE_SIZE 4096u
 
+/* ── timerfd registry ──────────────────────────────────────────────────────── */
+
+/*
+ * A Linux timerfd is a file descriptor that becomes readable when the timer
+ * fires and yields a u64 expiration count when read. FreeBSD's equivalent
+ * timer is EVFILT_TIMER, which lives inside a kqueue and is not a readable
+ * descriptor at all, so the two halves have to be bridged: timerfd_create
+ * hands back a kqueue fd (pollable, and nestable inside the outer kqueue our
+ * epoll shim uses), while read() on that fd has to be recognised and answered
+ * with the expiration count rather than passed to the kernel, which would
+ * fail on a kqueue fd.
+ *
+ * Recognising it needs this table — an fd carries no marker saying it came
+ * from timerfd_create. Fixed-size and lock-free: it is written from the
+ * syscall dispatch path, which runs inside the SIGILL handler.
+ */
+#define MLDR_MAX_TIMERFDS 32
+static int _mldr_timerfds[MLDR_MAX_TIMERFDS];
+static int _mldr_timerfd_count;
+
+/*
+ * purpose:  Test whether an fd was handed out by the timerfd_create shim.
+ * input:    fd — descriptor to test.
+ * output:   true if this is one of ours.
+ * sideEffects: none.
+ */
+static bool
+mldr_is_timerfd(int fd)
+{
+    for (int i = 0; i < _mldr_timerfd_count; i++) {
+        if (_mldr_timerfds[i] == fd)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * purpose:  Record / forget an fd as a timerfd.
+ * input:    fd; add — true to record, false to forget (on close).
+ * output:   none.
+ * sideEffects: mutates the registry.
+ */
+static void
+mldr_timerfd_track(int fd, bool add)
+{
+    if (add) {
+        if (!mldr_is_timerfd(fd) && _mldr_timerfd_count < MLDR_MAX_TIMERFDS)
+            _mldr_timerfds[_mldr_timerfd_count++] = fd;
+        return;
+    }
+
+    for (int i = 0; i < _mldr_timerfd_count; i++) {
+        if (_mldr_timerfds[i] == fd) {
+            _mldr_timerfds[i] = _mldr_timerfds[--_mldr_timerfd_count];
+            return;
+        }
+    }
+}
+
+/*
+ * purpose:  Answer a read(2) on a timerfd with the u64 expiration count Linux
+ *           callers expect, collected from the underlying EVFILT_TIMER.
+ * input:    fd — the timerfd; buf/len — caller's buffer.
+ * output:   8 on success, or a negative errno.
+ * sideEffects: consumes the pending expirations from the kqueue.
+ *
+ *           Divergence: a Linux timerfd read blocks until the timer fires
+ *           unless the fd is non-blocking, whereas this always polls and
+ *           reports EAGAIN when nothing has expired. Callers reach here after
+ *           their event loop said the fd was readable, so the blocking case
+ *           does not arise in practice; making it block would mean sleeping
+ *           inside the SIGILL handler.
+ */
+static long
+mldr_timerfd_read(int fd, void *buf, size_t len)
+{
+    if (buf == NULL)
+        return -EFAULT;
+    if (len < sizeof(uint64_t))
+        return -EINVAL;
+
+    struct kevent kev;
+    struct timespec zero = { 0, 0 };
+    long n = freebsd_raw_syscall(SYS_kevent, fd, 0, 0,
+                                 (long)&kev, 1, (long)&zero);
+    if (n < 0)
+        return n;
+    if (n == 0)
+        return -EAGAIN;
+
+    /* EVFILT_TIMER reports in kev.data how many times the timeout elapsed
+     * since it was last collected — the same quantity timerfd returns. */
+    uint64_t count = (uint64_t)kev.data;
+    if (count == 0)
+        count = 1;
+
+    memcpy(buf, &count, sizeof(count));
+    return (long)sizeof(count);
+}
+
 /*
  * mldr executes the guest Mach-O images directly in its own address space, so
  * they are not host dynamic-linker modules: a host debugger sees no symbols for
@@ -1077,12 +1180,20 @@ dispatch_linux_syscall(unsigned int linux_nr,
     switch (linux_nr) {
 
     case LINUX_SYS_read:
+        /* A timerfd is a kqueue fd here (see timerfd_create), and read(2) on
+         * a kqueue fails — so reads of one have to be answered from the
+         * timer itself rather than passed to the kernel. */
+        if (mldr_is_timerfd((int)a1))
+            return mldr_timerfd_read((int)a1, (void *)a2, (size_t)a3);
         return freebsd_raw_syscall(SYS_read, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_write:
         return freebsd_raw_syscall(SYS_write, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_open:
         return freebsd_raw_syscall(SYS_open, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_close:
+        /* Drop any timerfd registration first: fd numbers get reused, and a
+         * stale entry would make an unrelated later fd read as a timer. */
+        mldr_timerfd_track((int)a1, false);
         return freebsd_raw_syscall(SYS_close, a1, 0, 0, 0, 0, 0);
     case LINUX_SYS_stat: {
         /* FreeBSD 15 dropped SYS_stat entirely (11-compat only, old ABI
@@ -1464,6 +1575,119 @@ dispatch_linux_syscall(unsigned int linux_nr,
 
         return n;
     }
+    case LINUX_SYS_timerfd_create:
+        /*
+         * libdispatch builds every timer on a timerfd, so without this it
+         * takes ENOSYS on its first scheduled work item and aborts — the last
+         * thing standing between `defaults` and running to completion.
+         *
+         * A kqueue fd is the closest thing FreeBSD has: it holds the timer
+         * (EVFILT_TIMER, armed by timerfd_settime below), it is pollable, and
+         * it nests inside the outer kqueue the epoll shim uses, so an event
+         * loop watching this "timerfd" for readability behaves as it would on
+         * Linux. read() on it is intercepted (see LINUX_SYS_read) because the
+         * kernel cannot serve a read from a kqueue.
+         *
+         * clockid is dropped: EVFILT_TIMER runs on the monotonic clock, so a
+         * CLOCK_REALTIME timerfd will not observe wall-clock steps. Nothing
+         * here asks for that, and the alternative is failing the call.
+         */
+        {
+            long fd = freebsd_raw_syscall(SYS_kqueue, 0, 0, 0, 0, 0, 0);
+            if (fd >= 0)
+                mldr_timerfd_track((int)fd, true);
+            return fd;
+        }
+    case LINUX_SYS_timerfd_settime: {
+        enum { LINUX_TFD_TIMER_ABSTIME = 1 };
+        struct linux_itimerspec {
+            struct timespec it_interval;
+            struct timespec it_value;
+        };
+
+        int fd = (int)a1;
+        int flags = (int)a2;
+        const struct linux_itimerspec *nv = (const struct linux_itimerspec *)a3;
+        struct linux_itimerspec *ov = (struct linux_itimerspec *)a4;
+
+        if (!mldr_is_timerfd(fd))
+            return -EINVAL;
+        if (nv == NULL)
+            return -EFAULT;
+
+        /* Reporting the previous setting would need per-fd bookkeeping this
+         * shim does not keep; zero it rather than hand back a stale stack
+         * value, and document that old_value always reads as disarmed. */
+        if (ov != NULL)
+            memset(ov, 0, sizeof(*ov));
+
+        struct kevent kev;
+
+        /* it_value == 0 disarms the timer, in Linux and here alike. */
+        if (nv->it_value.tv_sec == 0 && nv->it_value.tv_nsec == 0) {
+            EV_SET(&kev, 1, EVFILT_TIMER, EV_DELETE, 0, 0, NULL);
+            long r = freebsd_raw_syscall(SYS_kevent, fd, (long)&kev, 1,
+                                         0, 0, 0);
+            /* Disarming a timer that was never armed is a no-op, not an
+             * error — same reasoning as EPOLL_CTL_DEL above. */
+            return (r < 0) ? 0 : 0;
+        }
+
+        int64_t first_ns = (int64_t)nv->it_value.tv_sec * 1000000000LL
+                         + (int64_t)nv->it_value.tv_nsec;
+
+        if (flags & LINUX_TFD_TIMER_ABSTIME) {
+            /* This sys/event.h has no NOTE_ABSTIME, so an absolute deadline
+             * has to be turned into a delay from now. */
+            struct timespec now;
+            long r = freebsd_raw_syscall(SYS_clock_gettime, CLOCK_REALTIME,
+                                         (long)&now, 0, 0, 0, 0);
+            if (r < 0)
+                return r;
+
+            first_ns -= (int64_t)now.tv_sec * 1000000000LL
+                      + (int64_t)now.tv_nsec;
+        }
+
+        /* A deadline already past must still fire; kqueue treats 0 as "as
+         * soon as possible" only for some filters, so clamp to 1ns. */
+        if (first_ns < 1)
+            first_ns = 1;
+
+        int64_t interval_ns = (int64_t)nv->it_interval.tv_sec * 1000000000LL
+                            + (int64_t)nv->it_interval.tv_nsec;
+
+        if (interval_ns > 0) {
+            /*
+             * EVFILT_TIMER repeats on a single period and cannot express
+             * Linux's "first at it_value, then every it_interval" when those
+             * differ. The period wins, so a repeating timer's FIRST fire
+             * happens at it_interval instead of it_value; every fire after
+             * that is correct. libdispatch arms one-shot timers and re-arms
+             * them itself, so this path is the uncommon one — but the skew is
+             * real, and a caller depending on the first interval would see it.
+             */
+            EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ENABLE,
+                   NOTE_NSECONDS, (int64_t)interval_ns, NULL);
+        } else {
+            EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ENABLE | EV_ONESHOT,
+                   NOTE_NSECONDS, (int64_t)first_ns, NULL);
+        }
+
+        long r = freebsd_raw_syscall(SYS_kevent, fd, (long)&kev, 1, 0, 0, 0);
+        return (r < 0) ? r : 0;
+    }
+    case LINUX_SYS_timerfd_gettime:
+        /*
+         * Reporting the time remaining would need the per-fd bookkeeping this
+         * shim deliberately avoids — kqueue does not expose a timer's residual
+         * delay. Fail loudly rather than return a plausible-looking zero that
+         * a caller would read as "timer disarmed".
+         */
+        fprintf(stderr,
+            "[darling-mldr] timerfd_gettime is not implemented (kqueue exposes"
+            " no residual delay) — ENOSYS\n");
+        return -ENOSYS;
     case LINUX_SYS_futex: {
         /*
          * futex(2) -> _umtx_op(2). This is what libpthread and libdispatch
