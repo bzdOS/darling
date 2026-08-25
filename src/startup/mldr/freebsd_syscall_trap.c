@@ -122,6 +122,7 @@
 #include <sys/resource.h> /* struct rlimit, getrlimit/setrlimit — #198 prlimit64 translation */
 #include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
 #include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
+#include <sys/mount.h> /* native struct statfs — statfs/fstatfs translation */
 #include <darlingserver/rpc.h>
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
@@ -229,6 +230,8 @@
 #define LINUX_SYS_epoll_create1 291
 #define LINUX_SYS_epoll_wait    232
 #define LINUX_SYS_epoll_ctl     233
+#define LINUX_SYS_statfs        137
+#define LINUX_SYS_fstatfs       138
 #define LINUX_SYS_timerfd_create 283
 #define LINUX_SYS_timerfd_settime 286
 #define LINUX_SYS_timerfd_gettime 287
@@ -806,6 +809,74 @@ static int _mldr_timerfds[MLDR_MAX_TIMERFDS];
 static int _mldr_timerfd_count;
 
 /*
+ * eventfd registry.
+ *
+ * FreeBSD has no eventfd(2), and the property callers actually depend on is a
+ * single fd that can be written to wake up whoever is polling it and read to
+ * drain that wakeup. A socketpair provides it, but only if BOTH ends stay
+ * open and writes are redirected to the peer, so the bytes arrive in the
+ * returned fd's own receive queue.
+ *
+ * Closing the peer instead — as this originally did — produces an fd that is
+ * permanently at EOF: EVFILT_READ reports it ready forever with EV_EOF set and
+ * zero bytes available. libkqueue registers exactly such an eventfd for
+ * self-wakeup, so every epoll_wait returned it as ready, and libkqueue's
+ * copyout then ran against a knote with nothing behind it and aborted the
+ * process. Hence this table: read/write/close have to know which fds are
+ * eventfds and which peer belongs to each.
+ */
+#define MLDR_MAX_EVENTFDS 32
+static struct {
+    int fd;
+    int peer;
+} _mldr_eventfds[MLDR_MAX_EVENTFDS];
+static int _mldr_eventfd_count;
+
+/*
+ * purpose:  Find the peer socket of an eventfd handed out by the shim.
+ * input:    fd — descriptor to look up.
+ * output:   the peer fd, or -1 if this is not one of ours.
+ * sideEffects: none.
+ */
+static int
+mldr_eventfd_peer(int fd)
+{
+    for (int i = 0; i < _mldr_eventfd_count; i++) {
+        if (_mldr_eventfds[i].fd == fd)
+            return _mldr_eventfds[i].peer;
+    }
+    return -1;
+}
+
+/*
+ * purpose:  Record / forget an eventfd pair.
+ * input:    fd, peer; add — true to record, false to forget (on close).
+ * output:   the peer that was forgotten, or -1.
+ * sideEffects: mutates the registry.
+ */
+static int
+mldr_eventfd_track(int fd, int peer, bool add)
+{
+    if (add) {
+        if (_mldr_eventfd_count < MLDR_MAX_EVENTFDS) {
+            _mldr_eventfds[_mldr_eventfd_count].fd = fd;
+            _mldr_eventfds[_mldr_eventfd_count].peer = peer;
+            _mldr_eventfd_count++;
+        }
+        return peer;
+    }
+
+    for (int i = 0; i < _mldr_eventfd_count; i++) {
+        if (_mldr_eventfds[i].fd == fd) {
+            int old = _mldr_eventfds[i].peer;
+            _mldr_eventfds[i] = _mldr_eventfds[--_mldr_eventfd_count];
+            return old;
+        }
+    }
+    return -1;
+}
+
+/*
  * purpose:  Test whether an fd was handed out by the timerfd_create shim.
  * input:    fd — descriptor to test.
  * output:   true if this is one of ours.
@@ -1186,14 +1257,27 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (mldr_is_timerfd((int)a1))
             return mldr_timerfd_read((int)a1, (void *)a2, (size_t)a3);
         return freebsd_raw_syscall(SYS_read, a1, a2, a3, 0, 0, 0);
-    case LINUX_SYS_write:
+    case LINUX_SYS_write: {
+        /* An eventfd is written to wake up whoever polls it. Writing to the
+         * fd itself would send the bytes AWAY from it (a socketpair end is
+         * full-duplex), leaving it unreadable; writing to the peer puts them
+         * in this fd's receive queue, which is the wakeup callers expect. */
+        int peer = mldr_eventfd_peer((int)a1);
+        if (peer >= 0)
+            return freebsd_raw_syscall(SYS_write, peer, a2, a3, 0, 0, 0);
         return freebsd_raw_syscall(SYS_write, a1, a2, a3, 0, 0, 0);
+    }
     case LINUX_SYS_open:
         return freebsd_raw_syscall(SYS_open, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_close:
-        /* Drop any timerfd registration first: fd numbers get reused, and a
-         * stale entry would make an unrelated later fd read as a timer. */
+        /* Drop any timerfd/eventfd registration first: fd numbers get reused,
+         * and a stale entry would make an unrelated later fd behave as one. */
         mldr_timerfd_track((int)a1, false);
+        {
+            int peer = mldr_eventfd_track((int)a1, -1, false);
+            if (peer >= 0)
+                freebsd_raw_syscall(SYS_close, peer, 0, 0, 0, 0, 0);
+        }
         return freebsd_raw_syscall(SYS_close, a1, 0, 0, 0, 0, 0);
     case LINUX_SYS_stat: {
         /* FreeBSD 15 dropped SYS_stat entirely (11-compat only, old ABI
@@ -1600,6 +1684,61 @@ dispatch_linux_syscall(unsigned int linux_nr,
 
         return n;
     }
+    case LINUX_SYS_statfs:
+    case LINUX_SYS_fstatfs: {
+        /*
+         * Both OSes have the call, but the structures share neither layout nor
+         * field widths (Linux: long-sized counters, f_namelen/f_frsize;
+         * FreeBSD: explicitly-sized 64-bit counters plus mount metadata), so
+         * this has to be copied field by field rather than passed through —
+         * the same reasoning as the stat translation above.
+         */
+        struct linux_statfs {
+            int64_t  f_type;
+            int64_t  f_bsize;
+            uint64_t f_blocks;
+            uint64_t f_bfree;
+            uint64_t f_bavail;
+            uint64_t f_files;
+            uint64_t f_ffree;
+            int32_t  f_fsid[2];
+            int64_t  f_namelen;
+            int64_t  f_frsize;
+            int64_t  f_flags;
+            int64_t  f_spare[4];
+        };
+
+        struct linux_statfs *out = (struct linux_statfs *)a2;
+        if (out == NULL)
+            return -EFAULT;
+
+        struct statfs nsb;
+        long r = (linux_nr == LINUX_SYS_fstatfs)
+            ? freebsd_raw_syscall(SYS_fstatfs, a1, (long)&nsb, 0, 0, 0, 0)
+            : freebsd_raw_syscall(SYS_statfs, a1, (long)&nsb, 0, 0, 0, 0);
+        if (r < 0)
+            return r;
+
+        memset(out, 0, sizeof(*out));
+        /* f_type is a filesystem magic number on Linux and a small enum on
+         * FreeBSD; there is no meaningful mapping, and callers here use it
+         * only to special-case particular filesystems. Passing FreeBSD's
+         * value through is more honest than inventing a Linux magic. */
+        out->f_type    = (int64_t)nsb.f_type;
+        out->f_bsize   = (int64_t)nsb.f_bsize;
+        out->f_blocks  = nsb.f_blocks;
+        out->f_bfree   = nsb.f_bfree;
+        out->f_bavail  = (uint64_t)nsb.f_bavail;
+        out->f_files   = nsb.f_files;
+        out->f_ffree   = (uint64_t)nsb.f_ffree;
+        out->f_fsid[0] = nsb.f_fsid.val[0];
+        out->f_fsid[1] = nsb.f_fsid.val[1];
+        out->f_namelen = (int64_t)nsb.f_namemax;
+        out->f_frsize  = (int64_t)nsb.f_bsize;
+        /* f_flags mount-flag bits differ between the two OSes; leaving it
+         * zero says "no special flags" rather than asserting the wrong ones. */
+        return 0;
+    }
     case LINUX_SYS_timerfd_create:
         /*
          * libdispatch builds every timer on a timerfd, so without this it
@@ -1816,7 +1955,12 @@ dispatch_linux_syscall(unsigned int linux_nr,
         long r = freebsd_raw_syscall(SYS_socketpair, AF_UNIX, SOCK_STREAM, 0, (long)fds, 0, 0);
         if (r < 0)
             return r;
-        freebsd_raw_syscall(SYS_close, fds[1], 0, 0, 0, 0, 0);
+
+        /* Both ends stay open — see the eventfd registry comment. Writes to
+         * the returned fd are redirected to the peer (LINUX_SYS_write) so the
+         * bytes land in this fd's own receive queue and it becomes readable,
+         * which is the wakeup an eventfd exists to deliver. */
+        mldr_eventfd_track(fds[0], fds[1], true);
         return fds[0];
     }
     case LINUX_SYS_sigaltstack: {
