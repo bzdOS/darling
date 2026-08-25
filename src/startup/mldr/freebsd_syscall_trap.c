@@ -1553,6 +1553,31 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (n < 0)
             return n;
 
+        /*
+         * MLDR_LOG_EPOLL exists because the guest's own logging cannot be used
+         * to debug this: libkqueue's KQUEUE_DEBUG output travels to the host
+         * through darlingserver's Kprintf RPC, and two of those from one thread
+         * trip Thread::setPendingCall's "pending call overwritten while active"
+         * throw, killing darlingserver before the thing under investigation
+         * happens. Logging from this side has no such feedback loop.
+         */
+        static int log_epoll = -1;
+        if (log_epoll < 0)
+            log_epoll = (getenv("MLDR_LOG_EPOLL") != NULL);
+        if (log_epoll) {
+            fprintf(stderr, "[darling-mldr] epoll_wait(kq=%d) -> %ld event(s)\n",
+                    epfd, n);
+            for (long i = 0; i < n; i++) {
+                fprintf(stderr,
+                    "    ident=%ld filter=%d flags=0x%x fflags=0x%x"
+                    " data=%ld udata=%p\n",
+                    (long)kev[i].ident, (int)kev[i].filter,
+                    (unsigned)kev[i].flags, (unsigned)kev[i].fflags,
+                    (long)kev[i].data, kev[i].udata);
+            }
+            fflush(stderr);
+        }
+
         for (long i = 0; i < n; i++) {
             uint32_t events = 0;
 
