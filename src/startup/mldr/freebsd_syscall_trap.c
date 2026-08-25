@@ -223,7 +223,11 @@
 #define LINUX_SYS_setsockopt    54
 #define LINUX_SYS_fcntl         72
 #define LINUX_SYS_eventfd      284
-#define LINUX_SYS_epoll_create1 213
+/* 213 is epoll_create (the one taking a size hint), NOT epoll_create1 — that
+ * is 291. Both are handled: the hint is meaningless to kqueue either way. */
+#define LINUX_SYS_epoll_create  213
+#define LINUX_SYS_epoll_create1 291
+#define LINUX_SYS_epoll_wait    232
 #define LINUX_SYS_epoll_ctl     233
 #define LINUX_SYS_futex        202
 #define LINUX_SYS_exit          60
@@ -770,39 +774,248 @@ translate_native_stat_to_linux(const struct stat *nst, struct linux_stat *out)
 /* ── Linux-ABI syscall dispatcher (x86-64 only, #198) ─────────────────────── */
 
 #if defined(__x86_64__)
+
+/* ── guest image registry / diagnostic traps ───────────────────────────────── */
+
+/* Page granularity for the mprotect() dance done when rewriting bytes of an
+ * already-mapped image — used both by the MLDR_TRAP_AT sites below and by
+ * mldr_patch_linux_raw_syscalls further down. */
+#define MLDR_PATCH_PAGE_SIZE 4096u
+
 /*
- * purpose:  Record every file-backed executable mapping as "base+size path",
- *           building the address->guest-dylib map needed to attribute a
- *           faulting address to a specific library (base + offset, fed to
- *           llvm-nm/llvm-objdump on the dylib, names the function).
+ * mldr executes the guest Mach-O images directly in its own address space, so
+ * they are not host dynamic-linker modules: a host debugger sees no symbols for
+ * them at all (lldb resolves `break -n objc_exception_throw` to "no locations")
+ * and dyld's own image list lives only in guest memory it can't walk. Nothing
+ * else records which image an address belongs to, so a crash address or a
+ * return address on the stack is unattributable without this table.
  *
- *           Nothing else in the process can supply that map: mldr executes the
- *           guest Mach-O images directly in its own address space, so they are
- *           not host dynamic-linker modules and a host debugger sees no symbols
- *           for them at all (lldb resolves `break -n objc_exception_throw` to
- *           "no locations" — this is why crash addresses were previously
- *           unattributable). dyld's own image list does exist, but only in
- *           guest memory a host debugger can't walk. The other mapping log in
- *           mldr_patch_linux_raw_syscalls is not a substitute: it fires only
- *           for mappings whose trampoline signature did NOT match, so the
- *           images that matched — and any image at all under one page — never
- *           appear there.
- * input:    base/size of the mapping just created, fd it was mapped from.
+ * Fixed-size and never freed on purpose: this is written from the syscall
+ * dispatch path, reached from a signal handler.
+ */
+#define MLDR_MAX_IMAGES 128
+#define MLDR_MAX_TRAPS    8
+
+struct mldr_image {
+    uintptr_t base;
+    size_t    size;
+    char      name[64];
+};
+
+struct mldr_trap {
+    uintptr_t addr;
+    char      label[96];
+};
+
+static struct mldr_image _mldr_images[MLDR_MAX_IMAGES];
+static int _mldr_image_count;
+static struct mldr_trap _mldr_traps[MLDR_MAX_TRAPS];
+static int _mldr_trap_count;
+
+/*
+ * purpose:  Last path component of a path, for matching and reporting.
+ * input:    path — NUL-terminated path.
+ * output:   pointer into path, never NULL.
+ * sideEffects: none.
+ */
+static const char *
+mldr_basename(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash != NULL ? slash + 1 : path;
+}
+
+/*
+ * purpose:  Describe an address as "<image>+0x<offset>", the form that can be
+ *           handed straight to llvm-nm/llvm-objdump on that image to get a
+ *           function name.
+ * input:    addr — address to resolve; out/outsz — caller's buffer.
+ * output:   out, always NUL-terminated ("0x... <unknown>" if unresolvable).
+ * sideEffects: none.
+ */
+static const char *
+mldr_describe_addr(uintptr_t addr, char *out, size_t outsz)
+{
+    for (int i = 0; i < _mldr_image_count; i++) {
+        uintptr_t base = _mldr_images[i].base;
+
+        if (addr >= base && addr < base + _mldr_images[i].size) {
+            snprintf(out, outsz, "%s+0x%lx", _mldr_images[i].name,
+                     (unsigned long)(addr - base));
+            return out;
+        }
+    }
+
+    snprintf(out, outsz, "0x%lx <unknown>", (unsigned long)addr);
+    return out;
+}
+
+/*
+ * purpose:  Plant a one-shot ud2 breakpoint at <image>+<offset> for every entry
+ *           in MLDR_TRAP_AT that names the image just mapped, so guest code
+ *           reaching that address reports who called it and dies there.
+ *
+ *           This exists because the usual way to answer "who threw this
+ *           exception" is unavailable: a host debugger cannot set a breakpoint
+ *           by symbol in a guest image (see the registry comment above), and
+ *           the guest images are Apple binaries that can't be rebuilt with
+ *           instrumentation. mldr already maps every image and already fields
+ *           #UD via sigill_handler, so it is the one component that can do
+ *           this at all. Offsets come from `llvm-nm <dylib>` — for example
+ *           MLDR_TRAP_AT='libc++abi.dylib+0x2c670' for __cxa_throw.
+ * input:    base/size of the mapping; name — its basename.
  * output:   none.
- * sideEffects: writes one line per mapping to stderr when MLDR_LOG_MAPPINGS is
- *           set; otherwise silent, and does no getenv after the first call.
+ * sideEffects: rewrites two bytes of the mapped image and records the site;
+ *           the original instruction is destroyed, so a planted trap is fatal
+ *           by design rather than resumable.
  */
 static void
-mldr_log_exec_mapping(void *base, size_t size, int fd)
+mldr_plant_traps(uintptr_t base, size_t size, const char *name)
 {
-    static int enabled = -1;
+    const char *spec = getenv("MLDR_TRAP_AT");
+
+    if (spec == NULL)
+        return;
+
+    while (*spec != '\0') {
+        const char *end = strchr(spec, ',');
+        size_t entry_len = (end != NULL) ? (size_t)(end - spec) : strlen(spec);
+
+        /* Split on the LAST '+', not the first: library names contain '+' of
+         * their own — libc++abi.dylib being exactly the one this gets pointed
+         * at most often, where splitting on the first '+' yields the image
+         * name "libc" and silently matches nothing. */
+        const char *plus = NULL;
+        for (size_t i = entry_len; i > 0; i--) {
+            if (spec[i - 1] == '+') {
+                plus = &spec[i - 1];
+                break;
+            }
+        }
+
+        if (plus != NULL) {
+            size_t name_len = (size_t)(plus - spec);
+
+            if (strlen(name) == name_len
+                && strncmp(spec, name, name_len) == 0) {
+                unsigned long off = strtoul(plus + 1, NULL, 0);
+
+                if (off >= size) {
+                    fprintf(stderr,
+                        "[darling-mldr] MLDR_TRAP_AT: offset 0x%lx is past the"
+                        " end of %s's 0x%zx-byte executable mapping — ignored\n",
+                        off, name, size);
+                } else if (_mldr_trap_count >= MLDR_MAX_TRAPS) {
+                    fprintf(stderr,
+                        "[darling-mldr] MLDR_TRAP_AT: no room for %s+0x%lx"
+                        " (max %d traps)\n", name, off, MLDR_MAX_TRAPS);
+                } else {
+                    uint8_t *at = (uint8_t *)(base + off);
+                    uintptr_t page = (uintptr_t)at
+                        & ~((uintptr_t)MLDR_PATCH_PAGE_SIZE - 1);
+
+                    if (mprotect((void *)page, MLDR_PATCH_PAGE_SIZE * 2,
+                                 PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
+                        fprintf(stderr,
+                            "[darling-mldr] MLDR_TRAP_AT: mprotect for %s+0x%lx"
+                            " failed: %s\n", name, off, strerror(errno));
+                    } else {
+                        at[0] = 0x0f;
+                        at[1] = 0x0b;   /* ud2 */
+                        mprotect((void *)page, MLDR_PATCH_PAGE_SIZE * 2,
+                                 PROT_READ | PROT_EXEC);
+
+                        struct mldr_trap *t = &_mldr_traps[_mldr_trap_count++];
+                        t->addr = (uintptr_t)at;
+                        snprintf(t->label, sizeof(t->label), "%s+0x%lx",
+                                 name, off);
+                        fprintf(stderr,
+                            "[darling-mldr] MLDR_TRAP_AT: armed %s at %p\n",
+                            t->label, (void *)at);
+                    }
+                }
+            }
+        }
+
+        if (end == NULL)
+            break;
+        spec = end + 1;
+    }
+}
+
+/*
+ * purpose:  Report a planted trap being hit: which site, the argument registers,
+ *           the immediate caller, and every stack slot that looks like a return
+ *           address into a known image — a usable backtrace where a debugger
+ *           can produce none.
+ *
+ *           For an __cxa_throw site rsi is the std::type_info*, whose name
+ *           string sits one pointer in; printing it identifies the exception
+ *           type, which is the thing dyld's bare "dyld std::__terminate()"
+ *           never says.
+ * input:    trap — the site that was hit; mc — faulting thread context.
+ * output:   none.
+ * sideEffects: writes the report to stderr.
+ */
+static void
+mldr_report_trap(const struct mldr_trap *trap, const mcontext_t *mc)
+{
+    char buf[160];
+
+    fprintf(stderr, "\n[darling-mldr] === MLDR_TRAP_AT hit: %s ===\n",
+            trap->label);
+    fprintf(stderr, "  rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx\n",
+            (unsigned long long)mc->mc_rdi, (unsigned long long)mc->mc_rsi,
+            (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx);
+
+    /* __cxa_throw(void *exc, std::type_info *tinfo, void (*dest)(void*)) —
+     * tinfo->__type_name is the second pointer of the type_info object. */
+    if (strstr(trap->label, "c++abi") != NULL && mc->mc_rsi != 0) {
+        const char *const *namep =
+            (const char *const *)(uintptr_t)(mc->mc_rsi + 8);
+
+        if (*namep != NULL)
+            fprintf(stderr, "  exception type: %s\n", *namep);
+    }
+
+    /* rip is AT the ud2, so nothing has been pushed yet: [rsp] is still the
+     * caller's return address. */
+    const uintptr_t *sp = (const uintptr_t *)(uintptr_t)mc->mc_rsp;
+
+    fprintf(stderr, "  called from %s\n",
+            mldr_describe_addr(sp[0], buf, sizeof(buf)));
+
+    fprintf(stderr, "  stack slots resolving into known images:\n");
+    for (int i = 0; i < 48; i++) {
+        uintptr_t slot = sp[i];
+
+        for (int j = 0; j < _mldr_image_count; j++) {
+            if (slot >= _mldr_images[j].base
+                && slot < _mldr_images[j].base + _mldr_images[j].size) {
+                fprintf(stderr, "    [rsp+%3d] %s\n", i * 8,
+                        mldr_describe_addr(slot, buf, sizeof(buf)));
+                break;
+            }
+        }
+    }
+    fflush(stderr);
+}
+
+/*
+ * purpose:  Record a file-backed executable mapping in the image registry, log
+ *           it when asked, and arm any MLDR_TRAP_AT site that names it.
+ * input:    base/size of the mapping just created, fd it was mapped from.
+ * output:   none.
+ * sideEffects: appends to the image registry; writes one line per mapping to
+ *           stderr when MLDR_LOG_MAPPINGS is set; may rewrite two bytes of the
+ *           image (see mldr_plant_traps).
+ */
+static void
+mldr_note_exec_mapping(void *base, size_t size, int fd)
+{
+    static int log_enabled = -1;
     struct kinfo_file kf;
     const char *path;
-
-    if (enabled < 0)
-        enabled = (getenv("MLDR_LOG_MAPPINGS") != NULL);
-    if (!enabled)
-        return;
 
     /*
      * F_KINFO, not macOS's F_GETPATH — FreeBSD has no F_GETPATH at all, and
@@ -822,8 +1035,23 @@ mldr_log_exec_mapping(void *base, size_t size, int fd)
     else
         path = "<path unavailable>";
 
-    fprintf(stderr, "[darling-mldr] exec-mapping %p+0x%zx fd=%d %s\n",
-            base, size, fd, path);
+    if (log_enabled < 0)
+        log_enabled = (getenv("MLDR_LOG_MAPPINGS") != NULL);
+    if (log_enabled)
+        fprintf(stderr, "[darling-mldr] exec-mapping %p+0x%zx fd=%d %s\n",
+                base, size, fd, path);
+
+    const char *name = mldr_basename(path);
+
+    if (_mldr_image_count < MLDR_MAX_IMAGES) {
+        struct mldr_image *img = &_mldr_images[_mldr_image_count++];
+
+        img->base = (uintptr_t)base;
+        img->size = size;
+        snprintf(img->name, sizeof(img->name), "%s", name);
+    }
+
+    mldr_plant_traps((uintptr_t)base, size, name);
 }
 #endif /* __x86_64__ */
 
@@ -981,7 +1209,7 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * the one chokepoint that covers all of them.
          */
         if (mr >= 0 && (a3 & PROT_EXEC) && (int)a5 >= 0) {
-            mldr_log_exec_mapping((void *)mr, (size_t)a2, (int)a5);
+            mldr_note_exec_mapping((void *)mr, (size_t)a2, (int)a5);
             mldr_patch_linux_raw_syscalls((void *)mr, (size_t)a2);
         }
 #endif
@@ -1106,14 +1334,14 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * codebase actually uses also share values with FreeBSD, same
          * BSD lineage as socket() above. */
         return freebsd_raw_syscall(SYS_setsockopt, a1, a2, a3, a4, a5, 0);
+    case LINUX_SYS_epoll_create:
     case LINUX_SYS_epoll_create1:
         /* FreeBSD has no epoll — kqueue is the native readiness-notification
-         * primitive. This hands back a real kqueue(2) fd so callers that
-         * only need *a* valid, closeable, pollable fd here (and don't go on
-         * to call epoll_ctl/epoll_wait, which aren't translated) succeed
-         * instead of aborting. epoll_ctl/epoll_wait still fall through to
-         * the unhandled-ENOSYS default below if a caller ever needs them —
-         * revisit with a real epoll-over-kqueue shim if that happens. */
+         * primitive, and the epoll fd is a kqueue fd throughout (see
+         * epoll_ctl and epoll_wait below). epoll_create's size hint and
+         * epoll_create1's flags are both dropped: kqueue sizes itself, and
+         * the only defined flag, EPOLL_CLOEXEC, has no kqueue equivalent to
+         * set at creation. */
         return freebsd_raw_syscall(SYS_kqueue, 0, 0, 0, 0, 0, 0);
     case LINUX_SYS_epoll_ctl: {
         /* Translate onto the kqueue fd LINUX_SYS_epoll_create1 handed back
@@ -1157,6 +1385,84 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (r < 0 && op == LINUX_EPOLL_CTL_DEL)
             return 0; /* deleting a filter that was never added is a no-op */
         return (r < 0) ? r : 0;
+    }
+    case LINUX_SYS_epoll_wait: {
+        /*
+         * The missing half of the epoll-over-kqueue shim: epoll_create and
+         * epoll_ctl were translated but the actual wait was not, so callers
+         * registered their interest and then got ENOSYS forever. libdispatch
+         * spins on this — `defaults` produced an unbroken stream of
+         * "unhandled Linux syscall 232" once it got as far as its event loop.
+         *
+         * The epoll fd IS the kqueue fd (see epoll_create above), so this is
+         * a plain kevent() with no changelist, plus a translation of the
+         * returned events back into Linux's layout.
+         */
+        struct linux_epoll_event {
+            uint32_t events;
+            uint64_t data;
+        } __attribute__((packed));
+        enum {
+            LINUX_EPOLLIN  = 0x001,
+            LINUX_EPOLLOUT = 0x004,
+            LINUX_EPOLLERR = 0x008,
+            LINUX_EPOLLHUP = 0x010,
+        };
+
+        int epfd = (int)a1;
+        struct linux_epoll_event *out = (struct linux_epoll_event *)a2;
+        int maxevents = (int)a3;
+        int timeout_ms = (int)a4;
+
+        if (out == NULL)
+            return -EFAULT;
+        if (maxevents <= 0)
+            return -EINVAL;
+
+        /* Bounded so the changelist stays on the stack — this runs in the
+         * SIGILL handler. Returning fewer events than maxevents is explicitly
+         * allowed by epoll_wait's contract (the rest are reported on the next
+         * call), so this caps the batch, not the results. */
+        struct kevent kev[64];
+        if (maxevents > (int)(sizeof(kev) / sizeof(kev[0])))
+            maxevents = (int)(sizeof(kev) / sizeof(kev[0]));
+
+        /* Linux: negative timeout blocks indefinitely, 0 returns immediately.
+         * kevent expresses "block indefinitely" as a NULL timespec. */
+        struct timespec ts;
+        struct timespec *tsp = NULL;
+        if (timeout_ms >= 0) {
+            ts.tv_sec  = timeout_ms / 1000;
+            ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+            tsp = &ts;
+        }
+
+        long n = freebsd_raw_syscall(SYS_kevent, epfd, 0, 0,
+                                     (long)kev, maxevents, (long)tsp);
+        if (n < 0)
+            return n;
+
+        for (long i = 0; i < n; i++) {
+            uint32_t events = 0;
+
+            if (kev[i].filter == EVFILT_READ)
+                events |= LINUX_EPOLLIN;
+            else if (kev[i].filter == EVFILT_WRITE)
+                events |= LINUX_EPOLLOUT;
+
+            /* EV_EOF is a state flag on a live event, not an error; EV_ERROR
+             * carries the failure in kev.data. Both have direct epoll
+             * counterparts that callers already handle. */
+            if (kev[i].flags & EV_EOF)
+                events |= LINUX_EPOLLHUP;
+            if (kev[i].flags & EV_ERROR)
+                events |= LINUX_EPOLLERR;
+
+            out[i].events = events;
+            out[i].data   = (uint64_t)(uintptr_t)kev[i].udata;
+        }
+
+        return n;
     }
     case LINUX_SYS_futex: {
         /*
@@ -1545,8 +1851,6 @@ static const uint8_t SIG_SIGRETURN_TRAMP[] = {
 };
 #define SIG_SIGRETURN_TRAMP_SYSCALL_OFF 5
 
-#define MLDR_PATCH_PAGE_SIZE 4096u
-
 /*
  * purpose:  Find and rewrite one fixed byte signature's `syscall` opcode to
  *           `ud2` within [base, base+size).
@@ -1898,6 +2202,23 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
         sigaction(signo, &sa_dfl, NULL);
         raise(signo);
         return;
+    }
+
+    /*
+     * A diagnostic trap planted by MLDR_TRAP_AT is also a ud2, so it has to be
+     * recognised before the raw-syscall path below tries to read a syscall
+     * number out of rax. Report and die: the instruction the trap overwrote is
+     * gone, so there is nothing to resume to.
+     */
+    for (int i = 0; i < _mldr_trap_count; i++) {
+        if ((uintptr_t)mc->mc_rip == _mldr_traps[i].addr) {
+            mldr_report_trap(&_mldr_traps[i], mc);
+
+            struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+            sigaction(signo, &sa_dfl, NULL);
+            raise(signo);
+            return;
+        }
     }
 
     unsigned int linux_nr = (unsigned int)mc->mc_rax;
