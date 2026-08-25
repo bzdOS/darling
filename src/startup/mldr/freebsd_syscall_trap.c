@@ -300,6 +300,46 @@
 #define SIGSYS_ALTSTACK_SIZE (64 * 1024)
 static char _sigsys_altstack[SIGSYS_ALTSTACK_SIZE] __attribute__((aligned(16)));
 
+/* ── signal number translation ─────────────────────────────────────────────── */
+
+/*
+ * purpose:  Map a Linux signal number to its FreeBSD equivalent.
+ *
+ *           The two agree only up to 15 and then diverge sharply: Linux
+ *           SIGUSR1 is 10 where FreeBSD has SIGBUS, Linux SIGCHLD is 17 where
+ *           FreeBSD has SIGSTOP, and so on. Anything that copies a signal
+ *           number or a signal *mask* across the boundary without this ends up
+ *           naming a different signal entirely.
+ * input:    linux_signo — 1..64.
+ * output:   the FreeBSD signal number, or 0 when there is no counterpart
+ *           (Linux SIGSTKFLT and SIGPWR have none, and the realtime signals
+ *           from 32 up do not exist on FreeBSD at all).
+ * sideEffects: none.
+ */
+static int
+mldr_linux_signo_to_freebsd(int linux_signo)
+{
+    /* Indexed by Linux signal number; 0 = no FreeBSD equivalent. */
+    static const unsigned char map[32] = {
+        [1]  = SIGHUP,  [2]  = SIGINT,  [3]  = SIGQUIT, [4]  = SIGILL,
+        [5]  = SIGTRAP, [6]  = SIGABRT, [7]  = SIGBUS,  [8]  = SIGFPE,
+        [9]  = SIGKILL, [10] = SIGUSR1, [11] = SIGSEGV, [12] = SIGUSR2,
+        [13] = SIGPIPE, [14] = SIGALRM, [15] = SIGTERM,
+        [16] = 0,            /* SIGSTKFLT — no FreeBSD counterpart */
+        [17] = SIGCHLD, [18] = SIGCONT, [19] = SIGSTOP, [20] = SIGTSTP,
+        [21] = SIGTTIN, [22] = SIGTTOU, [23] = SIGURG,  [24] = SIGXCPU,
+        [25] = SIGXFSZ, [26] = SIGVTALRM, [27] = SIGPROF, [28] = SIGWINCH,
+        [29] = SIGIO,
+        [30] = 0,            /* SIGPWR — no FreeBSD counterpart */
+        [31] = SIGSYS,
+    };
+
+    if (linux_signo < 1 || linux_signo >= (int)(sizeof(map) / sizeof(map[0])))
+        return 0;
+
+    return (int)map[linux_signo];
+}
+
 /* ── raw FreeBSD syscall helper ────────────────────────────────────────────── */
 
 /*
@@ -2167,8 +2207,89 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * through is only correct for numbers that happen to coincide
          * (mirrors the same caveat already noted on MACOS_SYS_sigprocmask). */
         return freebsd_raw_syscall(SYS_sigaction, a1, a2, a3, 0, 0, 0);
-    case LINUX_SYS_rt_sigprocmask:
-        return freebsd_raw_syscall(SYS_sigprocmask, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_rt_sigprocmask: {
+        /*
+         * Passing this through was wrong in two ways at once, and the
+         * consequences were not "signals behave oddly" but silent RPC
+         * corruption.
+         *
+         * First, `how`: Linux numbers SIG_BLOCK/UNBLOCK/SETMASK 0/1/2, FreeBSD
+         * numbers them 1/2/3. Linux's SIG_BLOCK therefore arrived as 0, which
+         * FreeBSD rejects outright — so every attempt by the guest to block
+         * signals failed with EINVAL and the mask was never applied. The
+         * generated RPC layer wraps each call in exactly such a block
+         * (dserver_rpc_hooks_atomic_begin/end) to keep a request and its reply
+         * atomic. With the block silently failing, a signal could land
+         * mid-call, its handler would issue its own RPC on the SAME per-thread
+         * socket, and the outer call would then read the inner one's reply.
+         * That surfaces as the caller getting -ECOMM (-70, a Linux errno: the
+         * guest's RPC layer is a Linux build) while darlingserver's log shows
+         * it answered that very call successfully — seen here on
+         * psynch_mutexwait and semaphore_signal, and intermittent because it
+         * depends on whether a signal fell inside the window.
+         *
+         * Second, the mask itself: Linux's sigset_t is 8 bytes, FreeBSD's is
+         * 16. Handing the guest's pointer straight to the kernel means reading
+         * 8 bytes of adjacent memory as part of the mask and, for oldset,
+         * writing 16 bytes into the guest's 8-byte object.
+         *
+         * Signal NUMBERS also differ above 15 (Linux SIGUSR1=10 vs FreeBSD 30,
+         * SIGCHLD 17 vs 20, SIGSTOP 19 vs 17, ...), so the bits are remapped
+         * per signal rather than copied as a word.
+         */
+        enum { LINUX_SIG_BLOCK = 0, LINUX_SIG_UNBLOCK = 1, LINUX_SIG_SETMASK = 2 };
+
+        int linux_how = (int)a1;
+        const uint64_t *lin_set = (const uint64_t *)a2;
+        uint64_t *lin_oldset = (uint64_t *)a3;
+        int freebsd_how;
+
+        switch (linux_how) {
+        case LINUX_SIG_BLOCK:   freebsd_how = SIG_BLOCK;   break;
+        case LINUX_SIG_UNBLOCK: freebsd_how = SIG_UNBLOCK; break;
+        case LINUX_SIG_SETMASK: freebsd_how = SIG_SETMASK; break;
+        default:
+            /* Only meaningful when there is no set to apply; Linux allows a
+             * query-only call with set == NULL and any how. */
+            if (lin_set != NULL)
+                return -EINVAL;
+            freebsd_how = SIG_BLOCK;
+            break;
+        }
+
+        sigset_t nset, oset;
+        sigemptyset(&nset);
+        sigemptyset(&oset);
+
+        if (lin_set != NULL) {
+            uint64_t bits = *lin_set;
+            for (int linux_signo = 1; linux_signo <= 64; linux_signo++) {
+                if ((bits & (1ULL << (linux_signo - 1))) == 0)
+                    continue;
+                int native = mldr_linux_signo_to_freebsd(linux_signo);
+                if (native > 0)
+                    sigaddset(&nset, native);
+            }
+        }
+
+        long r = freebsd_raw_syscall(SYS_sigprocmask, freebsd_how,
+                                     (lin_set != NULL) ? (long)&nset : 0,
+                                     (long)&oset, 0, 0, 0);
+        if (r < 0)
+            return r;
+
+        if (lin_oldset != NULL) {
+            uint64_t bits = 0;
+            for (int linux_signo = 1; linux_signo <= 64; linux_signo++) {
+                int native = mldr_linux_signo_to_freebsd(linux_signo);
+                if (native > 0 && sigismember(&oset, native))
+                    bits |= 1ULL << (linux_signo - 1);
+            }
+            *lin_oldset = bits;
+        }
+
+        return 0;
+    }
 
     case LINUX_SYS_exit:
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
