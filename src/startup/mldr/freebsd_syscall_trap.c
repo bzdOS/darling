@@ -230,6 +230,10 @@
 #define LINUX_SYS_epoll_create1 291
 #define LINUX_SYS_epoll_wait    232
 #define LINUX_SYS_epoll_ctl     233
+#define LINUX_SYS_fsync          74
+#define LINUX_SYS_fdatasync      75
+#define LINUX_SYS_mkdirat       258
+#define LINUX_SYS_fchmodat      268
 #define LINUX_SYS_statfs        137
 #define LINUX_SYS_fstatfs       138
 #define LINUX_SYS_timerfd_create 283
@@ -1683,6 +1687,27 @@ dispatch_linux_syscall(unsigned int linux_nr,
         }
 
         return n;
+    }
+    case LINUX_SYS_fsync:
+        return freebsd_raw_syscall(SYS_fsync, a1, 0, 0, 0, 0, 0);
+    case LINUX_SYS_fdatasync:
+        /* FreeBSD has fdatasync(2) proper, so this is not the usual
+         * "fall back to fsync" approximation. */
+        return freebsd_raw_syscall(SYS_fdatasync, a1, 0, 0, 0, 0, 0);
+    case LINUX_SYS_mkdirat:
+        /* Same call on both, same argument order, and the mode bits for the
+         * permission half coincide — `defaults` needs this to create its
+         * preferences directory. */
+        return freebsd_raw_syscall(SYS_mkdirat, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_fchmodat: {
+        /* The AT_* flag values do NOT coincide: Linux AT_SYMLINK_NOFOLLOW is
+         * 0x100 (which is FreeBSD's AT_EACCESS) and FreeBSD's is 0x200 — the
+         * same mismatch already handled for newfstatat and faccessat. Passing
+         * the flags through would silently mean something else. */
+        long freebsd_flags = 0;
+        if (a4 & 0x100)
+            freebsd_flags |= AT_SYMLINK_NOFOLLOW;
+        return freebsd_raw_syscall(SYS_fchmodat, a1, a2, a3, freebsd_flags, 0, 0);
     }
     case LINUX_SYS_statfs:
     case LINUX_SYS_fstatfs: {
