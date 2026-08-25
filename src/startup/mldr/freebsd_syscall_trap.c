@@ -111,6 +111,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h> /* getenv — MLDR_LOG_MAPPINGS, see mldr_log_exec_mapping */
+#include <sys/user.h> /* struct kinfo_file — F_KINFO in mldr_log_exec_mapping */
 #include <string.h>
 #include <fcntl.h> /* AT_FDCWD / AT_SYMLINK_NOFOLLOW — #198 stat/lstat via fstatat */
 #include <sys/stat.h> /* native struct stat — #198 stat/fstat/lstat translation */
@@ -119,6 +121,7 @@
 #include <dirent.h> /* native struct dirent — #198 getdents64 translation */
 #include <sys/resource.h> /* struct rlimit, getrlimit/setrlimit — #198 prlimit64 translation */
 #include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
+#include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
 #include <darlingserver/rpc.h>
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
@@ -222,6 +225,7 @@
 #define LINUX_SYS_eventfd      284
 #define LINUX_SYS_epoll_create1 213
 #define LINUX_SYS_epoll_ctl     233
+#define LINUX_SYS_futex        202
 #define LINUX_SYS_exit          60
 #define LINUX_SYS_wait4         61
 #define LINUX_SYS_kill          62
@@ -266,6 +270,19 @@
 
 /* ── alternate signal stack ────────────────────────────────────────────────── */
 
+/*
+ * The alternate signal stack registered by setup_macos_syscall_trap() covers
+ * the initial thread only: sigaltstack(2) is per-thread state, and this single
+ * static buffer could not be shared even if it were registered everywhere —
+ * two threads taking a trap at once would run their handlers on the same
+ * memory.
+ *
+ * Every SIGSYS/SIGILL trap mldr relies on is raised by ordinary guest code
+ * (macOS `syscall` instructions and the ud2-patched raw-syscall trampolines),
+ * so it can be raised on any thread. Threads that libpthread/libdispatch
+ * create inside the guest go through darling_thread_entry, which must register
+ * a stack of its own — see mldr_setup_thread_signal_stack.
+ */
 #define SIGSYS_ALTSTACK_SIZE (64 * 1024)
 static char _sigsys_altstack[SIGSYS_ALTSTACK_SIZE] __attribute__((aligned(16)));
 
@@ -752,6 +769,64 @@ translate_native_stat_to_linux(const struct stat *nst, struct linux_stat *out)
 
 /* ── Linux-ABI syscall dispatcher (x86-64 only, #198) ─────────────────────── */
 
+#if defined(__x86_64__)
+/*
+ * purpose:  Record every file-backed executable mapping as "base+size path",
+ *           building the address->guest-dylib map needed to attribute a
+ *           faulting address to a specific library (base + offset, fed to
+ *           llvm-nm/llvm-objdump on the dylib, names the function).
+ *
+ *           Nothing else in the process can supply that map: mldr executes the
+ *           guest Mach-O images directly in its own address space, so they are
+ *           not host dynamic-linker modules and a host debugger sees no symbols
+ *           for them at all (lldb resolves `break -n objc_exception_throw` to
+ *           "no locations" — this is why crash addresses were previously
+ *           unattributable). dyld's own image list does exist, but only in
+ *           guest memory a host debugger can't walk. The other mapping log in
+ *           mldr_patch_linux_raw_syscalls is not a substitute: it fires only
+ *           for mappings whose trampoline signature did NOT match, so the
+ *           images that matched — and any image at all under one page — never
+ *           appear there.
+ * input:    base/size of the mapping just created, fd it was mapped from.
+ * output:   none.
+ * sideEffects: writes one line per mapping to stderr when MLDR_LOG_MAPPINGS is
+ *           set; otherwise silent, and does no getenv after the first call.
+ */
+static void
+mldr_log_exec_mapping(void *base, size_t size, int fd)
+{
+    static int enabled = -1;
+    struct kinfo_file kf;
+    const char *path;
+
+    if (enabled < 0)
+        enabled = (getenv("MLDR_LOG_MAPPINGS") != NULL);
+    if (!enabled)
+        return;
+
+    /*
+     * F_KINFO, not macOS's F_GETPATH — FreeBSD has no F_GETPATH at all, and
+     * kf_path is where it puts the same information. kf_structsize must be
+     * filled in by the caller; the kernel rejects the request otherwise.
+     *
+     * Raw syscall rather than libc fcntl(): this runs from the SIGILL handler's
+     * dispatch path, same reasoning as every other freebsd_raw_syscall here.
+     * The path resolves through the namecache, so it can legitimately come back
+     * empty for an unlinked or uncached vnode — report the mapping either way
+     * instead of dropping the line, since the base address is the useful half.
+     */
+    kf.kf_structsize = sizeof(kf);
+    if (freebsd_raw_syscall(SYS_fcntl, fd, F_KINFO, (long)&kf, 0, 0, 0) == 0
+        && kf.kf_path[0] != '\0')
+        path = kf.kf_path;
+    else
+        path = "<path unavailable>";
+
+    fprintf(stderr, "[darling-mldr] exec-mapping %p+0x%zx fd=%d %s\n",
+            base, size, fd, path);
+}
+#endif /* __x86_64__ */
+
 /*
  * purpose:  Translate a raw Linux x86-64 syscall (as made directly by the
  *           upstream dyld/libdyld.dylib overlay binary, which was compiled
@@ -905,8 +980,10 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * Every file-backed executable mapping goes through here, so this is
          * the one chokepoint that covers all of them.
          */
-        if (mr >= 0 && (a3 & PROT_EXEC) && (int)a5 >= 0)
+        if (mr >= 0 && (a3 & PROT_EXEC) && (int)a5 >= 0) {
+            mldr_log_exec_mapping((void *)mr, (size_t)a2, (int)a5);
             mldr_patch_linux_raw_syscalls((void *)mr, (size_t)a2);
+        }
 #endif
         return mr;
     }
@@ -1080,6 +1157,90 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (r < 0 && op == LINUX_EPOLL_CTL_DEL)
             return 0; /* deleting a filter that was never added is a no-op */
         return (r < 0) ? r : 0;
+    }
+    case LINUX_SYS_futex: {
+        /*
+         * futex(2) -> _umtx_op(2). This is what libpthread and libdispatch
+         * block on inside the guest, so nothing multi-threaded gets past its
+         * first contended lock without it: `defaults` reached Foundation's
+         * initializer, libdispatch started a worker, and every futex came back
+         * ENOSYS from here.
+         *
+         * FreeBSD's UMTX_OP_WAIT_UINT_PRIVATE has the same "compare the word,
+         * then sleep if it still matches" contract as FUTEX_WAIT, which is the
+         * part that has to be atomic and therefore the part that can't be
+         * emulated from userspace.
+         *
+         * Deliberate, documented divergences:
+         *  - A mismatched value makes FreeBSD return success-without-sleeping
+         *    where Linux returns EAGAIN. Callers treat that as a spurious
+         *    wakeup and re-check their own condition, which is behaviour a
+         *    futex caller must tolerate anyway.
+         *  - FUTEX_WAKE returns the number of threads woken on Linux;
+         *    _umtx_op only reports success/failure, so this returns 0 rather
+         *    than inventing a count.
+         *  - The *_BITSET variants map onto the plain wait/wake ops with the
+         *    bitset ignored, which is exact for FUTEX_BITSET_MATCH_ANY (what
+         *    callers here pass) and over-broad for anything else: a wake could
+         *    reach a waiter whose bits didn't match. Still a legal spurious
+         *    wakeup, and the alternative is failing the call outright.
+         *  - PRIVATE vs shared is not distinguished: the _PRIVATE ops are used
+         *    for both. Cross-process futexes on a shared mapping would not be
+         *    woken; nothing in this process's guest stack uses one.
+         */
+        enum {
+            LINUX_FUTEX_WAIT           = 0,
+            LINUX_FUTEX_WAKE           = 1,
+            LINUX_FUTEX_WAIT_BITSET    = 9,
+            LINUX_FUTEX_WAKE_BITSET    = 10,
+            LINUX_FUTEX_PRIVATE_FLAG   = 128,
+            LINUX_FUTEX_CLOCK_REALTIME = 256,
+        };
+
+        int futex_op = (int)a2
+            & ~(LINUX_FUTEX_PRIVATE_FLAG | LINUX_FUTEX_CLOCK_REALTIME);
+        bool want_realtime = ((int)a2 & LINUX_FUTEX_CLOCK_REALTIME) != 0;
+
+        switch (futex_op) {
+        case LINUX_FUTEX_WAIT:
+        case LINUX_FUTEX_WAIT_BITSET: {
+            const struct timespec *lin_ts = (const struct timespec *)a4;
+            struct _umtx_time ut;
+            long ut_size = 0;
+            void *ut_ptr = NULL;
+
+            if (lin_ts != NULL) {
+                /* Plain FUTEX_WAIT's timeout is relative; FUTEX_WAIT_BITSET's
+                 * is absolute. UMTX_ABSTIME carries exactly that distinction,
+                 * and getting it backwards would turn a short sleep into one
+                 * that either never expires or expires immediately. */
+                ut._timeout = *lin_ts;
+                ut._flags   = (futex_op == LINUX_FUTEX_WAIT_BITSET)
+                              ? UMTX_ABSTIME : 0;
+                ut._clockid = want_realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
+                ut_size = (long)sizeof(ut);
+                ut_ptr  = &ut;
+            }
+
+            return freebsd_raw_syscall(SYS__umtx_op, a1,
+                UMTX_OP_WAIT_UINT_PRIVATE, (long)(uint32_t)a3,
+                ut_size, (long)ut_ptr, 0);
+        }
+        case LINUX_FUTEX_WAKE:
+        case LINUX_FUTEX_WAKE_BITSET: {
+            long r = freebsd_raw_syscall(SYS__umtx_op, a1,
+                UMTX_OP_WAKE_PRIVATE, (long)(uint32_t)a3, 0, 0, 0);
+            return (r < 0) ? r : 0;
+        }
+        default:
+            /* REQUEUE/CMP_REQUEUE/WAKE_OP/priority-inheritance ops have no
+             * _umtx_op equivalent that preserves their semantics. Fail loudly
+             * rather than silently mistranslating a lock handoff. */
+            fprintf(stderr,
+                "[darling-mldr] futex op %d (raw 0x%lx) unimplemented"
+                " — ENOSYS\n", futex_op, (unsigned long)a2);
+            return -ENOSYS;
+        }
     }
     case LINUX_SYS_connect:
         /* Same BSD-lineage passthrough as MACOS_SYS_connect above. */
@@ -1816,6 +1977,66 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
     raise(signo);
 }
 #endif /* __x86_64__ */
+
+/*
+ * purpose:  Give the calling thread its own alternate signal stack, so the
+ *           SA_ONSTACK handlers installed by setup_macos_syscall_trap() have
+ *           somewhere valid to run on threads other than the initial one.
+ *
+ *           Without this, a thread created inside the guest (libdispatch
+ *           worker, pthread) has no alternate stack at all, so SA_ONSTACK
+ *           silently degrades to "use the interrupted thread's own stack".
+ *           Guest thread stacks are sized by the guest for guest code, not for
+ *           an extra host signal frame plus a syscall-translation handler, and
+ *           delivering the signal then faults inside the kernel's frame setup —
+ *           surfacing as a SIGSEGV in libthr's handle_signal, with the guest
+ *           call that trapped nowhere in the backtrace. Observed live on 185:
+ *           `defaults` reached Foundation's initializer, libdispatch spun up
+ *           its first worker thread, that thread hit a ud2 raw-syscall
+ *           trampoline, and the process died in handle_signal — which also
+ *           explains why the failure moved around under truss and why purely
+ *           single-threaded tests (hello-foundation) never saw it.
+ *
+ *           mmap rather than a __thread buffer on purpose: mldr rewrites
+ *           fsbase for guest threads (see arch_prctl/LINUX_ARCH_SET_FS), so
+ *           host thread-local storage is not dependably addressable from a
+ *           guest thread — the very context this has to work in.
+ * input:    none.
+ * output:   0 on success, -1 on failure (already reported to stderr).
+ * sideEffects: maps SIGSYS_ALTSTACK_SIZE bytes that live as long as the thread
+ *           does, and registers them as the thread's alternate signal stack.
+ */
+int
+mldr_setup_thread_signal_stack(void)
+{
+    void *stack = mmap(NULL, SIGSYS_ALTSTACK_SIZE, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON, -1, 0);
+
+    if (stack == MAP_FAILED) {
+        fprintf(stderr,
+            "[darling-mldr] WARNING: could not map an alternate signal stack"
+            " for this thread: %s — a raw-syscall trap on it will crash in"
+            " signal delivery\n", strerror(errno));
+        return -1;
+    }
+
+    stack_t altss = {
+        .ss_sp    = stack,
+        .ss_size  = SIGSYS_ALTSTACK_SIZE,
+        .ss_flags = 0,
+    };
+
+    if (sigaltstack(&altss, NULL) < 0) {
+        fprintf(stderr,
+            "[darling-mldr] WARNING: sigaltstack() failed for this thread:"
+            " %s — a raw-syscall trap on it will crash in signal delivery\n",
+            strerror(errno));
+        munmap(stack, SIGSYS_ALTSTACK_SIZE);
+        return -1;
+    }
+
+    return 0;
+}
 
 void
 setup_macos_syscall_trap(void)

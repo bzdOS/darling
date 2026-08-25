@@ -24,6 +24,20 @@
  */
 void setup_macos_syscall_trap(void);
 
+/*
+ * purpose:   Register an alternate signal stack for the CALLING thread, so the
+ *            SA_ONSTACK handlers installed by setup_macos_syscall_trap() can
+ *            run on threads created after it. sigaltstack(2) is per-thread, so
+ *            the initial thread's registration covers only that thread; guest
+ *            threads (libdispatch workers, pthreads) must call this from their
+ *            entry point — see darling_thread_entry in elfcalls/threads.c.
+ * input:     none
+ * output:    0 on success, -1 on failure (reported to stderr; the thread stays
+ *            runnable, but a raw-syscall trap on it will crash).
+ * sideEffects: Maps a per-thread stack and registers it via sigaltstack().
+ */
+int mldr_setup_thread_signal_stack(void);
+
 #if defined(__x86_64__)
 /*
  * purpose:   Rewrite the fixed-signature raw-Linux-syscall trampolines

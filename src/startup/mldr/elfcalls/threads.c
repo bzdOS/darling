@@ -35,6 +35,10 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "dthreads.h"
 
+#ifdef DARLING_FREEBSD
+#include "../freebsd_syscall_trap.h" /* mldr_setup_thread_signal_stack */
+#endif
+
 #include <darlingserver/rpc.h>
 
 extern int __mldr_create_rpc_socket(void);
@@ -208,6 +212,15 @@ static void* darling_thread_entry(void* p)
 	struct arg_struct args;
 
 	memcpy(&args, in_args, sizeof(args));
+
+#ifdef DARLING_FREEBSD
+	// Before this thread runs any guest code: sigaltstack(2) is per-thread, so
+	// the alternate signal stack mldr registered on the initial thread does not
+	// cover this one, and mldr's SA_ONSTACK SIGSYS/SIGILL handlers are how every
+	// guest syscall gets serviced. Without a stack here the trap faults during
+	// signal delivery instead (SIGSEGV inside libthr's handle_signal).
+	mldr_setup_thread_signal_stack();
+#endif
 
 	dthread_t dthread = args.pth;
 	uintptr_t* flags = args.is_workqueue ? &args.arg2 : &args.arg3;
