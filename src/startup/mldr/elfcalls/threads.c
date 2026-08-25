@@ -192,7 +192,22 @@ void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_si
 
 	// std::cout << "Allocated stack at " << pth << ", size " << stack_size << std::endl;
 
+#ifdef DARLING_FREEBSD
+	// 4096 (one page) is enough on Linux, but not here. The thread runs
+	// dserver_rpc_explicit_checkin below before it switches to the guest stack,
+	// and FreeBSD's libc services an fprintf to an unbuffered stream through
+	// __sbprintf, which builds a temporary buffered stream ON THE STACK: a
+	// BUFSIZ buffer plus a copy of the FILE. glibc writes such a stream out
+	// directly and never needs that space, which is why upstream gets away with
+	// a single page. Here any diagnostic printed before the switch — including
+	// the ones in the RPC hooks — runs off the end of the stack and faults
+	// inside __sbprintf, with the real error message never appearing.
+	//
+	// Still small: this only has to survive until the guest stack takes over.
+	pthread_attr_setstacksize(&attr, 64 * 1024);
+#else
 	pthread_attr_setstacksize(&attr, 4096);
+#endif
 
 	//pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
