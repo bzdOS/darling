@@ -108,7 +108,23 @@ static long int dserver_rpc_hooks_receive_message(int socket, dserver_rpc_hooks_
 
 extern int __dserver_main_thread_socket_fd;
 
-#define dserver_rpc_hooks_get_socket() __dserver_main_thread_socket_fd
+/*
+ * Every guest thread has its own RPC socket, assigned in darling_thread_entry;
+ * __darling_thread_rpc_socket() returns it, falling back to the main thread's
+ * socket for the main thread itself. Using __dserver_main_thread_socket_fd
+ * directly here — as this did — routed EVERY thread's ordinary (non-explicit)
+ * RPC over the main thread's socket.
+ *
+ * That is invisible while only one thread makes calls, and corrupts as soon as
+ * two do: requests and replies from different threads interleave on one
+ * socket, so a thread can consume another's reply. Seen on 185 as
+ * psynch_mutexwait aborting with -70 while darlingserver's own log showed it
+ * had answered that very call successfully — the reply had gone to the wrong
+ * reader.
+ */
+extern int __darling_thread_rpc_socket(void);
+
+#define dserver_rpc_hooks_get_socket() __darling_thread_rpc_socket()
 
 #define dserver_rpc_hooks_printf(...) fprintf(stderr, ## __VA_ARGS__)
 
