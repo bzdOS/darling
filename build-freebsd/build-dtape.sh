@@ -21,7 +21,7 @@ DS=${ROOT}/external/darlingserver
 DT=${DS}/duct-tape
 BOOT=${ROOT}/external/bootstrap_cmds
 COMPAT=${ROOT}/startup/compat-includes
-BUILD="${DARLING_BUILD_DIR:-/tmp/darling-build}/dtape"
+BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/dtape"
 
 mkdir -p "${BUILD}"
 

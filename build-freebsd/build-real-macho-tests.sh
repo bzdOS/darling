@@ -39,7 +39,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
-BUILD="${DARLING_BUILD_DIR:-/tmp/darling-build}/real-macho"
+BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/real-macho"
 OVERLAY="${DARLING_OVERLAY:-/path/to/darling-overlay}"
 
 SDK_FLAT="${BUILD}/sdk-flat"

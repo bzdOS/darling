@@ -10,11 +10,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="${DARLING_BUILD_DIR:-/tmp/darling-build}/dserver"
+BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/dserver"
 DS="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src/external/darlingserver"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src"
 COMPAT="${SRC}/startup/compat-includes"
-DTAPE_LIB="${DARLING_BUILD_DIR:-/tmp/darling-build}/dtape/dtape-build/libdtape.a"
+DTAPE_LIB="${DARLING_BUILD_DIR:-/var/darling-build}/dtape/dtape-build/libdtape.a"
 
 rm -rf "${BUILD}" && mkdir -p "${BUILD}" && cd "${BUILD}"
 
