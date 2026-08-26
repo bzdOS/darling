@@ -804,9 +804,22 @@ int __mldr_create_rpc_socket(void) {
 #ifdef DARLING_FREEBSD
 	// FreeBSD has no abstract UNIX socket namespace; autobind is unsupported.
 	// Create a unique filesystem socket path instead.
-	static char __mldr_rpc_sock_path[108];
+	//
+	// Unique per SOCKET, not per process. Linux reaches this through autobind,
+	// which hands every socket its own address, and darlingserver relies on
+	// that: it remembers each thread's address from the request it sent and
+	// addresses the reply to it. Naming every thread's socket after the pid
+	// alone gave them all one address — and the unlink() below then handed
+	// that name to whichever thread bound last, so replies were delivered to
+	// that thread regardless of who asked. Observed as a thread waiting on
+	// psynch_mutexwait (call 73) receiving the reply to another thread's
+	// psynch_mutexdrop (call 72), which its RPC layer rejects as a
+	// communication error. The fd is unique within the process and known here,
+	// and __mldr_close_rpc_socket can rebuild the same name from it, so no
+	// bookkeeping is needed to unlink the right path later.
+	char __mldr_rpc_sock_path[108];
 	snprintf(__mldr_rpc_sock_path, sizeof(__mldr_rpc_sock_path),
-	         "/tmp/darling-mldr-%d", (int)getpid());
+	         "/tmp/darling-mldr-%d-%d", (int)getpid(), fd);
 	struct sockaddr_un sa_client;
 	memset(&sa_client, 0, sizeof(sa_client));
 	sa_client.sun_family = AF_UNIX;
@@ -844,8 +857,12 @@ void __mldr_close_rpc_socket(int socket) {
 	socket_bitmap_put(&socket_bitmap, socket);
 #ifdef DARLING_FREEBSD
 	// Clean up the filesystem socket created in __mldr_create_rpc_socket.
+	// Same name it was bound under: pid AND fd (see the comment there for why
+	// the fd has to be part of it). Unlinking the pid-only name here removed
+	// whichever socket happened to hold it, which was usually another live
+	// thread's.
 	char path[108];
-	snprintf(path, sizeof(path), "/tmp/darling-mldr-%d", (int)getpid());
+	snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d", (int)getpid(), socket);
 	unlink(path);
 #endif
 };
