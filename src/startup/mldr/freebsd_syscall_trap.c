@@ -300,6 +300,38 @@
 #define SIGSYS_ALTSTACK_SIZE (64 * 1024)
 static char _sigsys_altstack[SIGSYS_ALTSTACK_SIZE] __attribute__((aligned(16)));
 
+/* ── open(2) flag translation ──────────────────────────────────────────────── */
+
+/*
+ * purpose:  Convert Linux open(2) flag bits to their FreeBSD equivalents.
+ *
+ *           Only the access mode (O_RDONLY/O_WRONLY/O_RDWR, the low two bits)
+ *           is shared between the two; every other bit sits somewhere else.
+ *           Passing them through does not fail loudly — it silently requests
+ *           something different. Linux O_CREAT (0x40) reads as FreeBSD O_ASYNC,
+ *           so the file is simply not created and the open fails with ENOENT;
+ *           Linux O_APPEND (0x400) reads as FreeBSD O_TRUNC, which quietly
+ *           empties a file the caller meant to append to.
+ * input:    linux_flags — the guest's flag word.
+ * output:   the corresponding FreeBSD flag word.
+ * sideEffects: none.
+ */
+static long
+mldr_open_flags_linux_to_freebsd(long linux_flags)
+{
+    long freebsd_flags = linux_flags & 0x3; /* O_RDONLY/O_WRONLY/O_RDWR */
+
+    if (linux_flags & LINUX_O_CREAT)     freebsd_flags |= O_CREAT;
+    if (linux_flags & LINUX_O_EXCL)      freebsd_flags |= O_EXCL;
+    if (linux_flags & LINUX_O_TRUNC)     freebsd_flags |= O_TRUNC;
+    if (linux_flags & LINUX_O_APPEND)    freebsd_flags |= O_APPEND;
+    if (linux_flags & LINUX_O_NONBLOCK)  freebsd_flags |= O_NONBLOCK;
+    if (linux_flags & LINUX_O_DIRECTORY) freebsd_flags |= O_DIRECTORY;
+    if (linux_flags & LINUX_O_CLOEXEC)   freebsd_flags |= O_CLOEXEC;
+
+    return freebsd_flags;
+}
+
 /* ── signal number translation ─────────────────────────────────────────────── */
 
 /*
@@ -1312,7 +1344,13 @@ dispatch_linux_syscall(unsigned int linux_nr,
         return freebsd_raw_syscall(SYS_write, a1, a2, a3, 0, 0, 0);
     }
     case LINUX_SYS_open:
-        return freebsd_raw_syscall(SYS_open, a1, a2, a3, 0, 0, 0);
+        /* openat below translated its flags; this one did not, though the two
+         * take the same flag word. Any guest open() asking for O_CREAT got
+         * O_ASYNC instead and failed with ENOENT, and one asking for O_APPEND
+         * got O_TRUNC — losing the contents of a file it meant to extend. */
+        return freebsd_raw_syscall(SYS_open, a1,
+                                   mldr_open_flags_linux_to_freebsd(a2),
+                                   a3, 0, 0, 0);
     case LINUX_SYS_close:
         /* Drop any timerfd/eventfd registration first: fd numbers get reused,
          * and a stale entry would make an unrelated later fd behave as one. */
@@ -1406,14 +1444,7 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * coincides between the two OSes and access-mode bits (RDONLY/
          * WRONLY/RDWR) are identical; the rest of the flag bits are NOT
          * (see LINUX_O_* above) and must be translated explicitly. */
-        long freebsd_oflags = a3 & 0x3; /* O_RDONLY/O_WRONLY/O_RDWR */
-        if (a3 & LINUX_O_CREAT)     freebsd_oflags |= O_CREAT;
-        if (a3 & LINUX_O_EXCL)      freebsd_oflags |= O_EXCL;
-        if (a3 & LINUX_O_TRUNC)     freebsd_oflags |= O_TRUNC;
-        if (a3 & LINUX_O_APPEND)    freebsd_oflags |= O_APPEND;
-        if (a3 & LINUX_O_NONBLOCK)  freebsd_oflags |= O_NONBLOCK;
-        if (a3 & LINUX_O_DIRECTORY) freebsd_oflags |= O_DIRECTORY;
-        if (a3 & LINUX_O_CLOEXEC)   freebsd_oflags |= O_CLOEXEC;
+        long freebsd_oflags = mldr_open_flags_linux_to_freebsd(a3);
         return freebsd_raw_syscall(SYS_openat, a1, a2, freebsd_oflags, a4, 0, 0);
     }
     case LINUX_SYS_mmap: {
