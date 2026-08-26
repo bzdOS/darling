@@ -175,7 +175,7 @@ fi
 # "undefined symbol: _jpeg_set_defaults" wall from ld64.lld.
 mkdir -p "${STAGED_OVERLAY}/usr/lib/native"
 missing_wrappers=""
-for w in FreeType jpeg png tiff fontconfig; do
+for w in FreeType jpeg png tiff fontconfig gif; do
 	src="${OVERLAY}/usr/lib/native/lib${w}.dylib"
 	if [ ! -f "${src}" ]; then
 		missing_wrappers="${missing_wrappers} lib${w}.dylib"
@@ -304,17 +304,18 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/usr/lib/native/libjpeg.dylib" \
 	"${STAGED_OVERLAY}/usr/lib/native/libpng.dylib" \
 	"${STAGED_OVERLAY}/usr/lib/native/libtiff.dylib" \
-	"${STAGED_OVERLAY}/usr/lib/native/libfontconfig.dylib"
-# ^ NOT bare -lfreetype2/-ljpeg/-lpng/-ltiff/-lfontconfig, and NOT the pkg-config
-# --libs line this used to have: both resolve through -L against the *host's*
-# real ELF .so files (see -L below), which is exactly the failure
-# build-native-wrappers.sh exists to fix -- "unhandled file type" (a plain ELF
-# .so handed to ld64.lld) / "missing LC_ID_DYLIB load command" (libdispatch.so,
-# libunwind.so). Pass the guest Mach-O wrapper dylibs it built into
-# $OVERLAY/usr/lib/native/ by explicit path instead, staged below same as
-# every other persisted dylib in this script. No libgif wrapper exists (Onyx2D
-# doesn't actually need one -- WRAP_NAMES in build-native-wrappers.sh never
-# included it; the old bare -lgif here was dead weight).
+	"${STAGED_OVERLAY}/usr/lib/native/libfontconfig.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libgif.dylib"
+# ^ NOT bare -lfreetype2/-ljpeg/-lpng/-ltiff/-lfontconfig/-lgif, and NOT the
+# pkg-config --libs line this used to have: both resolve through -L against
+# the *host's* real ELF .so files (see -L below), which is exactly the
+# failure build-native-wrappers.sh exists to fix -- "unhandled file type" (a
+# plain ELF .so handed to ld64.lld) / "missing LC_ID_DYLIB load command"
+# (libdispatch.so, libunwind.so). Pass the guest Mach-O wrapper dylibs it
+# built into $OVERLAY/usr/lib/native/ by explicit path instead, staged below
+# same as every other persisted dylib in this script. (O2ImageSource_GIF.m
+# does call DGifSlurp/DGifOpen -- gif was wrongly dropped as "dead weight" in
+# an earlier pass of this fix; corrected.)
 echo "Built: ${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D"
 # Persist into the PERSISTENT overlay, same as build-real-macho-tests.sh
 # already does for Foundation.dylib (see its own header comment on why:
