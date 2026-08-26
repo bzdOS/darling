@@ -767,6 +767,50 @@ out:
 	pthread_mutex_unlock(&bitmap->mutex);
 };
 
+#ifdef DARLING_FREEBSD
+/*
+ * Which pid bound each RPC socket.
+ *
+ * The socket's filesystem name embeds the pid of whoever created it, and after
+ * a fork the closing process is not that pid — the child inherits the
+ * descriptor. Recording it is the only way for __mldr_close_rpc_socket to
+ * unlink the name that actually exists.
+ *
+ * Fixed-size and lock-free on purpose: this is touched from the syscall
+ * dispatch path, which runs inside a signal handler. An fd beyond the table
+ * simply falls back to the current pid, which is correct for every socket this
+ * process created itself.
+ */
+#define MLDR_MAX_TRACKED_RPC_SOCKETS 128
+static pid_t __mldr_rpc_socket_pids[MLDR_MAX_TRACKED_RPC_SOCKETS];
+static int __mldr_rpc_socket_fds[MLDR_MAX_TRACKED_RPC_SOCKETS];
+static int __mldr_rpc_socket_count;
+
+static void __mldr_rpc_socket_remember(int fd, pid_t pid) {
+	for (int i = 0; i < __mldr_rpc_socket_count; ++i) {
+		if (__mldr_rpc_socket_fds[i] == fd) {
+			__mldr_rpc_socket_pids[i] = pid;
+			return;
+		}
+	}
+
+	if (__mldr_rpc_socket_count < MLDR_MAX_TRACKED_RPC_SOCKETS) {
+		__mldr_rpc_socket_fds[__mldr_rpc_socket_count] = fd;
+		__mldr_rpc_socket_pids[__mldr_rpc_socket_count] = pid;
+		++__mldr_rpc_socket_count;
+	}
+}
+
+static pid_t __mldr_rpc_socket_pid(int fd) {
+	for (int i = 0; i < __mldr_rpc_socket_count; ++i) {
+		if (__mldr_rpc_socket_fds[i] == fd) {
+			return __mldr_rpc_socket_pids[i];
+		}
+	}
+	return getpid();
+}
+#endif // DARLING_FREEBSD
+
 int __mldr_create_rpc_socket(void) {
 	int pre_fd = -1;
 	int fd = -1;
@@ -829,6 +873,7 @@ int __mldr_create_rpc_socket(void) {
 	if (bind(fd, (const struct sockaddr*)&sa_client, sizeof(sa_client)) < 0) {
 		goto err_out;
 	}
+	__mldr_rpc_socket_remember(fd, getpid());
 #else
 	sa_family_t family = AF_UNIX;
 	if (bind(fd, (const struct sockaddr*)&family, sizeof(family)) < 0) {
@@ -857,12 +902,16 @@ void __mldr_close_rpc_socket(int socket) {
 	socket_bitmap_put(&socket_bitmap, socket);
 #ifdef DARLING_FREEBSD
 	// Clean up the filesystem socket created in __mldr_create_rpc_socket.
-	// Same name it was bound under: pid AND fd (see the comment there for why
-	// the fd has to be part of it). Unlinking the pid-only name here removed
-	// whichever socket happened to hold it, which was usually another live
-	// thread's.
+	//
+	// The name must be rebuilt from the pid that BOUND it, not the pid closing
+	// it. Those differ after a fork: the child inherits the descriptor, and
+	// using getpid() here would make it unlink a path under its own pid —
+	// removing nothing it owns while leaking the real one, or worse, deleting
+	// a name another process had since bound. Hence the recorded pid rather
+	// than a fresh getpid().
 	char path[108];
-	snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d", (int)getpid(), socket);
+	snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d",
+	         (int)__mldr_rpc_socket_pid(socket), socket);
 	unlink(path);
 #endif
 };
