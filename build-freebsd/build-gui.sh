@@ -162,6 +162,15 @@ CLANG_FLAGS="${CLANG_FLAGS} -DOBJC_OLD_DISPATCH_PROTOTYPES=1 -DDARLING"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/corefoundation-headers"
 CLANG_FLAGS="${CLANG_FLAGS} -I${COCOTRON}/../foundation/include -I${COCOTRON}/../foundation/include/Foundation"
+# -F, not just -I. The flat corefoundation-headers/ directory is not enough on
+# its own: those headers include each other as <CoreFoundation/CFBase.h>, and
+# nothing in the flat layout provides that prefix. The SDK also ships a proper
+# Frameworks/CoreFoundation.framework/Headers/ tree, and a framework search
+# path is what makes the prefixed form resolve — this is how
+# build-real-macho-tests.sh builds Foundation. Without it the very first
+# Onyx2D file dies on "CoreFoundation/CoreFoundation.h file not found", which
+# reads like a missing framework but is only a missing flag.
+CLANG_FLAGS="${CLANG_FLAGS} -F${SDK_FLAT}/Frameworks"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.10 10.10 -syslibroot ${STAGED_OVERLAY} -Z"
 
 # Extract a CMake `set(<varname> ... )` list of source files, skipping
