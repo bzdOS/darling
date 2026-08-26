@@ -159,6 +159,14 @@ mkdir -p "${STAGED_OVERLAY}/usr/lib" "${NATIVE_OUT}" "${BUILD}/gen"
 # --- the 9p/virtiofs mount is broken, so copy with cp, never rely on a live
 # --- symlink chain through the mount). ---
 cp "${OVERLAY}/usr/lib/libSystem.B.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+# libSystem.B.dylib is an umbrella: it re-exports ~20 usr/lib/system/ dylibs and
+# ld64 resolves every one of those LC_REEXPORT_DYLIB entries at link time, so
+# staging the umbrella alone fails with "unable to locate re-export with install
+# name ..." for each. Copy the closure with find|pax rather than cp -a for the
+# same reason as above -- readlink() over virtiofs is broken. Mirrors
+# build-real-macho-tests.sh:65.
+mkdir -p "${STAGED_OVERLAY}/usr/lib/system"
+(cd "${OVERLAY}/usr/lib/system" && find . -maxdepth 1 -type f | pax -rw "${STAGED_OVERLAY}/usr/lib/system")
 
 # --- 1. Build wrapgen -- a plain HOST tool (ordinary FreeBSD ELF binary,
 # --- compiled with the *host* clang++, NOT the Mach-O target). It parses
@@ -192,8 +200,28 @@ soname_for() {
 # docs/SPEC-native-wrappers.md item R4 for the version-mismatch risk this
 # carries against the 10.12 Foundation.dylib build-real-macho-tests.sh
 # produces (already flagged, unresolved, in docs/SPEC-gui-build.md #6.6).
+# -nostdinc drops clang's own include path too, so <stdint.h> -- pulled in by
+# elfcalls.h:4 -- has to come from the flat SDK like every other guest build
+# here. Without this the wrapper C files fail to compile before the assembler
+# is ever reached, which makes the '.symbol_resolver' diagnostic below fire on
+# a failure that has nothing to do with it. Mirrors
+# build-real-macho-tests.sh:75-76, the one guest build known to work.
+SDK_FLAT="${DARLING_SDK_FLAT:-}"
+if [ -z "${SDK_FLAT}" ]; then
+	for cand in "${DARLING_BUILD_DIR:-/var/darling-build}/gui/sdk-flat" \
+	            "${DARLING_BUILD_DIR:-/var/darling-build}/real-macho/sdk-flat"; do
+		[ -d "${cand}/usr/include" ] && { SDK_FLAT="${cand}"; break; }
+	done
+fi
+if [ -z "${SDK_FLAT}" ]; then
+	echo "FATAL: no flat SDK found. Run build-freebsd/sync-flat-sdk.sh, or set" >&2
+	echo "  DARLING_SDK_FLAT to a directory containing usr/include." >&2
+	exit 1
+fi
+
 CLANG_FLAGS="-target x86_64-apple-macos10.10 -nostdinc -w"
 CLANG_FLAGS="${CLANG_FLAGS} -I${ELFCALLS_DIR}"
+CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.10 10.10 -syslibroot ${STAGED_OVERLAY} -Z"
 
 built=""
