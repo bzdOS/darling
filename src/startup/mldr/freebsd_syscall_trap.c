@@ -123,6 +123,7 @@
 #include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
 #include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
 #include <sys/mount.h> /* native struct statfs — statfs/fstatfs translation */
+#include "sigaction_translate.h" /* mldr_sys_rt_sigaction — see LINUX_SYS_rt_sigaction */
 #include <darlingserver/rpc.h>
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
@@ -2267,10 +2268,15 @@ dispatch_linux_syscall(unsigned int linux_nr,
     case LINUX_SYS_kill:
         return freebsd_raw_syscall(SYS_kill, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_rt_sigaction:
-        /* Signal *numbers* differ between Linux and macOS/FreeBSD; passing
-         * through is only correct for numbers that happen to coincide
-         * (mirrors the same caveat already noted on MACOS_SYS_sigprocmask). */
-        return freebsd_raw_syscall(SYS_sigaction, a1, a2, a3, 0, 0, 0);
+        /* Was a passthrough, which cannot work: the two struct sigaction
+         * layouts differ (Linux carries sa_restorer and an 8-byte mask,
+         * FreeBSD has no restorer and a 16-byte mask), no sa_flags bit value
+         * coincides, and signal numbers diverge above 15. It failed with
+         * EINVAL, which is why the guest's sigexc machinery — the path that
+         * turns hardware faults into Mach exceptions — never installed a
+         * handler. See sigaction_translate.c and docs/SPEC-signal-abi-bridge.md. */
+        return mldr_sys_rt_sigaction((int)a1, (const void *)a2,
+                                     (void *)a3, (size_t)a4);
     case LINUX_SYS_rt_sigprocmask: {
         /*
          * Passing this through was wrong in two ways at once, and the
