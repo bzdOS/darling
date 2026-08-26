@@ -216,9 +216,51 @@ sigdelset(&nset, SIGSYS);
 
 ## 5. Ступень 3 — GUI: `Wayland.backend` для Cocotron
 
-**Это одна ступень, а не подпроект.** AppKit здесь — Cocotron
-(`src/external/cocotron/AppKit`, 375 файлов). Он грузит бэкенды как бандлы по
-`NSPriority`. Нужен **один бандл**: подкласс `NSDisplay` + подкласс `CGWindow`.
+**Осторожно с оценкой: сам бандл — это шов, а не вся работа.** Первая версия
+этого документа утверждала, что достаточно одного бандла. Это оказалось неверно,
+и вот проверенная причина.
+
+В overlay собрано **пять** фреймворков:
+
+```
+$ ls artefacts/darling-overlay/System/Library/Frameworks/
+CoreFoundation  DirectoryService  Foundation  LDAP  SystemConfiguration
+```
+
+А зависимости AppKit (`src/external/cocotron/AppKit/CMakeLists.txt:541-558`):
+
+```
+objc system CoreFoundation Foundation Onyx2D CoreText CoreData OpenGL
+QuartzCore CoreGraphics ImageIO FreeType fontconfig jpeg png tiff CoreServices
+```
+
+То есть **`CoreText`, `CoreData`, `QuartzCore`, `CoreGraphics`, `ImageIO`,
+`CoreServices` и `Onyx2D` не собирались никогда**, а `CoreGraphics` дополнительно
+требует `IOKit`. Линковка AppKit сегодня провалится не случайно, а
+детерминированно.
+
+Поэтому ступень делится надвое.
+
+### 3a. Собрать недостающие фреймворки
+
+Порядок диктуется зависимостями: `Onyx2D` (единственный, у кого зависимости уже
+есть) → `CoreGraphics` (нужен `IOKit`) → `CoreText`, `ImageIO`, `QuartzCore`,
+`CoreData`, `CoreServices` → `AppKit`.
+
+Собирать как гостевые Mach-O тем же способом, что и Foundation в
+`build-freebsd/build-real-macho-tests.sh` (clang `-target x86_64-apple-macos10.12`
++ `ld64.lld`, список файлов извлекается из CMakeLists), а **не** через общий
+CMake проекта. Заготовка: `build-freebsd/build-gui.sh`, спецификация и список
+рисков: `docs/SPEC-gui-build.md`. Скрипт **ни разу не запускался**.
+
+Отдельная ловушка: нативные библиотеки (jpeg/png/tiff) линкуются не как
+`-ljpeg`, а через маленькие Mach-O-обёртки в `/usr/lib/native/` — в overlay там
+сейчас только `libfuse.dylib`.
+
+### 3b. Бандл бэкенда
+
+Он грузит бэкенды по `NSPriority`. Нужен подкласс `NSDisplay` + подкласс
+`CGWindow`.
 
 Спецификации: `docs/SPEC-appkit-display-backend.md`,
 `docs/SPEC-wlstream-frame-source.md`. Образец — `AppKit/X11.backend/`.
