@@ -26,32 +26,37 @@
 #                        libraries. This is the one stage with a real chance
 #                        of linking.
 #   2. CoreGraphics.dylib -- DEPENDENCIES include IOKit (CoreGraphics/
-#                        CMakeLists.txt:131-138), and IOKit.framework has
-#                        never been built into the overlay (only
-#                        CoreFoundation/DirectoryService/Foundation/LDAP/
-#                        SystemConfiguration exist under
-#                        $OVERLAY/System/Library/Frameworks -- checked
-#                        2026-08-26). This script FATALs before attempting
-#                        the CoreGraphics link if IOKit.framework is absent,
-#                        rather than let ld64.lld produce a wall of
-#                        undefined-symbol errors.
+#                        CMakeLists.txt:131-138). As of 2026-08-26 a minimal
+#                        IOKit *shim* (not the real Apple IOKitUser -- see
+#                        docs/SPEC-iokit-coregraphics-build.md) can be built
+#                        by build-freebsd/build-iokit-shim.sh and installed
+#                        into $OVERLAY/System/Library/Frameworks/IOKit.
+#                        framework/Versions/A/IOKit, which this script then
+#                        stages if present (see the copy step above). That
+#                        shim script has never been run on a FreeBSD box
+#                        either, so this stage's actual status is still
+#                        "untested", not "known-working" -- if the shim
+#                        hasn't been built yet, or its build failed, this
+#                        script still FATALs before attempting the
+#                        CoreGraphics link rather than let ld64.lld produce
+#                        a wall of undefined-symbol errors.
 #   3. AppKit.dylib   -- DEPENDENCIES include CoreText, CoreData, QuartzCore,
 #                        ImageIO, CoreServices (AppKit/CMakeLists.txt:
 #                        541-558), none of which exist in the overlay
 #                        either. Same FATAL-before-attempting treatment.
-#   4. Wayland.backend -- DOES NOT EXIST. Cocotron ships exactly one
-#                        AppKit backend, X11.backend (src/external/cocotron/
-#                        AppKit/X11.backend/), which talks to a real X
-#                        server via libX11/libXrandr/libXcursor/libXext/
-#                        libXkbfile (AppKit/CMakeLists.txt:25-40). There is
-#                        no Wayland backend source anywhere in this tree to
-#                        build -- one would have to be WRITTEN (a new
-#                        *.backend/CMakeLists.txt-worth of X11Display.m/
-#                        X11Window.m/X11Event.m-equivalent Objective-C
-#                        talking to libwayland-client + xdg-shell instead of
-#                        Xlib), which is a development task, not a build
-#                        step. This script therefore does not attempt it: it
-#                        FATALs immediately at stage 4 with this explanation.
+#   4. Wayland.backend -- source now EXISTS (src/external/cocotron/AppKit/
+#                        Wayland.backend/{WaylandDisplay,WaylandWindow,
+#                        WaylandInput}.{h,m} -- written 2026-08-26, never
+#                        compiled). This stage now delegates to
+#                        build-freebsd/build-wayland-backend.sh, which
+#                        compiles+links it and installs the bundle into
+#                        $OVERLAY -- see that script's own header comment
+#                        for the two concrete compile-blocker risks it
+#                        already flags (an MRC-incompatible `__weak` ivar in
+#                        WaylandInput.h, and a missing HIToolbox/Events.h in
+#                        every SDK-header location this repo has). This
+#                        stage still stops the whole script (via `set -e`)
+#                        if that script FATALs, same as stages 1-3.
 #
 # Usage: sh build-freebsd/build-gui.sh
 # Run on the FreeBSD dev VM (185) -- never tested there (see above).
@@ -150,6 +155,39 @@ cp "${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/Cor
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C"
 cp "${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"
+# IOKit.framework: only the minimal shim from build-freebsd/build-iokit-shim.sh
+# (see docs/SPEC-iokit-coregraphics-build.md) -- not the real Apple IOKitUser,
+# which has nothing to talk to on this port (no iokitd). Copied only if it
+# has already been built+installed into $OVERLAY by that script; if not,
+# this is a silent no-op here and require_frameworks's FATAL check at the
+# CoreGraphics stage below is what actually catches its absence.
+if [ -f "${OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" ]; then
+	mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A"
+	cp "${OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" \
+		"${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+fi
+
+# Native wrapper dylibs (FreeType/jpeg/png/tiff/fontconfig) built by
+# build-freebsd/build-native-wrappers.sh into $OVERLAY/usr/lib/native/ --
+# needed by the Onyx2D link below. FATAL here, not a silent skip: unlike
+# IOKit this stage has no separate require_frameworks-style gate later, and
+# a missing wrapper would otherwise surface as a much less obvious
+# "undefined symbol: _jpeg_set_defaults" wall from ld64.lld.
+mkdir -p "${STAGED_OVERLAY}/usr/lib/native"
+missing_wrappers=""
+for w in FreeType jpeg png tiff fontconfig; do
+	src="${OVERLAY}/usr/lib/native/lib${w}.dylib"
+	if [ ! -f "${src}" ]; then
+		missing_wrappers="${missing_wrappers} lib${w}.dylib"
+		continue
+	fi
+	cp "${src}" "${STAGED_OVERLAY}/usr/lib/native/lib${w}.dylib"
+done
+if [ -n "${missing_wrappers}" ]; then
+	echo "FATAL: missing native wrapper dylib(s) in ${OVERLAY}/usr/lib/native/:${missing_wrappers}" >&2
+	echo "  Run build-freebsd/build-native-wrappers.sh first." >&2
+	exit 1
+fi
 
 # Common clang flags. -mmacosx-version-min=10.10 matches AppKit/CoreGraphics/
 # Onyx2D's own CMakeLists.txt (they all set it; Foundation's build used 10.12
@@ -262,20 +300,52 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libz.dylib" \
 	"${STAGED_OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
-	$(pkg-config --libs freetype2 fontconfig libpng zlib 2>/dev/null) -ltiff -ljpeg -lgif
-# ^ -ltiff/-ljpeg/-lgif passed bare because those pkgs don't reliably ship
-# .pc files (see the preflight check above) -- if pkg names differ from the
-# actual .so name on this FreeBSD version, THIS is where it breaks; see
-# docs/SPEC-gui-build.md.
+	"${STAGED_OVERLAY}/usr/lib/native/libFreeType.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libjpeg.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libpng.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libtiff.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libfontconfig.dylib"
+# ^ NOT bare -lfreetype2/-ljpeg/-lpng/-ltiff/-lfontconfig, and NOT the pkg-config
+# --libs line this used to have: both resolve through -L against the *host's*
+# real ELF .so files (see -L below), which is exactly the failure
+# build-native-wrappers.sh exists to fix -- "unhandled file type" (a plain ELF
+# .so handed to ld64.lld) / "missing LC_ID_DYLIB load command" (libdispatch.so,
+# libunwind.so). Pass the guest Mach-O wrapper dylibs it built into
+# $OVERLAY/usr/lib/native/ by explicit path instead, staged below same as
+# every other persisted dylib in this script. No libgif wrapper exists (Onyx2D
+# doesn't actually need one -- WRAP_NAMES in build-native-wrappers.sh never
+# included it; the old bare -lgif here was dead weight).
 echo "Built: ${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D"
+# Persist into the PERSISTENT overlay, same as build-real-macho-tests.sh
+# already does for Foundation.dylib (see its own header comment on why:
+# "a persistent side effect... needed so [dependents'] own staging step
+# picks it up without further changes"). Without this, STAGED_OVERLAY is
+# deleted+recreated by `rm -rf "${BUILD}"` on every run of this script, so
+# nothing downstream (build-wayland-backend.sh, a future full darlingserver
+# run) could ever find Onyx2D.dylib again after this script exits.
+mkdir -p "${OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
+	"${OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D"
 
 echo "=== [2/4] CoreGraphics ==="
 require_frameworks CoreGraphics IOKit
-# unreachable while IOKit.framework doesn't exist -- see header comment.
+# FATALs here if IOKit.framework's shim hasn't been built+staged yet --
+# see build-freebsd/build-iokit-shim.sh and the header comment above.
 CG="${COCOTRON}/CoreGraphics"
 CG_FLAGS="-I${CG} -I${CG}/.. -I${CG}/include -I${CG}/include/CoreGraphics"
 CG_FLAGS="${CG_FLAGS} -I${COCOTRON}/CoreText -I${COCOTRON}/Onyx2D/include"
 CG_FLAGS="${CG_FLAGS} -include ${CG}/../Onyx2D/include/Onyx2D/Onyx2D.h"
+# IOKit headers: CGDirectDisplay.m #imports <IOKit/graphics/IOGraphicsLib.h>
+# and <IOKit/graphics/IOGraphicsTypes.h>; CoreGraphicsPrivate.h #includes
+# <IOKit/hidsystem/IOLLEvent.h>. Neither is on any -I path above this line
+# in this script. The missing-headers dir MUST come first -- see
+# build-freebsd/build-iokit-shim.sh's own comment on this same flag: four
+# of the paths under IOKit/graphics|hidsystem/ in the darling include tree
+# are dangling symlinks into two never-initialized submodules (IOGraphics,
+# IOHIDFamily), replaced here by src/freebsd-shims/missing-headers/ (see
+# that dir's README.md).
+CG_FLAGS="${CG_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
+CG_FLAGS="${CG_FLAGS} -I${SRC}/src/external/IOKitUser/darling/include"
 cg_objs=$(compile_component CoreGraphics "${CG}" CoreGraphics_sources "${CG_FLAGS}")
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A"
 # shellcheck disable=SC2086
@@ -288,6 +358,10 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
 	-lGL "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+# Persist into $OVERLAY -- see the Onyx2D persist step above for why.
+mkdir -p "${OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
+	"${OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
 
 echo "=== [3/4] AppKit ==="
 require_frameworks AppKit CoreText CoreData QuartzCore ImageIO CoreServices
@@ -312,22 +386,21 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
 	-lGL $(pkg-config --libs freetype2 fontconfig 2>/dev/null)
+# Persist into $OVERLAY -- see the Onyx2D persist step above for why. This
+# one matters most: build-wayland-backend.sh's own preflight FATALs unless
+# AppKit.dylib is found at exactly this $OVERLAY path.
+mkdir -p "${OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit" \
+	"${OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"
 
 echo "=== [4/4] Wayland.backend ==="
-# There is no Wayland.backend source anywhere under
-# src/external/cocotron/AppKit/ -- only X11.backend/ exists (see this
-# script's header comment for the full explanation). Building a backend
-# means compiling *.backend/*.m into a small dylib and installing it under
-# AppKit.framework/.../Resources/Backends/<name>.backend/Contents/MacOS/ --
-# add_backend() in AppKit/CMakeLists.txt:567-595 does exactly that for X11.
-# A Wayland equivalent would need NEW source (X11Display.m/X11Window.m/
-# X11Event.m/X11Cursor.m all reimplemented against libwayland-client +
-# xdg-shell instead of Xlib), which this script cannot manufacture. FATAL
-# here rather than silently skip, so a `sh build-gui.sh; echo $?` that
-# returns 0 never happens for this repo's actual GUI target (Wayland).
-echo "FATAL: no Wayland.backend source exists in this tree." >&2
-echo "  Only src/external/cocotron/AppKit/X11.backend/ exists (X11, not Wayland)." >&2
-echo "  A Wayland backend is a development task (new Objective-C source against" >&2
-echo "  libwayland-client + xdg-shell-client-protocol.h), not something this build" >&2
-echo "  script can produce. See docs/SPEC-gui-build.md." >&2
-exit 1
+# Delegates to build-wayland-backend.sh (compiles WaylandDisplay.m/
+# WaylandWindow.m/WaylandInput.m, generates xdg-shell-client-protocol.h/.c
+# via wayland-scanner, links the bundle, installs it into $OVERLAY's
+# AppKit.framework/.../Resources/Backends/Wayland.backend/). That script has
+# its own independent preflight (native wayland-client/xkbcommon/
+# wayland-protocols packages, the AppKit.dylib just persisted above, the
+# HIToolbox/Events.h gap) and FATALs on its own terms -- `set -e` at the top
+# of this script means a non-zero exit here stops build-gui.sh too, same as
+# stages 1-3 above.
+sh "${SCRIPT_DIR}/build-freebsd/build-wayland-backend.sh"
