@@ -37,6 +37,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
 
 #ifdef DARLING_FREEBSD
 #include "../freebsd_syscall_trap.h" /* mldr_setup_thread_signal_stack */
+#include <sys/thr.h> /* thr_self — MLDR_LOG_RPC_SOCKET diagnostic */
 #endif
 
 #include <darlingserver/rpc.h>
@@ -441,6 +442,33 @@ int __darling_thread_rpc_socket(void) {
 			abort();
 		}
 	}
+
+#ifdef DARLING_FREEBSD
+	// MLDR_LOG_RPC_SOCKET: report which socket each thread ends up using.
+	//
+	// t_server_socket is __thread, and mldr rewrites fsbase for guest threads
+	// (see arch_prctl/ARCH_SET_FS), so host thread-local storage is not
+	// dependably addressable from guest context — the same reason the
+	// per-thread signal stack is mmap'd rather than __thread. If two threads
+	// read the same slot, they share one socket, and one consumes the other's
+	// reply: the guest then rejects it as "BAD RECEIVE MESSAGE: number !=
+	// expected" and reports a communication error. That is exactly what is
+	// observed on pthread_canceled. This prints the pairing so the assumption
+	// can be checked rather than argued about.
+	{
+		static int log_enabled = -1;
+
+		if (log_enabled < 0)
+			log_enabled = (getenv("MLDR_LOG_RPC_SOCKET") != NULL);
+		if (log_enabled) {
+			long tid = 0;
+			thr_self(&tid);
+			fprintf(stderr, "[darling-mldr] rpc-socket tid=%ld fd=%d\n",
+				tid, t_server_socket);
+		}
+	}
+#endif
+
 	return t_server_socket;
 };
 

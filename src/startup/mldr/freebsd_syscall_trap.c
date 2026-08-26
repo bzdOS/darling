@@ -219,6 +219,8 @@
 #define LINUX_SYS_getpid        39
 #define LINUX_SYS_socket        41
 #define LINUX_SYS_connect       42
+#define LINUX_SYS_sendto        44
+#define LINUX_SYS_recvfrom      45
 #define LINUX_SYS_sendmsg       46
 #define LINUX_SYS_recvmsg       47
 #define LINUX_SYS_setsockopt    54
@@ -1252,16 +1254,25 @@ mldr_report_trap(const struct mldr_trap *trap, const mcontext_t *mc)
 }
 
 /*
- * purpose:  Record a file-backed executable mapping in the image registry, log
- *           it when asked, and arm any MLDR_TRAP_AT site that names it.
- * input:    base/size of the mapping just created, fd it was mapped from.
+ * purpose:  Record a file-backed mapping in the image registry, log it when
+ *           asked, and — for executable ones — arm any MLDR_TRAP_AT site that
+ *           names it.
+ *
+ *           Non-executable segments are registered too, not just code. A guest
+ *           pointer often refers to one: a format string, a constant, a vtable
+ *           all live in __DATA_CONST or __TEXT,__cstring, which are mapped
+ *           separately from the executable segment. Registering only the
+ *           executable ones left every such pointer unresolvable, which is
+ *           exactly what stalled reading a diagnostic string out of the guest.
+ * input:    base/size of the mapping just created, fd it was mapped from,
+ *           executable — whether the mapping carries PROT_EXEC.
  * output:   none.
  * sideEffects: appends to the image registry; writes one line per mapping to
- *           stderr when MLDR_LOG_MAPPINGS is set; may rewrite two bytes of the
- *           image (see mldr_plant_traps).
+ *           stderr when MLDR_LOG_MAPPINGS is set; may rewrite two bytes of an
+ *           executable image (see mldr_plant_traps).
  */
 static void
-mldr_note_exec_mapping(void *base, size_t size, int fd)
+mldr_note_mapping(void *base, size_t size, int fd, bool executable)
 {
     static int log_enabled = -1;
     struct kinfo_file kf;
@@ -1288,8 +1299,8 @@ mldr_note_exec_mapping(void *base, size_t size, int fd)
     if (log_enabled < 0)
         log_enabled = (getenv("MLDR_LOG_MAPPINGS") != NULL);
     if (log_enabled)
-        fprintf(stderr, "[darling-mldr] exec-mapping %p+0x%zx fd=%d %s\n",
-                base, size, fd, path);
+        fprintf(stderr, "[darling-mldr] %s-mapping %p+0x%zx fd=%d %s\n",
+                executable ? "exec" : "data", base, size, fd, path);
 
     const char *name = mldr_basename(path);
 
@@ -1298,10 +1309,14 @@ mldr_note_exec_mapping(void *base, size_t size, int fd)
 
         img->base = (uintptr_t)base;
         img->size = size;
-        snprintf(img->name, sizeof(img->name), "%s", name);
+        /* Tag data segments so an address resolving into one is not mistaken
+         * for a code offset that could be fed to llvm-nm. */
+        snprintf(img->name, sizeof(img->name), "%s%s",
+                 name, executable ? "" : " (data)");
     }
 
-    mldr_plant_traps((uintptr_t)base, size, name);
+    if (executable)
+        mldr_plant_traps((uintptr_t)base, size, name);
 }
 #endif /* __x86_64__ */
 
@@ -1478,9 +1493,12 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * Every file-backed executable mapping goes through here, so this is
          * the one chokepoint that covers all of them.
          */
-        if (mr >= 0 && (a3 & PROT_EXEC) && (int)a5 >= 0) {
-            mldr_note_exec_mapping((void *)mr, (size_t)a2, (int)a5);
-            mldr_patch_linux_raw_syscalls((void *)mr, (size_t)a2);
+        if (mr >= 0 && (int)a5 >= 0) {
+            bool executable = (a3 & PROT_EXEC) != 0;
+
+            mldr_note_mapping((void *)mr, (size_t)a2, (int)a5, executable);
+            if (executable)
+                mldr_patch_linux_raw_syscalls((void *)mr, (size_t)a2);
         }
 #endif
         return mr;
@@ -2032,6 +2050,21 @@ dispatch_linux_syscall(unsigned int linux_nr,
             return -ENOSYS;
         }
     }
+    case LINUX_SYS_sendto:
+    case LINUX_SYS_recvfrom:
+        /*
+         * The guest answers a server-to-client call with __NR_sendto (see the
+         * S2C handling in its dserver-rpc-defs.h receive hook), and without
+         * these it would get ENOSYS there and return a negative out of the
+         * receive path — turning a serviceable S2C request into a failed RPC.
+         * No S2C call has appeared in a trace yet, so this is completing the
+         * socket family rather than fixing an observed failure; the six-arg
+         * form is BSD-lineage and identical on both sides, unlike the flag and
+         * struct translations elsewhere in this file.
+         */
+        return freebsd_raw_syscall(
+            (linux_nr == LINUX_SYS_sendto) ? SYS_sendto : SYS_recvfrom,
+            a1, a2, a3, a4, a5, a6);
     case LINUX_SYS_connect:
         /* Same BSD-lineage passthrough as MACOS_SYS_connect above. */
         return freebsd_raw_syscall(SYS_connect, a1, a2, a3, 0, 0, 0);
