@@ -183,7 +183,7 @@ clang++ -O2 -std=c++14 -w -o "${BUILD}/wrapgen" "${WRAPGEN_SRC}" -ldl \
 # separate libdl to link against, hence the -ldl-less fallback above.)
 
 # name        host ELF soname (bare -- wrapgen resolves it via dlopen/dlinfo)
-WRAP_NAMES="FreeType jpeg png tiff fontconfig"
+WRAP_NAMES="FreeType jpeg png tiff fontconfig gif"
 soname_for() {
 	case "$1" in
 		FreeType)   echo "libfreetype.so" ;;
@@ -191,6 +191,11 @@ soname_for() {
 		png)        echo "libpng.so" ;;
 		tiff)       echo "libtiff.so" ;;
 		fontconfig) echo "libfontconfig.so" ;;
+		# O2ImageSource_GIF.m calls DGifSlurp/DGifOpen/DGifCloseFile/
+		# DGifSavedExtensionToGCB -- Onyx2D does need giflib, this was
+		# wrongly assumed dead weight when the Onyx2D link was fixed to
+		# use wrapper dylibs (see build-gui.sh's Onyx2D link comment).
+		gif)        echo "libgif.so" ;;
 		*) echo "FATAL: no soname mapping for '$1'" >&2; exit 1 ;;
 	esac
 }
