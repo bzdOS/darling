@@ -243,9 +243,30 @@ QuartzCore CoreGraphics ImageIO FreeType fontconfig jpeg png tiff CoreServices
 
 ### 3a. Собрать недостающие фреймворки
 
-Порядок диктуется зависимостями: `Onyx2D` (единственный, у кого зависимости уже
-есть) → `CoreGraphics` (нужен `IOKit`) → `CoreText`, `ImageIO`, `QuartzCore`,
-`CoreData`, `CoreServices` → `AppKit`.
+**Оценка росла дважды, и это важнее самого порядка.** Сперва казалось, что
+нужен один бандл. Потом выяснилось, что не собрано шесть фреймворков. Затем —
+что `QuartzCore` тянет ещё `CoreImage` (427 файлов) и `CoreVideo`, которых не
+было ни в одном списке. Планируя сроки, исходи из того, что цепочка может
+удлиниться ещё раз.
+
+Порядок с учётом всего известного:
+
+| Очередь | Что | Чем ограничено |
+|---|---|---|
+| 1 (можно сейчас) | `CoreData`, `CoreServices` | только CF и Foundation — ни от кого не зависят |
+| 2 | `Onyx2D` | нативные обёртки (jpeg/png/tiff/freetype) + `libz.dylib` из исходников |
+| 3 | `IOKit`-шим (4 символа) → `CoreGraphics` | см. `SPEC-iokit-coregraphics-build.md` |
+| 4 | `ImageIO`, `CoreText` | после Onyx2D и CoreGraphics |
+| 5 | `CoreImage` + `CoreVideo` → `QuartzCore` | самая тяжёлая ветка |
+| 6 | `AppKit` | всё вышеперечисленное |
+
+`OpenGL` в наш путь вывода не входит, но числится в зависимостях AppKit как
+цельная ссылка, а не пофайлово. Текущий `build-gui.sh` его обходит, линкуя
+голый `-lGL` и не проверяя наличие фреймворка, — это скорее недосмотр, чем
+решение, и его надо будет закрыть осознанно.
+
+Детали и риски по каждому: `docs/SPEC-remaining-frameworks.md`,
+`docs/SPEC-iokit-coregraphics-build.md`, `docs/SPEC-native-wrappers.md`.
 
 Собирать как гостевые Mach-O тем же способом, что и Foundation в
 `build-freebsd/build-real-macho-tests.sh` (clang `-target x86_64-apple-macos10.12`
