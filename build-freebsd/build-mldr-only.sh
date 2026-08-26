@@ -78,6 +78,7 @@ add_executable(mldr
   \${SRC}/startup/mldr/elfcalls/threads.c
   \${SRC}/startup/mldr/freebsd_syscall_trap.c
   \${SRC}/startup/mldr/process_spawn.c
+  \${SRC}/startup/mldr/sigaction_translate.c
 )
 
 # rpc.c needs dserver_rpc_hooks_* macros defined in dserver-rpc-defs.h.
