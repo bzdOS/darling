@@ -214,3 +214,163 @@ live trace of one `defaults read` invocation, watching for:
    silent success-coded failure.
 
 This is out of scope for the current (read-only, no-build) investigation.
+
+## 7. 2026-08-26 — live trace: all five prior hypotheses are moot, the guest dies in
+dyld's own startup before CF is ever reached
+
+`DARLING_TEST_BINARY=defaults-macho DARLING_TEST_ARGS='read' truss -f -s 90 /tmp/dynsmoke`
+was re-run (`/tmp/tr4.log` on the dev VM, guest pid **11696**, the pid that survives
+`execve("/var/darling-build/dserver/mldr-real/mldr", ...)` at file line 11217 — pids
+11697-11721 that appear alongside it are `launch-dynamic-smoke.c`'s own `fork()`
+calls plus the pax-based overlay-staging harness, not the traced target). The
+`defaults write com.bsdos.demo Greeting Hello` trace from the same session
+(`/tmp/tr3.log`, guest pid **8740**, `argc=5` confirming the write-with-4-args
+invocation vs. `read`'s `argc=2`) was also re-examined for comparison.
+
+**Finding, stated plainly: neither run ever reaches `_CFPreferencesCreateDomainList`,
+`opendir()` on any Preferences directory, or `getpwuid()`/`master.passwd` at all.**
+Grepping the *entire* post-`execve` trace for pid 11696 (576 lines) for
+`Library|passwd|HOME|getenv` returns **zero** matches outside two bare
+`issetugid()` calls. The only files ever `open()`/`openat()`'d by 11696 after
+`execve` are: `/etc/libmap.conf`, `/usr/local/etc/libmap.d` (ENOENT), `/lib/libc.so.7`,
+`/lib/libthr.so.3`, `/lib/libsys.so.7`, `/tmp/darling-local-overlay/defaults-macho`
+(the target Mach-O itself, opened by mldr's own loader) and
+`/tmp/darling-local-overlay/usr/lib/dyld` (dyld itself, likewise opened by mldr).
+**No CoreFoundation, no Foundation, no libobjc, no libdispatch dylib is ever
+opened.** This directly falls out of the trace — it is not an inference. The
+"~41 guest dylibs map per process" status line in `README.md` does not describe
+this build/run.
+
+Instead, both traces show the exact same terminal sequence, byte-for-byte
+identical in shape, right after mldr hands control to dyld's entry point
+(`write(2,"[darling-mldr] DEBUG pre-start: ...")` in the log, marking mldr's
+last message before jumping in):
+
+```
+11696: sigaction(SIGSEGV, ...) = 0                          ; mldr installs its own crash handlers
+11696: write(2,"[darling-mldr] DEBUG pre-start: mh=... entry=...")
+   ... jump to dyld entry point; every subsequent syscall from here is a raw
+       Linux-ABI syscall caught by mldr's ud2/SIGILL trap (the "SIGNAL 4
+       (SIGILL) code=ILL_PRVOPC ... sigreturn" pairs bracketing every line
+       below are that trap mechanism, not application code) ...
+11696: getrandom(...) x2, getpid(), thr_self(), sigprocmask(BLOCK)
+11696: sendmsg(234638, {AF_UNIX ".darlingserver.sock"}, ... 32 bytes) = 32
+11696: recvmsg(234638, ...) = 8
+11696: sigaction(SIGHUP..SIGIO, one syscall per signal, all installing the same
+       handler at the same address — dyld installing its own crash-reporter
+       signal handlers)
+11696: mprotect(guard page, PROT_NONE)
+11696: sigaltstack(0x23ae90,0x23bea0)  ERR#1 'Operation not permitted'
+```
+
+then, a few more `getpid`/`thr_self`/RPC-request-reply cycles later, the **very
+last** exchange before death:
+
+```
+11696: sendmsg(234638, ..., [{"\a\0\0\0...\xff\xff\xff\xff\xff\xff\xff\xff",24}], ...) = 24
+11696: recvmsg(234638, ..., [{"\a\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0...",48}], ...) = 8
+11696: sigprocmask(SIG_SETMASK,{},{SIGILL}) = 0
+11696: write(2,"dyld: dyld std::__terminate()\n\n") = 31
+11696: sigprocmask(SIG_UNBLOCK,{SIGABRT},{SIGILL}) = 0
+11696: write(1,"abort_with_payload: reason: dyld std::__terminate()\n; code: 9\n") = 62
+11696: kill(0,SIGABRT) = 0
+11696: SIGNAL 6 (SIGABRT) code=SI_USER pid=11696 uid=0
+11696: SIGNAL 4 (SIGILL) code=ILL_PRVOPC trapno=1 addr=0x825a96749
+11696: process killed, signal = 4 (core dumped)
+```
+
+`tr3.log` (the `write` run, pid 8740) has the **identical** sequence — same
+`sigaltstack(...) ERR#1`, same RPC-then-terminate tail, same
+`write(2,"dyld: dyld std::__terminate()\n\n")`, same `process killed, signal = 4`
+(not 6 — the abort's own `SIGABRT` delivery races with another `SIGILL` from the
+raw-syscall trap and the process dies to the *trap signal*, not the intended
+abort; a secondary artifact, not the root cause). 728 lines total for pid 8740,
+essentially matching 11696's 576 (the small difference is `argc` — write's 5
+argv slots vs. read's 2 mean a few more early startup bytes, not more work
+done). **`read` and `write` do not diverge in this trace. Both die identically,
+before either one does anything CF-related.** This falsifies the working
+premise that `write` succeeds and only `read` is broken — that claim (also in
+`README.md`'s status table) is not reproduced by this build's current binaries;
+either the binaries are stale relative to when that observation was made, or it
+was observed against a different build. Not established which — flagged in §8.
+
+**The RPC tag identification is exact, not guessed:** the last RPC before
+`std::__terminate()` is call number 7. `src/external/darlingserver/scripts/
+generate-rpc-wrappers.py` lists calls in emission order starting at 1
+(`checkin`=1, `checkout`=2, `vchroot_path`=3, `kprintf`=4, `started_suspended`=5,
+`get_tracer`=6, **`uidgid`=7**, params `(int32_t new_uid, int32_t new_gid)` →
+returns `(int32_t old_uid, int32_t old_gid)`, script lines 139-145). The 24-byte
+send payload's last 8 bytes are `\xff\xff\xff\xff\xff\xff\xff\xff` = two
+`int32_t(-1)` = exactly `dserver_rpc_uidgid(-1, -1, &stored_uid, &stored_gid)`,
+the *pure-read* call documented in `SPEC-getpwuid-guest.md` §4
+(`src/external/darlingserver/.../unistd/getuid.c:41`). The 8-byte reply is all
+zero bytes = `old_uid=0, old_gid=0` — the zero-initialized virtual-root value
+from `duct-tape/src/task.c:78`, exactly as that spec predicted. **This same
+call (identical 24-byte payload) is also made once earlier, by mldr itself,
+before it ever jumps into dyld** — so `uidgid` succeeding and returning 0/0 is
+not itself the crash; dyld calling it again right at the end of its own
+init and then immediately terminating is the observed juxtaposition, not a
+proven causal link. Do not read more into this than the trace shows: the
+**only** hard fact is that `uidgid()→(0,0)` is the last RPC dyld makes, and
+`std::__terminate()` is the very next thing it does — nothing application-level
+happens in between (one `sigprocmask` restore, no other syscall).
+
+**A ready-made tool exists in-tree to identify the actual C++ exception type
+and throw site**, and was not yet used because the transport dropped mid-session
+(see below): `MLDR_TRAP_AT=<image>+<hexoff>`, documented at `README.md:101` and
+implemented at `src/startup/mldr/freebsd_syscall_trap.c:1213-1239`
+(`mldr_report_trap()` — for a trap labeled `c++abi...`, it reads
+`std::type_info` off `rsi` and prints the exception's demangled-ish name string,
+plus the caller and a best-effort backtrace). The exact invocation for
+`__cxa_throw` is already spelled out in a code comment at
+`freebsd_syscall_trap.c:1118`: `MLDR_TRAP_AT='libc++abi.dylib+0x2c670' for
+__cxa_throw`. This was launched
+(`DARLING_TEST_BINARY=defaults-macho DARLING_TEST_ARGS='read'
+MLDR_TRAP_AT='libc++abi.dylib+0x2c670' /tmp/dynsmoke > /tmp/trapread.log 2>&1`,
+output on the guest at `/tmp/trapread.log`) but the guest virtio-console agent
+(`bsdos.agent`, `/tmp/bsdos-agent-vport-x86.sock`) went `disconnected`
+immediately after that run and did not come back before this session ended, so
+**`/tmp/trapread.log`'s content was not read back and is not reported here as
+fact** — it is real output sitting on the dev VM's disk, unread. This is the
+single most promising unread artifact for finishing this investigation: it
+should contain the exact exception type, its throw site, and a symbol-resolved
+backtrace for the `std::__terminate()` seen above.
+
+## 8. What was NOT checked in this pass (2026-08-26 live-trace addendum)
+
+- **`/tmp/trapread.log` was never read** — the vport agent transport dropped
+  (`virsh dumpxml build-vm` shows channel `bsdos.agent` state `disconnected`)
+  right after the `MLDR_TRAP_AT` run completed in the background, and repeated
+  `agent_exec`/`PING` retries over ~1 minute did not recover it. This is the
+  known recurring bug in `docs/DEV-VM.md` (agent opens the wrong chardev after
+  a restart) — was not fixed here per this task's no-SSH constraint. **Whoever
+  picks this up next: read `/tmp/trapread.log` on the guest first, before
+  re-running anything** — the data likely already answers "what exception, what
+  throw site."
+- **Did not determine why `write` (per `README.md` and presumably an earlier,
+  working session) is claimed to succeed while this trace shows it dying
+  identically to `read`.** Two live possibilities, neither checked: (a) the
+  currently-staged `/var/darling-build/dserver/mldr-real/mldr` /
+  `/tmp/darling-local-overlay/usr/lib/dyld` are stale/rebuilt since the
+  write-success observation and now crash universally regardless of args; (b)
+  the write-success observation was against a different overlay/build
+  directory than the one these two traces ran against. Did not check build
+  timestamps or git history around `mldr`/`dyld overlay` to distinguish these.
+- **Did not disassemble `libc++abi.dylib+0x2c670`** or otherwise confirm by
+  static means what throws there — deferred entirely to the (unread)
+  `MLDR_TRAP_AT` run.
+- **Did not check whether the `sigaltstack(...) ERR#1 'Operation not
+  permitted'` seen in both traces (right after dyld installs its
+  per-signal crash handlers, before the final `uidgid` call) is related to the
+  termination.** It returns an error dyld may or may not check; not traced
+  whether dyld's own code path branches on this return value at all. Flagged
+  as a real, reproducible anomaly, not claimed as the cause.
+- **Did not re-run under plain `truss` a third time to confirm the exact tail
+  sequence is fully deterministic** (only two independent captures — one per
+  argv variant — were compared; both already existed on disk from the prior
+  session per the task brief, "не запускай без необходимости").
+- **Did not check the i386 slice or any other test binary** (e.g.
+  `hello-foundation-macho`, which `README.md` claims does map ~41 dylibs) to
+  see whether the dyld-startup crash is universal to every guest binary in the
+  current build or specific to `defaults-macho`. If it is universal, that
+  reframes this whole investigation away from CFPreferences entirely.
