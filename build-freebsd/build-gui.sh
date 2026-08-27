@@ -335,7 +335,11 @@ require_frameworks CoreGraphics IOKit
 CG="${COCOTRON}/CoreGraphics"
 CG_FLAGS="-I${CG} -I${CG}/.. -I${CG}/include -I${CG}/include/CoreGraphics"
 CG_FLAGS="${CG_FLAGS} -I${COCOTRON}/CoreText -I${COCOTRON}/Onyx2D/include"
-CG_FLAGS="${CG_FLAGS} -include ${CG}/../Onyx2D/include/Onyx2D/Onyx2D.h"
+# NOT a forced -include of an umbrella "Onyx2D.h": no such file exists
+# anywhere in this tree (only individual O2*.h headers under
+# Onyx2D/include/Onyx2D/). CoreGraphics sources already #import
+# <Onyx2D/O2Whatever.h> directly (e.g. CGBitmapContext.m:21), which the -I
+# above resolves on its own.
 # IOKit headers: CGDirectDisplay.m #imports <IOKit/graphics/IOGraphicsLib.h>
 # and <IOKit/graphics/IOGraphicsTypes.h>; CoreGraphicsPrivate.h #includes
 # <IOKit/hidsystem/IOLLEvent.h>. Neither is on any -I path above this line
