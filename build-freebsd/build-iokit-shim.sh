@@ -36,13 +36,13 @@
 # Environment:
 #   DARLING_BUILD_DIR — scratch build dir        (default: /var/darling-build)
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
-#   DARLING_OVERLAY    — darling overlay dir      (default: /path/to/darling-overlay)
+#   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/iokit-shim"
-OVERLAY="${DARLING_OVERLAY:-/path/to/darling-overlay}"
+OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 SDK_FLAT="${BUILD}/sdk-flat"
 STAGED_OVERLAY="${BUILD}/staged-overlay"

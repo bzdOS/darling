@@ -112,13 +112,13 @@
 # Environment:
 #   DARLING_BUILD_DIR — scratch build dir        (default: /var/darling-build)
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
-#   DARLING_OVERLAY    — darling overlay dir      (default: /path/to/darling-overlay)
+#   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/native-wrappers"
-OVERLAY="${DARLING_OVERLAY:-/path/to/darling-overlay}"
+OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 WRAPGEN_SRC="${SRC}/src/libelfloader/wrapgen/wrapgen.cpp"
 ELFCALLS_DIR="${SRC}/src/startup/mldr/elfcalls"
@@ -183,7 +183,7 @@ clang++ -O2 -std=c++14 -w -o "${BUILD}/wrapgen" "${WRAPGEN_SRC}" -ldl \
 # separate libdl to link against, hence the -ldl-less fallback above.)
 
 # name        host ELF soname (bare -- wrapgen resolves it via dlopen/dlinfo)
-WRAP_NAMES="FreeType jpeg png tiff fontconfig gif"
+WRAP_NAMES="FreeType jpeg png tiff fontconfig gif GL wayland-client xkbcommon"
 soname_for() {
 	case "$1" in
 		FreeType)   echo "libfreetype.so" ;;
@@ -196,6 +196,15 @@ soname_for() {
 		# wrongly assumed dead weight when the Onyx2D link was fixed to
 		# use wrapper dylibs (see build-gui.sh's Onyx2D link comment).
 		gif)        echo "libgif.so" ;;
+		# CoreGraphics/CGLPixelSurface.m calls OpenGL (glBindBuffer, glBufferData,
+		# glReadPixels, etc.). The host libGL.so is ELF; ld64.lld needs a Mach-O
+		# wrapper in /usr/lib/native/libGL.dylib, linked with -lGL.
+		GL)         echo "libGL.so" ;;
+		# AppKit/Wayland.backend links against the host wayland-client and
+		# xkbcommon libraries at runtime. Wrap them the same way as the GUI
+		# image/font libraries.
+		wayland-client) echo "libwayland-client.so" ;;
+		xkbcommon)      echo "libxkbcommon.so" ;;
 		*) echo "FATAL: no soname mapping for '$1'" >&2; exit 1 ;;
 	esac
 }
@@ -227,6 +236,7 @@ fi
 CLANG_FLAGS="-target x86_64-apple-macos10.10 -nostdinc -w"
 CLANG_FLAGS="${CLANG_FLAGS} -I${ELFCALLS_DIR}"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
+CLANG_FLAGS="${CLANG_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.10 10.10 -syslibroot ${STAGED_OVERLAY} -Z"
 
 built=""
@@ -248,6 +258,96 @@ for name in ${WRAP_NAMES}; do
 		echo "  or /etc/ld-elf.so.conf.d/ actually expose ${elfname} unversioned." >&2
 		failed="${failed} ${name}"
 		continue
+	fi
+
+	# CGL context functions are Apple-specific and do not exist in the host
+	# libGL.so. Append stub implementations to the GL wrapper so AppKit's
+	# NSOpenGL* classes can link.
+	if [ "${name}" = "GL" ]; then
+		cat >> "${gen_c}" <<'EOF'
+#include <OpenGL/CGLTypes.h>
+CGL_EXPORT CGLError CGLLockContext(CGLContextObj ctx) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLUnlockContext(CGLContextObj ctx) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLChoosePixelFormat(const CGLPixelFormatAttribute *attribs, CGLPixelFormatObj *pix, GLint *npix) { if (pix) *pix = NULL; if (npix) *npix = 0; return kCGLBadPixelFormat; }
+CGL_EXPORT CGLError CGLReleasePixelFormat(CGLPixelFormatObj pix) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLDescribePixelFormat(CGLPixelFormatObj pix, GLint screen, CGLPixelFormatAttribute attrib, GLint *value) { if (value) *value = 0; return kCGLBadPixelFormat; }
+CGL_EXPORT CGLError CGLCreateContext(CGLPixelFormatObj pix, CGLContextObj share, CGLContextObj *ctx) { if (ctx) *ctx = NULL; return kCGLBadContext; }
+CGL_EXPORT CGLError CGLReleaseContext(CGLContextObj ctx) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLDestroyWindow(CGLContextObj ctx, void *window) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLGetParameter(CGLContextObj ctx, CGLContextParameter pname, GLint *value) { if (value) *value = 0; return kCGLBadContext; }
+CGL_EXPORT CGLError CGLSetParameter(CGLContextObj ctx, CGLContextParameter pname, const GLint *value) { return kCGLBadContext; }
+CGL_EXPORT CGLError CGLGetWindow(CGLContextObj ctx, void **window) { if (window) *window = NULL; return kCGLBadContext; }
+CGL_EXPORT CGLError CGLContextMakeCurrentAndAttachToWindow(CGLContextObj ctx, void *window) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLSetCurrentContext(CGLContextObj ctx) { return kCGLNoError; }
+CGL_EXPORT CGLError CGLFlushDrawable(CGLContextObj ctx) { return kCGLNoError; }
+EOF
+	fi
+
+	# wayland-client exposes interface objects (wl_registry_interface, etc.)
+	# as STT_OBJECT data symbols. wrapgen only emits resolver stubs for
+	# functions, so add explicit data symbols and copy their contents from
+	# the host library at load time.
+	if [ "${name}" = "wayland-client" ]; then
+		cat >> "${gen_c}" <<'EOF'
+#include <string.h>
+#define WL_IFACE_SIZE 40
+#define WL_IFACE(n) char n[WL_IFACE_SIZE]
+WL_IFACE(wl_display_interface);
+WL_IFACE(wl_registry_interface);
+WL_IFACE(wl_compositor_interface);
+WL_IFACE(wl_shm_interface);
+WL_IFACE(wl_shm_pool_interface);
+WL_IFACE(wl_buffer_interface);
+WL_IFACE(wl_surface_interface);
+WL_IFACE(wl_seat_interface);
+WL_IFACE(wl_keyboard_interface);
+WL_IFACE(wl_pointer_interface);
+WL_IFACE(wl_output_interface);
+WL_IFACE(wl_callback_interface);
+WL_IFACE(wl_data_device_interface);
+WL_IFACE(wl_data_device_manager_interface);
+WL_IFACE(wl_data_offer_interface);
+WL_IFACE(wl_data_source_interface);
+WL_IFACE(wl_shell_interface);
+WL_IFACE(wl_shell_surface_interface);
+WL_IFACE(wl_subcompositor_interface);
+WL_IFACE(wl_subsurface_interface);
+WL_IFACE(wl_touch_interface);
+WL_IFACE(wl_region_interface);
+WL_IFACE(wl_fixes_interface);
+__attribute__((constructor)) static void resolve_wayland_interfaces() {
+    void *handle = _elfcalls->dlopen_fatal(__elfname);
+    struct { const char *name; void *dest; } ifaces[] = {
+        {"wl_display_interface", wl_display_interface},
+        {"wl_registry_interface", wl_registry_interface},
+        {"wl_compositor_interface", wl_compositor_interface},
+        {"wl_shm_interface", wl_shm_interface},
+        {"wl_shm_pool_interface", wl_shm_pool_interface},
+        {"wl_buffer_interface", wl_buffer_interface},
+        {"wl_surface_interface", wl_surface_interface},
+        {"wl_seat_interface", wl_seat_interface},
+        {"wl_keyboard_interface", wl_keyboard_interface},
+        {"wl_pointer_interface", wl_pointer_interface},
+        {"wl_output_interface", wl_output_interface},
+        {"wl_callback_interface", wl_callback_interface},
+        {"wl_data_device_interface", wl_data_device_interface},
+        {"wl_data_device_manager_interface", wl_data_device_manager_interface},
+        {"wl_data_offer_interface", wl_data_offer_interface},
+        {"wl_data_source_interface", wl_data_source_interface},
+        {"wl_shell_interface", wl_shell_interface},
+        {"wl_shell_surface_interface", wl_shell_surface_interface},
+        {"wl_subcompositor_interface", wl_subcompositor_interface},
+        {"wl_subsurface_interface", wl_subsurface_interface},
+        {"wl_touch_interface", wl_touch_interface},
+        {"wl_region_interface", wl_region_interface},
+        {"wl_fixes_interface", wl_fixes_interface},
+    };
+    for (size_t i = 0; i < sizeof(ifaces)/sizeof(ifaces[0]); i++) {
+        void *src = _elfcalls->dlsym_fatal(handle, ifaces[i].name);
+        memcpy(ifaces[i].dest, src, WL_IFACE_SIZE);
+    }
+}
+EOF
 	fi
 
 	obj="${BUILD}/gen/${name}.o"

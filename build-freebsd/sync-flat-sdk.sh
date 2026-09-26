@@ -34,6 +34,7 @@
 #
 # Environment:
 #   DARLING_SRC_DIR — root of this repository (default: directory of this script/..)
+#   DARLING_SSH_KEY, DARLING_SSH_DEST — only used for the hint printed at the end
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -173,6 +174,11 @@ done
 tar czf "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" -C "${FLAT}" .
 rm -rf "${FLAT}"
 echo "=== done: $(du -h "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" | cut -f1) ==="
-echo "Transfer to the dev VM with:"
-echo "  scp -i build-host-key tests/vendor/macosx-sdk-flat.tar.gz user@build-host:/tmp/sdk-flat.tar.gz"
-echo "  ssh -i build-host-key user@build-host 'rm -rf /tmp/sdk-flat && mkdir -p /tmp/sdk-flat && tar xzf /tmp/sdk-flat.tar.gz -C /tmp/sdk-flat'"
+# Transfer destination is machine-specific; keep it out of the tree.
+#   DARLING_SSH_KEY  — ssh identity for the dev VM
+#   DARLING_SSH_DEST — user@host of the dev VM
+KEY="${DARLING_SSH_KEY:-<ssh-key>}"
+DEST="${DARLING_SSH_DEST:-<user>@<dev-vm>}"
+echo "Transfer to the dev VM with (set DARLING_SSH_KEY and DARLING_SSH_DEST):"
+echo "  scp -i ${KEY} tests/vendor/macosx-sdk-flat.tar.gz ${DEST}:/tmp/sdk-flat.tar.gz"
+echo "  ssh -i ${KEY} ${DEST} 'rm -rf /tmp/sdk-flat && mkdir -p /tmp/sdk-flat && tar xzf /tmp/sdk-flat.tar.gz -C /tmp/sdk-flat'"

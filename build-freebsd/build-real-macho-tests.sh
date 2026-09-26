@@ -26,6 +26,9 @@
 #                               so launch-dynamic-smoke.c's own per-run
 #                               System/Library/Frameworks staging step picks
 #                               it up without further changes.
+#   tests/hello-appkit-macho    — minimal AppKit program (NSApplication
+#                               +sharedApplication) against the AppKit.dylib
+#                               and stub frameworks built by build-gui.sh.
 #
 # Usage: sh build-freebsd/build-real-macho-tests.sh
 # Run on the FreeBSD dev VM (185) — needs clang and ld64.lld (both ship with
@@ -34,13 +37,13 @@
 # Environment:
 #   DARLING_BUILD_DIR — scratch build dir        (default: /tmp/darling-build)
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
-#   DARLING_OVERLAY    — darling overlay dir      (default: /path/to/darling-overlay)
+#   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/real-macho"
-OVERLAY="${DARLING_OVERLAY:-/path/to/darling-overlay}"
+OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 SDK_FLAT="${BUILD}/sdk-flat"
 STAGED_OVERLAY="${BUILD}/staged-overlay"
@@ -75,6 +78,7 @@ cp "${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/Cor
 CLANG_FLAGS="-target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.12 10.12 -syslibroot ${STAGED_OVERLAY} -Z"
+COCOTRON="${SRC}/src/external/cocotron"
 
 echo "=== hello-cctools-macho ==="
 clang ${CLANG_FLAGS} -O1 -w -c "${SRC}/tests/hello-cctools.c" -o "${BUILD}/hello-cctools.o"
@@ -205,8 +209,51 @@ ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-foundation-macho" \
 chmod 755 "${SRC}/tests/hello-foundation-macho"
 file "${SRC}/tests/hello-foundation-macho"
 
+echo "=== hello-appkit-macho ==="
+# Stage AppKit and its dependency closure (including the stub frameworks
+# built by build-gui.sh) into the staged overlay so ld64 can link against
+# them and dyld can resolve them at runtime.
+for fw in AppKit CoreGraphics Onyx2D CoreData QuartzCore ImageIO CoreText LaunchServices; do
+    src_path="${OVERLAY}/System/Library"
+    case "${fw}" in
+        Onyx2D) src_path="${src_path}/PrivateFrameworks/${fw}.framework" ;;
+        *)      src_path="${src_path}/Frameworks/${fw}.framework" ;;
+    esac
+    if [ -d "${src_path}" ]; then
+        dst_path="${STAGED_OVERLAY}${src_path#${OVERLAY}}"
+        mkdir -p "${dst_path}"
+        find "${src_path}" -type f | pax -rw "${dst_path}"
+    fi
+done
+# Native wrapper dylibs AppKit links against at runtime.
+mkdir -p "${STAGED_OVERLAY}/usr/lib/native"
+for wrap in libGL.dylib libFreeType.dylib libfontconfig.dylib; do
+    if [ -f "${OVERLAY}/usr/lib/native/${wrap}" ]; then
+        cp "${OVERLAY}/usr/lib/native/${wrap}" "${STAGED_OVERLAY}/usr/lib/native/${wrap}"
+    fi
+done
+# libdispatch/libunwind are in usr/lib/system and already staged above.
+
+clang ${CLANG_FLAGS} -fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.12 -DDARLING \
+    -F"${SDK_FLAT}/Frameworks" -I"${FOUND}/include" -I"${COCOTRON}/AppKit/include" -I"${SRC}/src/freebsd-shims/missing-headers" \
+    -x objective-c -O1 -w \
+    -c "${SRC}/tests/hello-appkit.m" -o "${BUILD}/hello-appkit.o"
+ld64.lld ${LD_FLAGS} -o "${SRC}/tests/hello-appkit-macho" \
+    "${BUILD}/hello-appkit.o" \
+    "${STAGED_OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit" \
+    "${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
+    "${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
+    "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+    "${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+    "${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libicucore.A.dylib" \
+    "${STAGED_OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libc++abi.dylib" \
+    "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+chmod 755 "${SRC}/tests/hello-appkit-macho"
+file "${SRC}/tests/hello-appkit-macho"
+
 echo "=== done ==="
 echo "Run with: echo 'select 21*2;' | DARLING_TEST_BINARY=sqlite3-real-macho <launch-dynamic-smoke binary>"
 echo "Run with: DARLING_TEST_BINARY=hello-objc-macho <launch-dynamic-smoke binary>"
 echo "Run with: DARLING_TEST_BINARY=hello-cf-macho <launch-dynamic-smoke binary>"
 echo "Run with: DARLING_TEST_BINARY=hello-foundation-macho <launch-dynamic-smoke binary>"
+echo "Run with: DARLING_TEST_BINARY=hello-appkit-macho <launch-dynamic-smoke binary>"
