@@ -54,13 +54,13 @@
 # staged overlay/SDK when run back to back):
 #   DARLING_BUILD_DIR — scratch build dir        (default: /var/darling-build)
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
-#   DARLING_OVERLAY    — darling overlay dir      (default: /path/to/darling-overlay)
+#   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/wayland-backend"
-OVERLAY="${DARLING_OVERLAY:-/path/to/darling-overlay}"
+OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 SDK_FLAT="${BUILD}/sdk-flat"
 STAGED_OVERLAY="${BUILD}/staged-overlay"
@@ -150,7 +150,7 @@ fi
 # --- so the failure mode is one clear message instead of a raw
 # --- "file not found" three files deep in a -I search path. ---
 hitoolbox_found=""
-for root in "${SDK_FLAT}/usr/include" "${SDK_FLAT}/Frameworks" "${SRC}/tests/vendor/fakesdk"; do
+for root in "${SRC}/src/freebsd-shims/missing-headers" "${SDK_FLAT}/usr/include" "${SDK_FLAT}/Frameworks" "${SRC}/tests/vendor/fakesdk"; do
 	if [ -f "${root}/HIToolbox/Events.h" ] || [ -f "${root}/HIToolbox.framework/Headers/Events.h" ]; then
 		hitoolbox_found="${root}"
 		break
@@ -169,7 +169,7 @@ if [ ! -f "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" ]; then
 fi
 tar xzf "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" -C "${SDK_FLAT}"
 if [ -z "${hitoolbox_found}" ]; then
-	for root in "${SDK_FLAT}/usr/include" "${SDK_FLAT}/Frameworks" "${SRC}/tests/vendor/fakesdk"; do
+	for root in "${SRC}/src/freebsd-shims/missing-headers" "${SDK_FLAT}/usr/include" "${SDK_FLAT}/Frameworks" "${SRC}/tests/vendor/fakesdk"; do
 		if [ -f "${root}/HIToolbox/Events.h" ] || [ -f "${root}/HIToolbox.framework/Headers/Events.h" ]; then
 			hitoolbox_found="${root}"
 			break
@@ -236,8 +236,9 @@ wayland-scanner private-code "${XDG_SHELL_XML}" "${XDG_SHELL_CODE}"
 # --- its own -- see build-gui.sh's own comment on this exact trap (the one
 # --- CoreFoundation/CFBase.h -F gotcha the task description calls out).
 CLANG_FLAGS="-target x86_64-apple-macos10.10 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
-CLANG_FLAGS="${CLANG_FLAGS} -fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.10"
+CLANG_FLAGS="${CLANG_FLAGS} -fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.10 -fobjc-weak"
 CLANG_FLAGS="${CLANG_FLAGS} -DOBJC_OLD_DISPATCH_PROTOTYPES=1 -DDARLING"
+CLANG_FLAGS="${CLANG_FLAGS} -I${COCOTRON}/CoreGraphics/include"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
 CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/corefoundation-headers"
 CLANG_FLAGS="${CLANG_FLAGS} -I${COCOTRON}/../foundation/include -I${COCOTRON}/../foundation/include/Foundation"
@@ -249,7 +250,8 @@ fi
 AK="${COCOTRON}/AppKit"
 WFLAGS="-I${AK} -I${AK}/.. -I${AK}/include -I${AK}/include/AppKit"
 WFLAGS="${WFLAGS} -I${AK}/NSEvent.subproj"
-WFLAGS="${WFLAGS} -I${COCOTRON}/CoreGraphics/include -I${COCOTRON}/Onyx2D/include"
+WFLAGS="${WFLAGS} -I${COCOTRON}/CoreGraphics/include -I${COCOTRON}/Onyx2D/include -I${COCOTRON}/CoreText/include"
+WFLAGS="${WFLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 WFLAGS="${WFLAGS} -I${WBACKEND} -I${BUILD}"
 WFLAGS="${WFLAGS} $(pkg-config --cflags wayland-client xkbcommon)"
 
@@ -260,8 +262,34 @@ clang ${CLANG_FLAGS} ${WFLAGS} -w -O0 -c "${WBACKEND}/WaylandDisplay.m" -o "${BU
 clang ${CLANG_FLAGS} ${WFLAGS} -w -O0 -c "${WBACKEND}/WaylandWindow.m" -o "${BUILD}/obj/WaylandWindow.o"
 # shellcheck disable=SC2086
 clang ${CLANG_FLAGS} ${WFLAGS} -w -O0 -c "${WBACKEND}/WaylandInput.m" -o "${BUILD}/obj/WaylandInput.o"
-clang -target x86_64-apple-macos10.10 -nostdinc -I"${BUILD}" $(pkg-config --cflags wayland-client) \
+clang -target x86_64-apple-macos10.10 -nostdinc -I"${BUILD}" \
+	-I"${SDK_FLAT}/usr/include" -I"${SRC}/tests/vendor/fakesdk" \
+	$(pkg-config --cflags wayland-client) \
 	-w -O0 -c "${XDG_SHELL_CODE}" -o "${BUILD}/obj/xdg-shell-client-protocol.o"
+# wayland_shim.c bridges to native libwayland-client.so.0 via Darling's
+# _elfcalls ELF bridge, bypassing the overlay's broken wrapper which only
+# resolves symbols without calling them.
+clang -target x86_64-apple-macos10.10 -nostdinc \
+	-I"${SRC}/src/startup/mldr/elfcalls" \
+	-I"${SDK_FLAT}/usr/include" -I"${SRC}/tests/vendor/fakesdk" \
+	$(pkg-config --cflags wayland-client) \
+	-w -O0 -c "${WBACKEND}/wayland_shim.c" -o "${BUILD}/obj/wayland_shim.o"
+# wayland_ifaces.c holds the mutable wl_<iface>_interface buffers and loads
+# them from the native libwayland-client.so.0. It must compile WITHOUT
+# <wayland-client.h> (which extern-declares the same symbols as const struct
+# wl_interface and would collide with the char[] definitions), so only the
+# elfcalls include is provided here, not pkg-config wayland-client.
+clang -target x86_64-apple-macos10.10 -nostdinc \
+	-I"${SRC}/src/startup/mldr/elfcalls" \
+	-I"${SDK_FLAT}/usr/include" -I"${SRC}/tests/vendor/fakesdk" \
+	$(pkg-config --cflags wayland-client) \
+	-w -O0 -c "${WBACKEND}/wayland_ifaces.c" -o "${BUILD}/obj/wayland_ifaces.o"
+# wayland_tramp.s provides the x86-64 assembly trampolines for the variadic
+# marshalling primitives (wl_proxy_marshal_flags & friends). A C shim wrapper
+# cannot forward a variadic argument list, so these trampolines preserve the
+# whole register+stack argument state and `jmp` straight into the resolved
+# native function (see the header comment in the .s for why).
+clang -target x86_64-apple-macos10.10 -c "${WBACKEND}/wayland_tramp.s" -o "${BUILD}/obj/wayland_tramp.o"
 
 # --- Link the bundle's single Mach-O dylib. NOTE: despite the ".backend"
 # --- directory-naming convention, this project's own add_backend()
@@ -287,14 +315,14 @@ ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/AppKit.framework/Versions/C/Resources/Backends/Wayland.backend/Contents/MacOS/Wayland \
 	-o "${BUILD}/bundle/Wayland" \
 	"${BUILD}/obj/WaylandDisplay.o" "${BUILD}/obj/WaylandWindow.o" "${BUILD}/obj/WaylandInput.o" \
-	"${BUILD}/obj/xdg-shell-client-protocol.o" \
+	"${BUILD}/obj/xdg-shell-client-protocol.o" "${BUILD}/obj/wayland_shim.o" "${BUILD}/obj/wayland_ifaces.o" "${BUILD}/obj/wayland_tramp.o" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
 	"${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
-	$(pkg-config --libs wayland-client xkbcommon)
+	"${OVERLAY}/usr/lib/native/libxkbcommon.dylib"
 chmod 755 "${BUILD}/bundle/Wayland"
 file "${BUILD}/bundle/Wayland"
 
