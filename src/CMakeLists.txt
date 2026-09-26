@@ -79,10 +79,13 @@ find_package(FLEX)
 set(DARLING_SDK_RELATIVE_PATH "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
 set(DARLING_ROOT_RELATIVE_TO_SDK "../../../../../..")
 
-add_subdirectory(external/cctools-port/cctools/ld64/src)
-add_subdirectory(external/cctools-port/cctools/ar)
+# Host tools built separately (freebsd-build-host-tools approach):
+# ld64, ar, ranlib, misc are prebuilt outside the darling cmake tree
+# to avoid Darwin header shadowing on FreeBSD. See build-host-tools/.
+#add_subdirectory(external/cctools-port/cctools/ld64/src)
+#add_subdirectory(external/cctools-port/cctools/ar)
 #add_subdirectory(external/cctools-port/cctools/as)
-add_subdirectory(external/cctools-port/cctools/misc)
+#add_subdirectory(external/cctools-port/cctools/misc)
 
 #add_subdirectory(util)
 #add_subdirectory(libmach-o)
@@ -97,7 +100,27 @@ add_subdirectory(startup)
 
 include_directories(${CMAKE_SOURCE_DIR}/basic-headers)
 
-add_subdirectory(external/bootstrap_cmds)
+# Host tools built separately — prebuilt binaries used instead
+# Host tools are built separately — prebuilt binaries in build-host-tools are used
+# instead (bootstrap_cmds is intentionally not part of the CMake graph on this port).
+# libsystem_kernel/libsyscall's mig() (cmake/mig.cmake) runs ${CMAKE_BINARY_DIR}/build-mig
+# to generate MIG sources (.defs -> .c/.h); that wrapper uses the port's prebuilt
+# migcom (build-host-tools/migcom/migcom, a runnable FreeBSD ELF). Stage
+# the prebuilt build-mig into the CMake build dir and expose migcom/migexe targets so
+# add_dependencies(system_kernel migcom/migexe) and the mig() custom commands resolve
+# without building bootstrap_cmds here.
+get_filename_component(_PORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+set(_PORT_BUILD_MIG "${_PORT_ROOT}/build-host-tools/build-mig")
+if(EXISTS "${_PORT_BUILD_MIG}" AND NOT TARGET migexe)
+	add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/build-mig
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_PORT_BUILD_MIG}" "${CMAKE_BINARY_DIR}/build-mig"
+		COMMAND chmod +x "${CMAKE_BINARY_DIR}/build-mig"
+		DEPENDS "${_PORT_BUILD_MIG}"
+		COMMENT "Staging prebuilt port build-mig -> ${CMAKE_BINARY_DIR}/build-mig"
+		VERBATIM)
+	add_custom_target(migexe DEPENDS ${CMAKE_BINARY_DIR}/build-mig)
+	add_custom_target(migcom DEPENDS ${CMAKE_BINARY_DIR}/build-mig)
+endif()
 
 add_definitions(
 	-D__APPLE__
