@@ -26,6 +26,13 @@ set(mldr_sources
 
 add_executable(mldr ${mldr_sources})
 
+if(FREEBSD_COMPAT)
+    target_compile_options(mldr PRIVATE
+        -I${CMAKE_SOURCE_DIR}/src/startup/compat-includes
+        -I${CMAKE_SOURCE_DIR}/src/startup
+        -include ${CMAKE_SOURCE_DIR}/src/startup/freebsd_compat.h
+    )
+endif()
 target_compile_options(mldr PRIVATE -pthread)
 target_link_options(mldr PRIVATE -pthread)
 
