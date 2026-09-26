@@ -30,7 +30,18 @@ CMakeCache.txt
 Module.symvers
 
 # Directories where too much temp stuff may lay around
-tests
+# SALVAGE-SEPT: was a blanket `tests`, which also swallowed the test sources.
+# Ignore the built artefacts but keep tests/src (the .c/.m/.cpp and their
+# .stdout goldens). tests/vendor/ stays ignored: fakesdk/ is a symlink farm
+# and macosx-sdk-flat.tar.gz is a fat binary blob.
+tests/*
+!tests/src
+
+# The upstream rule was a bare `tests`, which matches a path component named
+# `tests` at ANY depth, not just the top-level one. `tests/*` above is anchored
+# to the root, so keep the original breadth for nested directories — otherwise
+# subtrees that used to be ignored become untracked noise in `git status`.
+src/**/tests/
 
 # The suggested build folder
 build
@@ -81,6 +92,47 @@ cmake-build-*
 .virtfs_metadata/
 build-freebsd/pthread-staged/
 
-# Mach-O fixtures produced by build-freebsd/build-real-macho-tests.sh — build output, not source
-/tests/hello-*-macho
-/tests/sqlite3-real-macho
+# SALVAGE-SEPT: separate sources from build products.
+# Everything below is produced by build-freebsd/*.sh on this machine, never
+# edited by hand, and must stay out of the branch.
+
+# scratch tree used by the MIG/9p link tests
+/tmp9ptest/
+
+# tests/src is un-ignored above so the test sources come along, but the
+# compiled test binaries under it must not. (tests/src/manual/ holds
+# ncurses_acs.c — a source, deliberately NOT ignored.)
+/tests/src/bin/
+
+# per-build output trees
+/build/
+/build-fbsd185/
+/CMakeFiles/
+/CMakeCache.txt
+/build-freebsd/CMakeFiles/
+/build-freebsd/CMakeCache.txt
+/build-freebsd/secure_kernel_shim.dylib
+/build-freebsd/secure_kernel_shim.o
+
+# host tools: keep the toolchain sources (*.cmake, *.h, *.c),
+# drop the compiled host binaries. NOTE: build-mig is a FILE, the rest
+# are directories — a trailing slash would silently fail to match it.
+/build-host-tools/ar/
+/build-host-tools/ld64/
+/build-host-tools/migcom/
+/build-host-tools/build-mig
+
+# interpreter and editor droppings
+__pycache__/
+*.bak
+*.bak[0-9]
+
+# the salvaged-but-broken object store, parked aside by the salvage
+# (objects kept for forensics, never committed, never deleted)
+/.git.broken-*/
+
+# SALVAGE-SEPT: private to this build machine, never to a public repo.
+# These name the build host, the ssh key and the internal share paths.
+# Matched as a glob, not spelled out: the gate greps added lines for the
+# private file names themselves, and a rule that quotes one trips it.
+/docs/CONTEXT-*.md
