@@ -80,3 +80,7 @@ cmake-build-*
 
 .virtfs_metadata/
 build-freebsd/pthread-staged/
+
+# Mach-O fixtures produced by build-freebsd/build-real-macho-tests.sh — build output, not source
+/tests/hello-*-macho
+/tests/sqlite3-real-macho
