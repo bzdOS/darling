@@ -67,10 +67,44 @@ link. Doing that produces a file that reads as a dynamic linker:
     $ file dyld.patched-dylinker
     Mach-O 64-bit x86_64 dynamic linker, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>
 
-**This is not verified.** Nobody has loaded the patched binary: it has never run.
-Whether a dylinker with `LC_MAIN` (rather than `LC_UNIXTHREAD`) and no
-`LC_LOAD_DYLIB` is accepted is exactly the question the run below has to answer,
-and the answer is not known yet.
+### Upgrading the linker does not help
+
+The obvious thing to try first is a linker that implements the option. All
+three linkers installed here accept `-dylinker` and ignore it:
+
+    $ for v in 19 20 21; do /usr/local/llvm$v/bin/ld64.lld -arch x86_64 \
+        -platform_version macos 11.0 11.0 -dylinker -e _start -o /dev/null x.o; done
+    ld64.lld: warning: Option `-dylinker' is not yet implemented. Stay tuned...   (19.1.7)
+    ld64.lld: warning: Option `-dylinker' is not yet implemented. Stay tuned...   (20.1.8)
+    ld64.lld: warning: Option `-dylinker' is not yet implemented. Stay tuned...   (21.1.8)
+
+So correcting the field after the link is the only route with the toolchain
+available, not a workaround for an old linker.
+
+### The kernel does check the filetype, so this is required, not cosmetic
+
+`bsd/kern/mach_loader.c` switches on it, and the depth at which an image is
+loaded is what tells the two apart:
+
+    829  case MH_EXECUTE:
+    830      if (depth != 1 && depth != 3) {
+    831          return LOAD_FAILURE;
+    ...
+    848  case MH_DYLINKER:
+    849      if (depth != 2) {
+    850          return LOAD_FAILURE;
+    852      is_dyld = TRUE;
+
+A dynamic linker is loaded through `load_dylinker()` at depth 2 (mach_loader.c
+:1443), which is the depth `MH_EXECUTE` rejects. So the unpatched build cannot
+work as a dylinker: it fails header validation, before any of its own code
+runs. The four-byte correction is what makes the image pass that gate.
+
+**Still not verified by running.** Nobody has loaded the patched binary. What
+the source settles is the filetype gate; what remains open is whether a
+dylinker carrying `LC_MAIN` instead of `LC_UNIXTHREAD`, and linking nothing
+dynamically (`LC_LOAD_DYLIB` absent, everything static), is accepted after that
+gate. The run below is what answers it.
 
 ## Trying it
 
