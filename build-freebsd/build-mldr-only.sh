@@ -87,7 +87,7 @@ target_compile_options(mldr PRIVATE
   -include \${SRC}/startup/mldr/resources/dserver-rpc-defs.h
 )
 
-target_link_libraries(mldr PRIVATE -lc -lpthread)
+target_link_libraries(mldr PRIVATE -lc -lpthread -lexecinfo)
 MLDR_EOF
 
 cmake .

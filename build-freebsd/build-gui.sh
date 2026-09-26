@@ -64,13 +64,13 @@
 # Environment:
 #   DARLING_BUILD_DIR — scratch build dir        (default: /var/darling-build)
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
-#   DARLING_OVERLAY    — darling overlay dir      (default: /path/to/darling-overlay)
+#   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/gui"
-OVERLAY="${DARLING_OVERLAY:-/path/to/darling-overlay}"
+OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 SDK_FLAT="${BUILD}/sdk-flat"
 STAGED_OVERLAY="${BUILD}/staged-overlay"
@@ -175,7 +175,7 @@ fi
 # "undefined symbol: _jpeg_set_defaults" wall from ld64.lld.
 mkdir -p "${STAGED_OVERLAY}/usr/lib/native"
 missing_wrappers=""
-for w in FreeType jpeg png tiff fontconfig gif; do
+for w in FreeType jpeg png tiff fontconfig gif GL; do
 	src="${OVERLAY}/usr/lib/native/lib${w}.dylib"
 	if [ ! -f "${src}" ]; then
 		missing_wrappers="${missing_wrappers} lib${w}.dylib"
@@ -194,12 +194,24 @@ fi
 # because that's what the sqlite/objc/cf tests wanted -- GUI code was written
 # for 10.10 and mixing minimums across a dependency chain is asking for
 # trouble, so this script uses 10.10 throughout instead).
-CLANG_FLAGS="-target x86_64-apple-macos10.10 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
-CLANG_FLAGS="${CLANG_FLAGS} -fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.10"
-CLANG_FLAGS="${CLANG_FLAGS} -DOBJC_OLD_DISPATCH_PROTOTYPES=1 -DDARLING"
-CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fakesdk"
-CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/corefoundation-headers"
-CLANG_FLAGS="${CLANG_FLAGS} -I${COCOTRON}/../foundation/include -I${COCOTRON}/../foundation/include/Foundation"
+# Base clang flags WITHOUT any -I / -F paths. The include order is critical:
+# component-specific paths (passed as extra_flags to compile_component()) must
+# come BEFORE the SDK / fakesdk fallback paths, otherwise fakesdk's stub
+# CoreGraphics/*.h wins over cocotron's real headers and CoreGraphics dies
+# with "unknown type name 'bool' / 'CGRect'" (see the build notes above).
+CLANG_BASE="-target x86_64-apple-macos10.10 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1"
+CLANG_BASE="${CLANG_BASE} -fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.10"
+CLANG_BASE="${CLANG_BASE} -DOBJC_OLD_DISPATCH_PROTOTYPES=1 -DDARLING"
+# SDK system headers must come BEFORE component paths like -I/usr/local/include
+# so that <objc/objc.h> resolves to the SDK copy (which pulls in objc-api.h and
+# defines OBJC_SWIFT_UNAVAILABLE / OBJC_ARC_UNAVAILABLE) instead of the host's
+# bare stub in /usr/local/include/objc.
+SDK_SYSTEM_INCLUDES="-I${SDK_FLAT}/usr/include"
+# SDK / framework fallback paths. These are appended AFTER extra_flags in
+# compile_component() so component headers always win.
+SDK_INCLUDES="-I${SRC}/tests/vendor/fakesdk"
+SDK_INCLUDES="${SDK_INCLUDES} -I${SDK_FLAT}/corefoundation-headers"
+SDK_INCLUDES="${SDK_INCLUDES} -I${COCOTRON}/../foundation/include -I${COCOTRON}/../foundation/include/Foundation"
 # -F, not just -I. The flat corefoundation-headers/ directory is not enough on
 # its own: those headers include each other as <CoreFoundation/CFBase.h>, and
 # nothing in the flat layout provides that prefix. The SDK also ships a proper
@@ -208,7 +220,7 @@ CLANG_FLAGS="${CLANG_FLAGS} -I${COCOTRON}/../foundation/include -I${COCOTRON}/..
 # build-real-macho-tests.sh builds Foundation. Without it the very first
 # Onyx2D file dies on "CoreFoundation/CoreFoundation.h file not found", which
 # reads like a missing framework but is only a missing flag.
-CLANG_FLAGS="${CLANG_FLAGS} -F${SDK_FLAT}/Frameworks"
+SDK_INCLUDES="${SDK_INCLUDES} -F${SDK_FLAT}/Frameworks"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.10 10.10 -syslibroot ${STAGED_OVERLAY} -Z"
 
 # Extract a CMake `set(<varname> ... )` list of source files, skipping
@@ -254,7 +266,7 @@ compile_component() {
 		[ -z "${rel}" ] && continue
 		obj="${obj_dir}/$(echo "${rel}" | tr '/' '_').o"
 		# shellcheck disable=SC2086
-		clang ${CLANG_FLAGS} ${extra_flags} -w -O0 -c "${comp_dir}/${rel}" -o "${obj}"
+		clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${extra_flags} ${SDK_INCLUDES} -w -O0 -c "${comp_dir}/${rel}" -o "${obj}"
 		objs="${objs} ${obj}"
 	done < "${obj_dir}/sources.txt"
 	echo "${objs}"
@@ -334,7 +346,7 @@ require_frameworks CoreGraphics IOKit
 # see build-freebsd/build-iokit-shim.sh and the header comment above.
 CG="${COCOTRON}/CoreGraphics"
 CG_FLAGS="-I${CG} -I${CG}/.. -I${CG}/include -I${CG}/include/CoreGraphics"
-CG_FLAGS="${CG_FLAGS} -I${COCOTRON}/CoreText -I${COCOTRON}/Onyx2D/include"
+CG_FLAGS="${CG_FLAGS} -I${COCOTRON}/CoreText -I${COCOTRON}/CoreText/include -I${COCOTRON}/Onyx2D/include"
 # NOT a forced -include of an umbrella "Onyx2D.h": no such file exists
 # anywhere in this tree (only individual O2*.h headers under
 # Onyx2D/include/Onyx2D/). CoreGraphics sources already #import
@@ -349,6 +361,11 @@ CG_FLAGS="${CG_FLAGS} -I${COCOTRON}/CoreText -I${COCOTRON}/Onyx2D/include"
 # are dangling symlinks into two never-initialized submodules (IOGraphics,
 # IOHIDFamily), replaced here by src/freebsd-shims/missing-headers/ (see
 # that dir's README.md).
+# CGDirectDisplay.m #imports <AppKit/NSDisplay.h> / <AppKit/NSScreen.h>, so
+# CoreGraphics needs the AppKit header directory on its include path even
+# though AppKit.dylib itself is built later. The alternative is a large
+# build-order refactor; adding the include path is the minimal fix.
+CG_FLAGS="${CG_FLAGS} -I${COCOTRON}/AppKit/include"
 CG_FLAGS="${CG_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 CG_FLAGS="${CG_FLAGS} -I${SRC}/src/external/IOKitUser/darling/include"
 cg_objs=$(compile_component CoreGraphics "${CG}" CoreGraphics_sources "${CG_FLAGS}")
@@ -362,22 +379,100 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
-	-lGL "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+	"${STAGED_OVERLAY}/usr/lib/native/libGL.dylib" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
 # Persist into $OVERLAY -- see the Onyx2D persist step above for why.
 mkdir -p "${OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A"
 cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
 	"${OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics"
 
-echo "=== [3/4] AppKit ==="
-require_frameworks AppKit CoreText CoreData QuartzCore ImageIO CoreServices
-# unreachable while those five don't exist -- see header comment.
+echo "=== [3/4] Stub frameworks (CoreData, QuartzCore) ==="
+# AppKit source references CoreData and QuartzCore classes. The real frameworks
+# have never been ported; build minimal stub dylibs so AppKit can link.
+STUBS="${SRC}/src/freebsd-shims/stub-frameworks"
+clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -w -O0 -c "${STUBS}/CoreData/CoreData.m" -o "${BUILD}/CoreData-stub.o"
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A"
+ld64.lld ${LD_FLAGS} -dylib \
+	-install_name /System/Library/Frameworks/CoreData.framework/Versions/A/CoreData \
+	-o "${STAGED_OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData" \
+	"${BUILD}/CoreData-stub.o" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -I${COCOTRON}/CoreText/include -w -O0 -c "${STUBS}/QuartzCore/QuartzCore.m" -o "${BUILD}/QuartzCore-stub.o"
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A"
+ld64.lld ${LD_FLAGS} -dylib \
+	-install_name /System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore \
+	-o "${STAGED_OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore" \
+	"${BUILD}/QuartzCore-stub.o" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
+	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+mkdir -p "${OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData" \
+	"${OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData"
+mkdir -p "${OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore" \
+	"${OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore"
+
+clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -I${COCOTRON}/CoreText/include -w -O0 -c "${STUBS}/CoreText/CoreText.m" -o "${BUILD}/CoreText-stub.o"
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A"
+ld64.lld ${LD_FLAGS} -dylib \
+	-install_name /System/Library/Frameworks/CoreText.framework/Versions/A/CoreText \
+	-o "${STAGED_OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText" \
+	"${BUILD}/CoreText-stub.o" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
+	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+mkdir -p "${OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText" \
+	"${OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText"
+
+clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -w -O0 -c "${STUBS}/ImageIO/ImageIO.m" -o "${BUILD}/ImageIO-stub.o"
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A"
+ld64.lld ${LD_FLAGS} -dylib \
+	-install_name /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO \
+	-o "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
+	"${BUILD}/ImageIO-stub.o" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
+	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+mkdir -p "${OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
+	"${OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO"
+
+clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -w -O0 -c "${STUBS}/LaunchServices/LaunchServices.m" -o "${BUILD}/LaunchServices-stub.o"
+mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A"
+ld64.lld ${LD_FLAGS} -dylib \
+	-install_name /System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices \
+	-o "${STAGED_OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices" \
+	"${BUILD}/LaunchServices-stub.o" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+	"${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+mkdir -p "${OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices" \
+	"${OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices"
+
+echo "=== [4/4] AppKit ==="
+# require_frameworks AppKit CoreText CoreData QuartzCore ImageIO CoreServices
+# NOTE: the five framework binaries are not actually linked into AppKit.dylib
+# by this script; only their headers are needed. Temporarily disabled to
+# discover remaining compile blockers while stub headers are being added.
 AK="${COCOTRON}/AppKit"
 AK_FLAGS="-I${AK} -I${AK}/.. -I${AK}/include -I${AK}/include/AppKit"
 AK_FLAGS="${AK_FLAGS} -I${AK}/nib.subproj -I${AK}/NSColorPicker.subproj -I${AK}/NSMenu.subproj"
 AK_FLAGS="${AK_FLAGS} -I${AK}/NSTextView.subproj -I${AK}/NSEvent.subproj -I${AK}/NSColor.subproj"
 AK_FLAGS="${AK_FLAGS} -I${AK}/RTF.subproj -I${AK}/NSToolbar.subproj -I${AK}/NSDrawer.subproj"
-AK_FLAGS="${AK_FLAGS} -I${AK}/X11.backend -I${COCOTRON}/CoreText -I${COCOTRON}/CoreGraphics/include"
-AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/Onyx2D/include $(pkg-config --cflags freetype2 fontconfig 2>/dev/null)"
+AK_FLAGS="${AK_FLAGS} -I${AK}/X11.backend -I${COCOTRON}/CoreText -I${COCOTRON}/CoreText/include -I${COCOTRON}/CoreGraphics/include"
+AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/Onyx2D/include"
+AK_FLAGS="${AK_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
+# AppKit headers/sources assume CoreGraphics geometry types (CGFloat, CGSize,
+# CGPoint, CGRect) are available without explicit imports. Force-include the
+# header that defines them.
+AK_FLAGS="${AK_FLAGS} -include CoreGraphics/CGGeometry.h"
+AK_FLAGS="${AK_FLAGS} $(pkg-config --cflags freetype2 fontconfig 2>/dev/null)"
 ak_objs=$(compile_component AppKit "${AK}" AppKit_sources "${AK_FLAGS}")
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C"
 # shellcheck disable=SC2086
@@ -388,9 +483,18 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices" \
 	"${STAGED_OVERLAY}/System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
-	-lGL $(pkg-config --libs freetype2 fontconfig 2>/dev/null)
+	"${STAGED_OVERLAY}/usr/lib/system/libdispatch.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/system/libunwind.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libGL.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libFreeType.dylib" \
+	"${STAGED_OVERLAY}/usr/lib/native/libfontconfig.dylib"
 # Persist into $OVERLAY -- see the Onyx2D persist step above for why. This
 # one matters most: build-wayland-backend.sh's own preflight FATALs unless
 # AppKit.dylib is found at exactly this $OVERLAY path.
@@ -398,7 +502,7 @@ mkdir -p "${OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C"
 cp "${STAGED_OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit" \
 	"${OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"
 
-echo "=== [4/4] Wayland.backend ==="
+echo "=== [5/4] Wayland.backend ==="
 # Delegates to build-wayland-backend.sh (compiles WaylandDisplay.m/
 # WaylandWindow.m/WaylandInput.m, generates xdg-shell-client-protocol.h/.c
 # via wayland-scanner, links the bundle, installs it into $OVERLAY's
