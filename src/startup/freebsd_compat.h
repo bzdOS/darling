@@ -465,21 +465,8 @@ static inline int bsdos_pidfd_open(pid_t pid, unsigned int flags)
 #endif
 
 /* Linux struct user_regs_struct → FreeBSD struct reg.
- * In C++ we must use a real struct tag (not just a typedef) because the code
- * uses 'struct user_regs_struct'.  We derive from struct reg to alias all fields. */
-#ifndef _USER_REGS_STRUCT_DEFINED
-#  define _USER_REGS_STRUCT_DEFINED
-#  include <machine/reg.h>
-#  ifdef __cplusplus
-   /* C++: create a struct tag that IS user_regs_struct, inheriting from reg */
-   struct user_regs_struct : public reg {
-       user_regs_struct() = default;
-       user_regs_struct(const struct reg& r) : reg(r) {}
-   };
-#  else
-   typedef struct reg user_regs_struct;
-#  endif
-#endif
+ * Provided by compat-includes/sys/user.h when included via the native
+ * <sys/user.h>. Not redefined here to avoid redefinition errors on FreeBSD 15+. */
 
 /* ── MAP_FIXED_NOREPLACE ─────────────────────────────────────────────────── */
 /* Linux MAP_FIXED_NOREPLACE: fail if any part of the range is already mapped.
@@ -535,44 +522,9 @@ static inline int bsdos_pidfd_open(pid_t pid, unsigned int flags)
 #endif /* SYS_tgkill */
 
 /* ── process_vm_readv / process_vm_writev ───────────────────────────────── */
-/*
- * purpose: Emulate Linux cross-process memory access syscalls via FreeBSD
- *          ptrace(PT_IO).  Operates one iovec pair at a time (darlingserver
- *          always calls with liovcnt=riovcnt=1).
- * input:   pid, local iovec, remote iovec; flags ignored.
- * output:  bytes transferred (positive), or -1 with errno set.
- * sideEffects: The target process must be stopped (ptrace-attached) on FreeBSD.
- */
-/* Use real function names so the code can take their address as function pointers. */
-static inline ssize_t process_vm_readv(pid_t pid,
-    const struct iovec *local_iov, unsigned long liovcnt,
-    const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags)
-{
-    (void)liovcnt; (void)riovcnt; (void)flags;
-    struct ptrace_io_desc iodesc;
-    iodesc.piod_op   = PIOD_READ_D;
-    iodesc.piod_offs = remote_iov[0].iov_base;
-    iodesc.piod_addr = local_iov[0].iov_base;
-    iodesc.piod_len  = local_iov[0].iov_len;
-    if (ptrace(PT_IO, pid, (caddr_t)&iodesc, 0) < 0)
-        return -1;
-    return (ssize_t)iodesc.piod_len;
-}
-
-static inline ssize_t process_vm_writev(pid_t pid,
-    const struct iovec *local_iov, unsigned long liovcnt,
-    const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags)
-{
-    (void)liovcnt; (void)riovcnt; (void)flags;
-    struct ptrace_io_desc iodesc;
-    iodesc.piod_op   = PIOD_WRITE_D;
-    iodesc.piod_offs = remote_iov[0].iov_base;
-    iodesc.piod_addr = local_iov[0].iov_base;
-    iodesc.piod_len  = local_iov[0].iov_len;
-    if (ptrace(PT_IO, pid, (caddr_t)&iodesc, 0) < 0)
-        return -1;
-    return (ssize_t)iodesc.piod_len;
-}
+/* These are now provided by compat-includes/sys/uio.h when included via the
+ * native <sys/uio.h>. We intentionally do NOT redefine them here, to avoid
+ * a redefinition error when both headers are visible (FreeBSD 15+). */
 
 #endif /* DARLING_FREEBSD */
 #endif /* DARLING_FREEBSD_COMPAT_H */

@@ -2877,6 +2877,8 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
  */
 /* ── SIGBUS/SIGSEGV debug handler ─────────────────────────────────────────── */
 
+#include <execinfo.h>
+
 #if defined(__x86_64__)
 static void
 crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
@@ -2904,15 +2906,33 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
         (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
     fflush(stderr);
 
-    /* DEBUG (dyld M0 investigation, temporary): dump the stack at rsp — if the
-     * crashing function was entered via a plain `call` with no prologue yet
-     * (rbp==rsp, as observed for this crash), *(uint64_t*)rsp is the caller's
-     * return address, identifying WHO calls into the crashing function. */
+    /* DIAG (Chrome dyld-init crash hunt): backtrace_symbols on the live stack
+     * identifies WHICH library the bad-jump frame lives in. */
     {
-        fprintf(stderr, "  stack dump at rsp=0x%016llx:\n", (unsigned long long)mc->mc_rsp);
-        volatile unsigned long long *sp = (unsigned long long *)(uintptr_t)mc->mc_rsp;
-        for (int i = 0; i < 16; i++) {
-            fprintf(stderr, "  [rsp+%3d] 0x%016llx\n", i * 8, sp[i]);
+        void *frames[32];
+        int n = backtrace(frames, 32);
+        char **names = backtrace_symbols(frames, n);
+        fprintf(stderr, "  backtrace (%d frames):\n", n);
+        for (int i = 0; i < n; i++) {
+            fprintf(stderr, "    #%02d %p  %s\n", i, frames[i],
+                    (names && names[i]) ? names[i] : "?");
+        }
+        fflush(stderr);
+        if (names) free(names);
+    }
+
+    /* DEBUG: dump the GUEST stack at rsp (backtrace(3) on FreeBSD only walks
+     * the host signal frame, not the guest code). */
+    {
+        fprintf(stderr, "  guest stack dump at rsp=0x%016llx:\n", (unsigned long long)mc->mc_rsp);
+        extern void* __mldr_stack_map_base __attribute__((weak));
+        unsigned long long start = (unsigned long long)mc->mc_rsp;
+        const unsigned long long base = (unsigned long long)__mldr_stack_map_base;
+        if (base != 0 && start < base)
+            start = base;
+        volatile unsigned long long *sp = (unsigned long long *)(uintptr_t)start;
+        for (int i = 0; i < 80; i++) {
+            fprintf(stderr, "  [gstack+%4d] 0x%016llx\n", i * 8, sp[i]);
         }
         fflush(stderr);
     }

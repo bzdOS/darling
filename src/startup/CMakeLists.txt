@@ -16,6 +16,13 @@ add_definitions(-DINSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}" -D_GNU_SOURCE -DMLDR_
 
 add_executable(darling darling.c)
 
+if(FREEBSD_COMPAT)
+    target_compile_options(darling PRIVATE
+        -I${CMAKE_CURRENT_SOURCE_DIR}/compat-includes
+        -I${CMAKE_CURRENT_SOURCE_DIR}
+        -include ${CMAKE_CURRENT_SOURCE_DIR}/freebsd_compat.h
+    )
+endif()
 target_link_libraries(darling -lutil)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_BINARY_DIR}/src/external/darlingserver/include ${CMAKE_SOURCE_DIR}/src/external/darlingserver/include)
