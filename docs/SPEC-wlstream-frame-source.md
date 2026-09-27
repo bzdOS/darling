@@ -18,7 +18,7 @@
 cage (headless Wayland-композитор, wlroots)
   │  wl_shm buffers, surface commits — обычный Wayland-протокол
   ▼
-wayland-tunnel (Zig, /path/to/wayland-tunnel/src/relay.zig, stream.zig, input.zig)
+wayland-tunnel (Zig, `$WAYLAND_TUNNEL/src/relay.zig`, stream.zig, input.zig)
   │  парсит Wayland wire-protocol из cage-сокета,
   │  кодирует в wlstream v1 wire-формат,
   │  пишет в Unix-сокет WLSTREAM_STREAM_SOCK
@@ -67,7 +67,7 @@ Unix-сокет (или в замену `wayland-tunnel`), `bsdos-core` не з�
 
 Это тот же формат, что задокументирован в
 `wlstream` crate как "Wire Format" (`spec/WAYLAND_STREAM_PROTOCOL.md:12-18`,
-файл `~/.cargo/git/checkouts/wlstream-c855323043bfae0e/925b8f7/spec/WAYLAND_STREAM_PROTOCOL.md`)
+файл `spec/WAYLAND_STREAM_PROTOCOL.md` в cargo-чекауте wlstream)
 и реализован в `wlstream::sender::Encoder::finish()`
 (`.../925b8f7/src/sender.rs:96-101`): `[total_size: u32 LE][events...]`.
 Иными словами — length-prefixed фрейм ЦЕЛИКОМ ПОВТОРЯЕТ обрамление

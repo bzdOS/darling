@@ -208,7 +208,7 @@ HERE").
 ## 3. Что реально есть в overlay сейчас
 
 ```
-$ ls /path/to/darling-overlay/usr/lib/native/
+$ ls $DARLING_OVERLAY/usr/lib/native/
 libfuse.dylib
 ```
 (проверено 2026-08-26, `ls -la`). Единственная существующая обёртка —

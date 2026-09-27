@@ -150,7 +150,7 @@ _Static_assert(sizeof(struct linux_sigaction_wire) == 32, "wire layout drift");
 системный хедер). **Ниже layout был всё же сверен** не "по памяти", а по
 реальному `sys/signal.h` из FreeBSD 15, найденному на этом хосте вне
 дерева darling-freebsd (закэшированный build-root aarch64-таргета bsdOS,
-путь `/path/to/build-cache/aarch64/work/rootfs/usr/include/sys/signal.h`
+путь `$BUILD_CACHE/aarch64/work/rootfs/usr/include/sys/signal.h`
 — это настоящий FreeBSD-заголовок, а не написанный в этой сессии текст, но
 он лежит **вне `src/external` и вне `darling-freebsd`**, поэтому
 помечаю его отдельно от "ссылок в дереве" из остального документа).

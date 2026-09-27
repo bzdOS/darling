@@ -339,7 +339,7 @@ backtrace for the `std::__terminate()` seen above.
 ## 8. What was NOT checked in this pass (2026-08-26 live-trace addendum)
 
 - **`/tmp/trapread.log` was never read** — the vport agent transport dropped
-  (`virsh dumpxml build-vm` shows channel `bsdos.agent` state `disconnected`)
+  (в `virsh dumpxml <vm>` видно, что канал агента в состоянии `disconnected`)
   right after the `MLDR_TRAP_AT` run completed in the background, and repeated
   `agent_exec`/`PING` retries over ~1 minute did not recover it. This is the
   known recurring bug in `docs/DEV-VM.md` (agent opens the wrong chardev after

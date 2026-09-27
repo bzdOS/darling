@@ -244,7 +244,7 @@ sandbox's identity model is revisited.
 - **The real FreeBSD uid of the process that actually runs the guest
   (`mldr`/Darling binary) when `defaults read`/CF is invoked was not determined.**
   No launcher script referencing `darlingserver` or `mldr` was found under
-  `/path/to/infra/scripts/` or `/path/to/infra/systemd/` in this pass (grepped,
+  the infrastructure scripts or the systemd units in this pass (grepped,
   zero hits) — it may live in a script or systemd/rc.d unit not covered by those two
   directories, or be started interactively. This is the single fact that would
   confirm or refute the "real launcher runs unprivileged" half of §4/§5's
