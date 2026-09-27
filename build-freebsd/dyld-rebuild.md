@@ -167,6 +167,36 @@ the same shape as the one in the overlay's working dyld (184 bytes, flavour 4,
 count 42, rip in slot 16, twenty zero registers). The log-patch string is still
 in the binary afterwards.
 
+### What the kernel does with that thread state
+
+`load_threadentry()` (bsd/kern/mach_loader.c:2898) does not read fixed offsets.
+It walks the blob as a list of entries, each a flavour, a count, then that many
+32-bit words, and hands each one to `thread_entrypoint()`. One entry is
+therefore the right shape, and that is what the fixup writes: flavour 4
+(`x86_THREAD_STATE64`), count 42, 21 64-bit slots.
+
+`thread_entrypoint()` is declared in `osfmk/kern/thread.h` and used in
+`mach_loader.c`, but its x86_64 body is not in this tree — only the arm, arm64
+and i386 `status.c` variants are here. So what it does with the other twenty
+slots cannot be read from the source available. What can be said: the overlay's
+working dyld has exactly the same shape, with every slot except `rip` zero, so
+zeros are what the kernel is being fed today and it copes.
+
+The address in the command is real code, which is at least a check that the
+derivation did not point somewhere silly:
+
+    $ llvm-objdump -d --start-address=0x100000770 <fixed-up dyld>
+    100000770: 5f                    popq   %rdi
+    100000771: 6a 00                 pushq  $0x0
+    100000773: 48 89 e5              movq   %rsp, %rbp
+    100000776: 48 83 e4 f0           andq   $-0x10, %rsp
+
+and in the unfixed build that same address is labelled `__dyld_start`.
+
+Note the first instruction: the entry pops an argument off the stack. What the
+kernel puts there for an image loaded at depth 2 is one of the things only a run
+can answer.
+
 **Still not verified by loading.** Everything above is checked against the
 kernel's rules, against the reference dyld and against the symbol table. Whether
 the image runs is still the open question, and the run below is the only thing
