@@ -73,6 +73,17 @@ LC_DYLD_INFO = 0x22
 LC_DYLD_EXPORTS_TRIE = 0x80000033
 LC_DYLD_INFO_ONLY = 0x80000022
 
+# The commands that make up an image's dependent-library list, in the order
+# ImageLoaderMachO::sniffLoadCommands counts them (src/ImageLoaderMachO.cpp:302):
+# that count IS libraryCount(), and libImage(ordinal-1) indexes it, so the
+# order and the membership decide what a re-export ordinal means.
+LC_LOAD_DYLIB = 0xC
+LC_LOAD_WEAK_DYLIB = 0x80000018
+LC_REEXPORT_DYLIB = 0x8000001F
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+LIBRARY_COMMANDS = (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB,
+                    LC_LOAD_UPWARD_DYLIB)
+
 KIND_MASK = 0x03
 KIND_REGULAR = 0x00
 KIND_THREAD_LOCAL = 0x01
@@ -97,8 +108,10 @@ class MachO:
         magic, _, _, _, ncmds, _, _, _ = struct.unpack_from("<IiiIIIII", self.d, 0)
         if magic != MH_MAGIC_64:
             raise SystemExit("%s: not a 64-bit thin Mach-O (magic %08x)" % (path, magic))
+        self.path = path
         self.exports_trie = None
         self.dyld_info = None
+        self.libraries = []          # (path, is_reexport) in load-command order
         off = 32
         for _ in range(ncmds):
             cmd, cmdsize = struct.unpack_from("<II", self.d, off)
@@ -107,11 +120,24 @@ class MachO:
                 self.exports_trie = (dataoff, datasize)
             elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
                 # dyld_info_command: rebase, bind, weak_bind, lazy_bind, export.
-                # export_off/export_size is the last pair; it is the same
-                # export trie as LC_DYLD_EXPORTS_TRIE describes.
+                # export_off/export_size is the same export trie as
+                # LC_DYLD_EXPORTS_TRIE describes.
                 f = struct.unpack_from("<10I", self.d, off + 8)
                 self.dyld_info = (f[8], f[9])
+            elif cmd in LIBRARY_COMMANDS:
+                name_off = struct.unpack_from("<I", self.d, off + 8)[0]
+                end = self.d.index(b"\0", off + name_off)
+                name = self.d[off + name_off:end].decode("utf-8", "replace")
+                self.libraries.append((name, cmd == LC_REEXPORT_DYLIB))
             off += cmdsize
+        # needsAddedLibSystemDepency: an image with no library load commands
+        # gets libSystem as its library 0, so ordinal 1 means libSystem
+        # (ImageLoaderMachO.cpp:295 and :555).
+        if not self.libraries:
+            self.libraries.append(("/usr/lib/libSystem.B.dylib", False))
+            self.libsystem_added = True
+        else:
+            self.libsystem_added = False
 
     def export_blob(self):
         """Where dyld2 gets the export trie from, in dyld2's own order of
@@ -198,6 +224,16 @@ class Walker:
         self.edges = []
         self.cycles = []   # (node, depth, path) -- structural mode only
         self.notes = []    # (node, text) -- observations, not dyld2 faults
+        # --deep: follow re-export chains. self.reexport is the MachO this walk
+        # belongs to (so the ordinal can be resolved against its dependent-library
+        # list), self.root is the overlay to resolve provider paths against, and
+        # chain/chain_seen accumulate the hops and stop a cycle.
+        self.reexport = None
+        self.root = None
+        self.deep = False
+        self.chain = []
+        self.chain_seen = set()
+        self.reexport_result = None
         self.names = []    # exported names, harvested while enumerating
         self.violations = []   # (offset, line, what)
         self.nodes = 0
@@ -259,6 +295,13 @@ class Walker:
 
             # 1843: if ( (*s == '\0') && (terminalSize != 0) ) return p;
             if s == b"" and terminal_size != 0:
+                # This is the node findShallowExportedSymbol then reads the
+                # terminal payload from. If the node is a re-export, the caller
+                # of trieWalk follows the chain -- resolve_chain does that.
+                if self.reexport is not None:
+                    node = self._read_terminal(terminal_size, p, end, node_off)
+                    if node is not None:
+                        return self._resolve_chain(node, s_path=path, depth=depth)
                 return p
 
             # 1847: const uint8_t* children = p + terminalSize;
@@ -419,6 +462,101 @@ class Walker:
             p = None
         return None
 
+    def _read_terminal(self, terminal_size, p, end, node_off):
+        """(flags, ordinal, imported_name) for a terminal node."""
+        if terminal_size == 0:
+            return None
+        try:
+            flags, q = read_uleb(self.buf, p, end, L_TERMINAL_SIZE)
+        except UlebError as exc:
+            self.violations.append((node_off, L_TERMINAL_SIZE, str(exc)))
+            return None
+        ordinal = None
+        imported = ""
+        if flags & REEXPORT:
+            try:
+                ordinal, q = read_uleb(self.buf, q, end, L_TERMINAL_SIZE)
+            except UlebError as exc:
+                self.violations.append((node_off, L_TERMINAL_SIZE, str(exc)))
+                return None
+            e = self.buf.index(b"\0", q)
+            imported = self.buf[q:e].decode("utf-8", "replace")
+        return (flags, ordinal, imported)
+
+    def _resolve_chain(self, node, s_path, depth):
+        """Follow a re-export, the way findShallowExportedSymbol does.
+
+        ImageLoaderMachOCompressed.cpp:493-506:
+            ordinal = read_uleb128(p, end);
+            importedName = (char*)p;
+            if ( importedName[0] == '\\0' ) importedName = symbol;
+            if ( (ordinal > 0) && (ordinal <= libraryCount()) ) {
+                reexportedFrom = libImage(ordinal-1);
+                if ( reexportedFrom == NULL ) return NULL;
+                return reexportedFrom->findExportedSymbol(importedName, true, ...);
+            }
+        so the ordinal indexes the dependent-library list, an empty imported
+        name means "same name", and a weak library that failed to load ends the
+        chain rather than faulting.
+        """
+        flags, ordinal, imported = node
+        if not (flags & REEXPORT):
+            return None
+        if imported == "":
+            # importedName[0] == '\\0' -> reuse the name we were asked for
+            imported = s_path[-1] if s_path else ""
+        image = self.reexport
+        if ordinal is None or ordinal <= 0 or ordinal > len(image.libraries):
+            self.notes.append(
+                (0, "re-export ordinal %s out of range (libraryCount=%d) for %r; "
+                     "dyld2 falls off the end of the if and returns nothing"
+                     % (ordinal, len(image.libraries), imported)))
+            self.chain.append((image.path, imported, "(ordinal out of range)", None))
+            return None
+        provider_path, is_reexport = image.libraries[ordinal - 1]
+        if not is_reexport:
+            # libImage() would be a plain load, not a re-export chain hop; dyld2
+            # still follows it here, because this is a direct re-export node.
+            pass
+        chain_key = (image.path, imported)
+        if chain_key in self.chain_seen:
+            self.cycles.append((0, depth, "%s re-exports %r (already in this chain)"
+                                % (image.path, imported)))
+            self.chain.append((image.path, imported, provider_path, "CYCLE"))
+            return None
+        self.chain_seen.add(chain_key)
+        self.chain.append((image.path, imported, provider_path, None))
+
+        target = os.path.join(self.root, provider_path.lstrip("/"))
+        if not os.path.exists(target):
+            # "Missing weak-dylib" -> libImage() is NULL -> return NULL.
+            self.notes.append((0, "re-export target %s is not present under %s; "
+                                  "dyld2 treats it as a missing weak dylib and "
+                                  "the chain ends here" % (provider_path, self.root)))
+            self.chain[-1] = (image.path, imported, provider_path, "ABSENT")
+            return None
+        try:
+            prov = MachO(target)
+        except SystemExit as exc:
+            self.violations.append((0, L_TERMINAL_SIZE,
+                                    "provider %s: %s" % (provider_path, exc)))
+            return None
+        # Recurse: the same lookup, in the provider, with the provider as the
+        # re-export source for any further hop.
+        sub = Walker(prov.trie()[0], brief=True, enumerate=False)
+        sub.root = self.root
+        sub.reexport = prov
+        sub.chain = self.chain
+        sub.chain_seen = self.chain_seen
+        sub.notes = self.notes
+        sub.cycles = self.cycles
+        sub.deep = self.deep
+        found = sub.walk(0, 0, imported.encode())
+        self.violations.extend(sub.violations)
+        if sub.reexport_result is not None:
+            self.reexport_result = sub.reexport_result
+        return found
+
     def _descend(self, node_off, child_off, end, depth, path, edge, on_path=()):
         """Structural mode only: visit every child, not just the matching one.
 
@@ -483,10 +621,12 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     brief = "--brief" in sys.argv
     enumerate_mode = "--enumerate" in sys.argv or "structural" in sys.argv
+    deep = "--deep" in sys.argv
     if not args:
         raise SystemExit(__doc__)
     path = args[0]
-    symbol = args[1].encode() if len(args) > 1 else None
+    root = args[2] if len(args) > 2 else os.environ.get("DARLING_OVERLAY")
+    symbol = args[1].encode() if len(args) > 1 and not args[1].startswith("/") else None
 
     m = MachO(path)
     buf, blob_off, blob_size, blob_src = m.trie()
@@ -513,6 +653,10 @@ def main():
     # exports. dyld2 does not do this -- it only ever follows the one edge that
     # matches the symbol being looked up -- so nothing found here is a verdict.
     w = Walker(buf, brief=brief, enumerate=enumerate_mode)
+    w.reexport = m
+    w.root = root
+    w.deep = deep
+    w.path = (symbol,) if symbol else ()
     w.walk(0, 0, symbol if symbol else b"")
     lookup_names = [symbol.decode()] if symbol else sorted(set(w.names))
 
@@ -580,6 +724,16 @@ def main():
         print()
         print("VERDICT: PASS -- every dyld2 symbol lookup stayed inside the trie")
         return 0
+
+    if w.chain:
+        print()
+        print("re-export chain followed (%d hop(s)):" % len(w.chain))
+        for src, sym, prov, note in w.chain:
+            print("  %-34s --%s--> %s%s" % (os.path.basename(src), sym, prov,
+                                            "   [%s]" % note if note else ""))
+    if w.cycles:
+        print("re-export cycles: %d (dyld2 would recurse until it ran out of stack "
+              "or hit a missing weak dylib)" % len(w.cycles))
 
     print()
     if w.violations:

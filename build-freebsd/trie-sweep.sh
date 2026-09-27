@@ -2,9 +2,17 @@
 # trie-sweep.sh — run chrome-trie-emulator.py over a set of Mach-Os and report
 # which ones dyld2's trieWalk would fault on.
 #
-#   sh build-freebsd/trie-sweep.sh <file> [file...]
+#   sh build-freebsd/trie-sweep.sh [--deep] <file> [file...]
 #   sh build-freebsd/trie-sweep.sh --extras            # the overlay's *Extras
 #                                                     # wrappers, via $DARLING_OVERLAY
+#
+# --deep follows re-export chains: for a name whose terminal node carries
+# EXPORT_SYMBOL_FLAGS_REEXPORT it resolves the ordinal against the image's
+# dependent-library list -- the same list sniffLoadCommands counts, so
+# LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB and LC_LOAD_UPWARD_DYLIB
+# in load-command order -- resolves the provider under $DARLING_OVERLAY, and
+# repeats the lookup there, which is what findShallowExportedSymbol does after
+# trieWalk returns. Requires DARLING_OVERLAY.
 #
 # For each file it lists the exported names with llvm-objdump --exports-trie --
 # an independent implementation, deliberately not the walker under test -- and
@@ -23,6 +31,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EM="${SCRIPT_DIR}/chrome-trie-emulator.py"
 MAX_SYMBOLS="${MAX_SYMBOLS:-25}"
+DEEP=""
+[ "${1:-}" = "--deep" ] && { DEEP="--deep"; shift; }
+ROOTS="${DARLING_OVERLAY:-}"
 
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 
@@ -59,7 +70,9 @@ for f in "$@"; do
 	for s in ${names} "${names%%_*}_sweep_deliberate_miss"; do
 		cnt=$((cnt + 1))
 		total=$((total + 1))
-		out="$(python3 "${EM}" "${f}" "${s}" 2>&1 | tail -1)"
+		# the root is passed as argv[2] so a provider path is resolved against
+		# the overlay, the same way dyld2 resolves it under DYLD_ROOT_PATH
+		out="$(python3 "${EM}" ${DEEP} "${f}" "${s}" ${ROOTS} 2>&1 | tail -1)"
 		case "${out}" in
 			*FAIL*)
 				bad=$((bad + 1))
@@ -77,6 +90,10 @@ for f in "$@"; do
 	printf '%-44s %3d lookup(s), %d failed\n' "$(basename "${f}")" "${cnt}" "${bad}"
 done
 
+if [ -n "${DEEP}" ]; then
+	printf '\n--deep: re-export chains were followed where a terminal node was a\n'
+	printf '        re-export; the chain is listed in each per-file output above.\n'
+fi
 printf '\n%s: %d lookup(s) over %d file(s), %d failed, %d file(s) skipped\n' \
 	"$([ "${failed}" -eq 0 ] && echo PASS || echo FAIL)" \
 	"${total}" "$(( $# - skipped ))" "${failed}" "${skipped}"
