@@ -525,6 +525,34 @@ any further from here: the submodule's base commit is not in the object store
 and the remote does not exist, so there is no way to build the same tree with
 those four files reverted.
 
+### The hand-rolled rebase replaces something that was linked in
+
+Worth recording for whoever continues, because it says where to look. The comment
+above the replacement says the analyzer's own walker cannot be used at that point
+in the bootstrap:
+
+    // It uses only pointer arithmetic (no blocks, no malloc, no throws, no
+    // libc/Stubs calls) because at this point dyld itself is not rebased yet,
+    // so any external call would go through an unslid stub and crash.
+
+Two of those claims do not hold as stated. The analyzer's rebase walkers are
+linked into this very build — `forEachRebase` has seven symbols in it, including
+the block invokers — and `Diagnostics` is a plain local:
+
+    dyld3/MachOAnalyzer.cpp:2774:    Diagnostics diag;
+
+which is how the rest of that file gets one. Blocks are used throughout this
+build too. The part that may genuinely hold is the error path: a `Diagnostics`
+that has to format a message would reach unrebased code, so the happy path may be
+fine while the sad path is not.
+
+So the direction this points in is the opposite of adding more hand-rolled code:
+call the analyzer's own `forEachRebase` the way the loader that boots evidently
+did — its `rebaseDyld` has a `_block_invoke` of its own — and see what happens.
+That is a one-place change, but it needs the callback's semantics read out of
+`MachOAnalyzer.cpp` first; guessing them would produce a quietly corrupted image
+that looks like a different bug.
+
 ### A build-system trap worth writing down
 
 Restoring a file with `cp -p` preserves its modification time, so ninja
