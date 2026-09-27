@@ -296,3 +296,44 @@ So the next thing to look at is the binding path, and specifically whether the
 "ld64.lld emits an empty chained-starts payload" problem that
 `dyldFreeBSDRebase.c` works around on the rebase side has a twin on the binding
 side. That is where the guest stops making progress, in both builds.
+
+### The two builds ask for opposite fixups, and only one side has a fallback
+
+The raw build that produced the shipped dyld links with `-no_fixup_chains`. The
+CMake `system_loader` target links with `-Wl,-fixup_chains`
+(`src/external/dyld/CMakeLists.txt`, the `LINK_FLAGS` line). That is not a
+cosmetic difference — it decides which tables the image carries:
+
+    shipped dyld      LC_DYLD_INFO_ONLY                        classic opcodes
+    cmake build       LC_DYLD_CHAINED_FIXUPS + EXPORTS_TRIE    chained, and empty
+
+and the September diagnosis is that this linker emits an empty chained-starts
+payload. So the CMake build asks for the one form that comes out empty, and the
+asymmetry is visible in the source: there is a `rebaseDyldClassic()` for the
+rebase side and nothing like it for the binding side — no `bindDyldClassic`, no
+classic bind-opcode walker anywhere next to it.
+
+Changing the flag to `-Wl,-no_fixup_chains` and relinking puts `LC_DYLD_INFO_ONLY`
+in the image, and the run changes again:
+
+    76a98007  cmake build, classic opcodes  -> signal 11, rip 0x1000e0d10
+
+That address is inside the image's own `__TEXT` (0x100000000 to 0x100113000), so
+the loader jumped to a code address in its own text and faulted there; the crash
+decoder calls it unmapped only because the loader is not in its image map. A jump
+to a wrong offset inside its own text is what a mis-applied rebase looks like,
+which is the first symptom that points at the rebase path rather than the
+binding path.
+
+So the three builds fail in three different places, and each run moved the
+failure somewhere new:
+
+| build | failure |
+|---|---|
+| shipped, classic | dies in a lazy binding stub, `__stub_helper` |
+| cmake, chained | reaches mldr's crash handler and null-derefs there |
+| cmake, classic | jumps to a bad address inside its own `__TEXT` |
+
+None of them prints the log line yet. The `CMakeLists.txt` with the flag changed
+is in `build-freebsd/dyld-salvage/`, next to the other dyld files, because it
+lives in the submodule and the superproject cannot carry it any other way.
