@@ -636,3 +636,31 @@ taken back out of `fixup-dylinker.sh` rather than left in a tool as a trap.
 So the search ends here, with nothing left that can be tried from this machine:
 everything inside the four September files has been ruled out by experiment, and
 the one structural difference that remains is not reproducible by hand.
+
+### Same revision after all — the symbol sets say so
+
+The last thing left to test was whether the loader that boots was built from a
+different source revision, which would make "the September changes" the wrong
+frame entirely. Comparing the text symbols of the two:
+
+    June (boots)   5835 text symbols
+    this build     5605 text symbols
+    in both        5577        (97.5% of either)
+    only in June    258
+    only in this     28
+
+The overlap says same revision, so that hypothesis is out too. The residue is
+not loader logic: the 258 are dominated by C++ runtime details and a few dyld
+features — the old unsized `operator delete(unsigned long)` against this build's
+sized `operator delete(unsigned long, unsigned long)`, `__NSGetProgname`,
+`socket_syslogv`, `useSyslog`. Of the 28 on this side, exactly one is September
+machinery: `_rebaseDyldClassic`.
+
+The block runtime was the obvious thing to blame in that residue and it is not
+missing — 55 block and libc++ symbols in the June build against 53 here.
+
+So the loader code is the same revision, the block runtime is present on both
+sides, every September change has been ruled out by experiment, and the one
+structural header difference cannot be copied. What is left is the environment
+the loader is linked into, and the recipe for the link that boots is not written
+down anywhere on this machine. That is where this stops.
