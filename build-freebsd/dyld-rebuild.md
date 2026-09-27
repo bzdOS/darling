@@ -491,6 +491,40 @@ What is actually left between the loader that boots and this one: the
 September source changes, and `LC_SEGMENT_SPLIT_INFO`, which the June build has
 and this one does not.
 
+### The log statement is not what breaks it either
+
+That is worth separating, because it is the one line this whole exercise is
+about. Take it out, rebuild, fix up, run:
+
+    with    dyld::log("calling sNotifyObjCMapped=...")   signal 10
+    without                                          signal 10
+
+Same failure. So the log statement is exonerated, and the goal is not blocked by
+the patch itself — it is blocked by the loader not booting.
+
+### And neither is sigexc_setup
+
+The other September file that changes behaviour at link time is
+`darling/src/sandbox-dummy.c`, which replaces `sigexc_setup()` with a weak no-op
+on the grounds that the real one comes from libsystem_platform, an empty
+submodule. In this build the no-op is inert — the link picks up a real one:
+
+    _sigexc_setup  ->  calls _darling_sigexc_self, _sigexc_setup1, _sigexc_setup2
+
+And the loader that boots does something worse:
+
+    00000000000e9480 <_sigexc_setup>:
+    128ff4: 89 7d fc    movl %edi, -0x4(%rbp)
+    128ff7: 0f 0b       ud2
+
+It traps deliberately, and boots anyway — so this path is not reached during
+startup in either build.
+
+That leaves the September source changes as a whole, which cannot be bisected
+any further from here: the submodule's base commit is not in the object store
+and the remote does not exist, so there is no way to build the same tree with
+those four files reverted.
+
 ### A build-system trap worth writing down
 
 Restoring a file with `cp -p` preserves its modification time, so ninja
