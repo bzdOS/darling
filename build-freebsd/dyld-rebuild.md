@@ -403,3 +403,41 @@ here — the submodule's object store does not contain it, and the remote does n
 exist. So it cannot be done by rebuilding from the base, and rebuilding the
 September sources does not boot. That is the wall, and it is a source problem
 rather than a build-flag one.
+
+### Is the September rebase what stops it booting? No.
+
+Worth testing, because it is the most suspicious thing in the tree: the September
+`rebaseDyld()` throws the analyzer away and calls only `rebaseDyldClassic()`.
+
+    // walk all fixups chains and rebase dyld
+    const dyld3::MachOAnalyzer* ma = (dyld3::MachOAnalyzer*)dyldMH;
+    ...
+    (void)ma;
+    {
+        if ( !rebaseDyldClassic(dyldMH) ) {
+            // no classic opcodes either — nothing we can do; continue and
+            // hope the image was mapped at its preferred address (slide 0)
+        }
+    }
+
+Both symbols are in the build (`rebaseDyld` inlined into a block,
+`rebaseDyldClassic` at `0x1000a0fa0`), and the June build has neither. So: make
+`rebaseDyldClassic()` return `false` immediately, relink, fix up, run.
+
+    rebase enabled    rip = _task_self_trap_impl + 0x0   (at 0x1000e0d10)
+    rebase disabled   rip = _task_self_trap_impl + 0x0   (at 0x1000e0410)
+
+Same function, same offset, only the absolute address moves because the code
+layout changed. The classic rebase is exonerated: whatever the first trapped
+syscall is doing wrong, it is not the rebase.
+
+Incidental, and useful to whoever adds a switch to that file: it is freestanding
+— no libc, no `getenv`. A first attempt at an environment-variable switch there
+does not compile:
+
+    error: call to undeclared function 'getenv'; ISO C99 and later do not
+    support implicit function declarations
+
+So the rebase path is off the list of suspects, and the syscall-trap path — mldr's
+SIGSYS handling and the `dserver_rpc_task_self_trap` round trip — is what's
+left.
