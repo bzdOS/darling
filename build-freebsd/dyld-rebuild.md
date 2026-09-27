@@ -615,11 +615,24 @@ version, chained fixups, exports trie, entry command and the absence of
 segment, and the size — most of which is the second architecture slice the June
 build carries and this one does not.
 
-`LC_SEGMENT_SPLIT_INFO` is the only remaining difference that could plausibly
-change behaviour rather than just describe the build: it tells the loader that
-`__DATA` is split, which is what a dylinker built for use alongside a shared
-cache carries. Adding it is a sixteen-byte load command, and the fixup already
-frees space for exactly that kind of edit — so it is the one experiment left
-worth running. It is a guess, though, and it is labelled as one: everything
-inside the four September files has been ruled out by experiment, so what is
-being guessed at now is a header field, not code.
+`LC_SEGMENT_SPLIT_INFO` looked like the one remaining difference that could
+change behaviour rather than describe the build, and adding it is a sixteen-byte
+load command the fixup has room for. So the bytes were read before the guess was
+built on them:
+
+    LC_SEGMENT_SPLIT_INFO  cmdsize 16, payload 8 bytes:
+                           10 d1 14 00  68 13 00 00
+
+That payload is not a segment name. It is a vmsize and a file offset — where the
+*second* half of a split `__DATA` lives. It is how a dylinker built to sit
+alongside a shared cache says "the rest of my data is over there, in that file".
+
+Which means the difference cannot be copied. Writing the command into a loader
+that is not split would tell it to expect a second `__DATA` that does not exist.
+An earlier draft of this document called it a guess worth running; having read
+the field, it is a bad guess, and the option that would have written it has been
+taken back out of `fixup-dylinker.sh` rather than left in a tool as a trap.
+
+So the search ends here, with nothing left that can be tried from this machine:
+everything inside the four September files has been ruled out by experiment, and
+the one structural difference that remains is not reproducible by hand.
