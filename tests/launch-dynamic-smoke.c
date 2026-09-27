@@ -7,13 +7,14 @@
  *             mldr exits non-zero on failure.
  * sideEffects: Spawns darlingserver child; cleans up on exit.
  *
- * Build: cc -o /tmp/launch-dynamic /path/to/darling/tests/launch-dynamic-smoke.c
+ * Build: cc -o /tmp/launch-dynamic tests/launch-dynamic-smoke.c
  * Run as root on FreeBSD 15.1.
  *
- * Environment (optional):
- *   DARLING_BUILD_DIR  — build output dir   (default: /var/darling-build)
- *   DARLING_OVERLAY    — darling overlay dir (default: /path/to/darling-overlay)
- *   DARLING_SRC_DIR    — repo root           (default: /path/to/darling)
+ * Environment (no defaults — the paths are machine-specific, so say where they
+ * are rather than guessing):
+ *   DARLING_BUILD_DIR  — build output dir, e.g. /var/darling-build
+ *   DARLING_OVERLAY    — darling overlay dir
+ *   DARLING_SRC_DIR    — repo root
  *
  * Note on 9p/p9fs + mmap: FreeBSD's virtio-9p driver may return BUS_OBJERR
  * when page-faulting into mmap'd files on the 9p mount.  To avoid this, dyld
@@ -50,14 +51,14 @@ static const char *build_dir(void) {
     return v ? v : "/var/darling-build";
 }
 
+/* No fallback: a wrong default would send the run at some other machine's
+   tree. Missing environment is reported by name at startup. */
 static const char *overlay_dir(void) {
-    const char *v = getenv("DARLING_OVERLAY");
-    return v ? v : "/path/to/darling-overlay";
+    return getenv("DARLING_OVERLAY");
 }
 
 static const char *src_dir(void) {
-    const char *v = getenv("DARLING_SRC_DIR");
-    return v ? v : "/path/to/darling";
+    return getenv("DARLING_SRC_DIR");
 }
 
 static void cleanup(void) {
@@ -115,15 +116,20 @@ static int copy_file(const char *src, const char *dst) {
 }
 
 int main(void) {
+    const char *bd = build_dir();
+    const char *od = overlay_dir();
+    const char *sd = src_dir();
+    if (bd == NULL || od == NULL || sd == NULL) {
+        fprintf(stderr, "Set DARLING_BUILD_DIR, DARLING_OVERLAY and DARLING_SRC_DIR\n");
+        return 1;
+    }
+
     if (getuid() != 0) {
         fprintf(stderr, "Must run as root\n");
         return 1;
     }
 
     char dserver[512], mldr[512], binary[512];
-    const char *bd = build_dir();
-    const char *od = overlay_dir();
-    const char *sd = src_dir();
 
     /* DARLING_TEST_BINARY selects which generated test binary to run —
      * e.g. hello-bind-macho, which exercises real symbol binding against
@@ -259,6 +265,117 @@ int main(void) {
         snprintf(binary, sizeof(binary), "%s", local_binary);
         printf("binary cached locally: %s\n", binary);
 
+        /*
+         * Chrome staging: when running chrome-macho, stage the embedded
+         * Chrome framework into $LOCAL/Frameworks (so the guest sees it at
+         * /Frameworks/Google Chrome for Testing Framework.framework/...) and
+         * create a /tmp/Frameworks symlink so Chrome's @loader_path/../
+         * resolution works.
+         *
+         * Skip the staging when the test isn't chrome-macho, when CHROME_APP
+         * isn't set, or when the framework is already cached. Use
+         * DARLING_SMOKE_REFRESH=1 to force a re-stage.
+         */
+        if (strcmp(test_bin, "chrome-macho") == 0) {
+            const char *chrome_app = getenv("CHROME_APP");
+            if (chrome_app && chrome_app[0]) {
+                char fw_src[1024], fw_dst[1024];
+                snprintf(fw_src, sizeof(fw_src),
+                         "%s/Contents/Frameworks/Google Chrome for Testing Framework.framework",
+                         chrome_app);
+                snprintf(fw_dst, sizeof(fw_dst),
+                         "%s/Frameworks/Google Chrome for Testing Framework.framework",
+                         LOCAL_OVERLAY);
+                struct stat fw_st;
+                int need_stage = (getenv("DARLING_SMOKE_REFRESH") != NULL) ||
+                                  (stat(fw_dst, &fw_st) < 0);
+                if (need_stage) {
+                    char stage_cmd[1536];
+                    /* The framework's top-level entry is itself a symlink
+                     * ("Google Chrome for Testing Framework.framework" ->
+                     * "Versions/Current/...").  find -type f would skip it
+                     * and pax -rw would then deposit Versions/ at the
+                     * FRAMEWORKS root instead of inside the framework dir —
+                     * "/tmp/.../Frameworks/Versions/..." not
+                     * "/tmp/.../Frameworks/Google Chrome for Testing
+                     * Framework.framework/Versions/...".  dyld then can't
+                     * resolve the framework at the path Chrome asks for.
+                     *
+                     * Fix: create fw_dst first (so pax -rw copies INTO it),
+                     * not just its parent Frameworks/. */
+                    snprintf(stage_cmd, sizeof(stage_cmd),
+                             "cd '%s' && "
+                             "mkdir -p '%s' && "
+                             "find . -type f | pax -rw '%s'",
+                             fw_src, fw_dst, fw_dst);
+                    int r = system(stage_cmd);
+                    if (r != 0) {
+                        fprintf(stderr, "Chrome framework stage failed (rc=%d)\n", r);
+                        return 1;
+                    }
+                    /* Restore the top-level symlinks that pax's -type f skip
+                     * would otherwise drop. Without these, dyld cannot
+                     * resolve Chrome's @loader_path/Google Chrome for Testing
+                     * Framework which depends on the framework's root symlink.
+                     *
+                     * Order matters: Versions/Current must be created FIRST,
+                     * because the framework root symlink points to
+                     * Versions/Current/<file>.
+                     *
+                     * Each symlink is created via a separate system() call —
+                     * a single sh -c "&&"-chained command silently returns
+                     * the first failure's exit code but, more importantly,
+                     * here we have observed `ln` exit 0 yet no symlink
+                     * appearing, suggesting a parse-quirk with the &&-chain
+                     * inside /bin/sh under load-dynamic's system(). */
+                    char link_cmd[1024];
+                    int lr;
+                    snprintf(link_cmd, sizeof(link_cmd),
+                             "ln -sf '154.0.8029.0' '%s/Versions/Current'",
+                             fw_dst);
+                    lr = system(link_cmd);
+                    if (lr != 0) fprintf(stderr, "  link Versions/Current rc=%d\n", lr);
+                    snprintf(link_cmd, sizeof(link_cmd),
+                             "ln -sf 'Versions/Current/Google Chrome for Testing Framework' "
+                             "'%s/Google Chrome for Testing Framework'",
+                             fw_dst);
+                    lr = system(link_cmd);
+                    if (lr != 0) fprintf(stderr, "  link framework root rc=%d\n", lr);
+                    snprintf(link_cmd, sizeof(link_cmd),
+                             "ln -sf 'Versions/Current/Helpers' '%s/Helpers'",
+                             fw_dst);
+                    lr = system(link_cmd);
+                    snprintf(link_cmd, sizeof(link_cmd),
+                             "ln -sf 'Versions/Current/Libraries' '%s/Libraries'",
+                             fw_dst);
+                    lr = system(link_cmd);
+                    snprintf(link_cmd, sizeof(link_cmd),
+                             "ln -sf 'Versions/Current/Resources' '%s/Resources'",
+                             fw_dst);
+                    lr = system(link_cmd);
+                    printf("Chrome framework staged: %s\n", fw_dst);
+                } else {
+                    printf("Chrome framework already staged (DARLING_SMOKE_REFRESH=1 to re-stage)\n");
+                }
+
+                /* A stale /tmp/Frameworks directory (left over from an old
+                 * hand-staging) shadows the symlink we're about to create
+                 * and gets in the way of Chrome's "@loader_path/../Frameworks"
+                 * lexical resolution. Nuke any such directory before linking. */
+                (void)system("rm -rf /tmp/Frameworks");
+                /* Symlink /tmp/Frameworks -> ../Frameworks. Chrome's
+                 * @loader_path resolution: "<chrome-exe>/../Frameworks" =
+                 * "<chrome-exe-dir>/../Frameworks". With the symlink in
+                 * place, that path lexically resolves to the staged tree. */
+                if (symlink("../Frameworks", "/tmp/Frameworks") < 0 && errno != EEXIST) {
+                    perror("symlink /tmp/Frameworks");
+                    /* non-fatal: Chrome may still find it via guest /Frameworks */
+                }
+            } else {
+                printf("CHROME_APP not set — chrome-macho will fail to find framework\n");
+            }
+        }
+
         /* update od to point to the local copy */
         od = LOCAL_OVERLAY;
     }
@@ -334,6 +451,35 @@ int main(void) {
      */
     setenv("__mldr_sockpath",       SOCK_PATH, 1);
     setenv("__mldr_DYLD_ROOT_PATH", od, 1);
+
+    /* Chrome / dlopen-probe: inject darling-extras.dylib so the ~969 framework
+     * symbols Chrome references but Darling's (stub/partial) frameworks don't
+     * export resolve at bind time. Real implementations are not shadowed
+     * because the extras dylib only defines symbols the source framework lacks. */
+    if (strcmp(test_bin, "chrome-macho") == 0 ||
+        strcmp(test_bin, "dlopen-probe-macho") == 0 ||
+        strcmp(test_bin, "chrome-dlopen-probe-macho") == 0) {
+        setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/darling-extras.dylib", 1);
+        /* dyld-trace: separate add-image probe. Prepends to the existing
+         * DYLD_INSERT_LIBRARIES so the constructor runs first and the
+         * per-image trace is visible alongside Chrome's load activity. */
+        const char *cur = getenv("DYLD_INSERT_LIBRARIES");
+        char combined[1024];
+        snprintf(combined, sizeof(combined), "/usr/lib/dyld-trace.dylib%s%s",
+                 cur ? ":" : "", cur ? cur : "");
+        setenv("DYLD_INSERT_LIBRARIES", combined, 1);
+    }
+
+    /* Chrome: force dyld to print load/search activity so we can see which
+     * dependent dylib dlopen fails to resolve ("image not found"). */
+    if (strcmp(test_bin, "chrome-macho") == 0 ||
+        strcmp(test_bin, "dlopen-probe-macho") == 0 ||
+        strcmp(test_bin, "chrome-dlopen-probe-macho") == 0) {
+        setenv("DYLD_PRINT_LIBRARIES", "1", 1);
+        setenv("DYLD_PRINT_FILES", "1", 1);
+        setenv("DYLD_PRINT_SEARCHING", "1", 1);
+        setenv("DYLD_PRINT_RPATHS", "1", 1);
+    }
 
     printf("Running: %s %s\n", mldr, binary);
     fflush(stdout);

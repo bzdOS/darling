@@ -10,7 +10,8 @@ VM.
 **Why flattened, not used in place:** that SDK tree is almost entirely
 symlinks pointing back into other `src/external/*` submodules (e.g.
 `usr/include/stdio.h -> ../../../../../../../../src/external/libc/include/stdio.h`).
-`readlink()` on the dev VM's virtiofs mount (`/path/to/workspace`) is broken — the
+`readlink()` on the dev VM's network mount (path from the environment) is
+broken — the
 host's virtiofsd returns a malformed FUSE_READLINK reply, and every attempt
 returns `EIO` (see the project's `dev-vm-virtiofs-fix` memory / `docs/DEV-VM.md`).
 Regular file reads work fine over the same mount; only symlink resolution is
@@ -61,7 +62,7 @@ that isn't in the tarball, initialize the submodule that provides it and
 regenerate with the command above.
 
 **Do NOT** try to fix this by dereferencing symlinks *from the guest* (`cp -a`,
-`cp -RL`, `rsync -L`, `tar -h` run on the VM against `/path/to/workspace`) — every
+`cp -RL`, `rsync -L`, `tar -h` run on the VM against that mount) — every
 broken-symlink `readlink()` leaks a `fuse_msgbuf` in the FreeBSD FUSE client,
 and walking thousands of them (this SDK has ~2600) reliably wires enough RAM
 to OOM-kill the guest. This exact incident happened once already; see the

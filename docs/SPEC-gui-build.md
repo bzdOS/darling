@@ -89,7 +89,7 @@ native библиотекой.
 ### Проверено на хосте (2026-08-26): чего физически нет в overlay
 
 ```
-$ ls /path/to/darling-overlay/System/Library/Frameworks/
+$ ls $DARLING_OVERLAY/System/Library/Frameworks/
 CoreFoundation.framework  DirectoryService.framework  Foundation.framework
 LDAP.framework  SystemConfiguration.framework
 ```
@@ -113,7 +113,8 @@ LDAP.framework  SystemConfiguration.framework
 Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AppKit.framework/
 Headers`), который через ещё один уровень симлинков резолвится в
 `src/external/cocotron/AppKit/include/AppKit`. `tests/vendor/README.md`
-документирует, что `readlink()` через virtiofs-mount (`/path/to/workspace`)
+документирует, что `readlink()` через сетевой mount (путь берётся из
+переменной окружения)
 сломан и возвращает `EIO` — та же причина, по которой
 `build-real-macho-tests.sh` использует **распакованный на хосте**
 `macosx-sdk-flat.tar.gz`, а не живой SDK-дерево. `build-gui.sh` по той же
