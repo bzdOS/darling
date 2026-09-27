@@ -57,7 +57,9 @@ Output: `$DARLING_BUILD_DIR/dyld-only/src/external/dyld/dyld` (the
 
 The link line asks for `-Wl,-dylinker` (see `target_link_libraries(system_loader
 ... -Wl,-dylinker ...)` in `src/external/dyld/CMakeLists.txt`) and ld64.lld
-accepts the flag, emits `LC_ID_DYLINKER`, and then forgets to set the filetype.
+accepts the flag, emits `LC_LOAD_DYLINKER`, and then forgets to set the
+filetype. (`LC_ID_DYLINKER` is 0xf; 0xe, which is what shows up here, is
+`LC_LOAD_DYLINKER` — and mldr refuses precisely that, see below.)
 So the target cannot be dropped into the overlay as it stands: a dynamic linker
 has to be `MH_DYLINKER`, and an `MH_EXECUTE` file will not be accepted as one.
 
@@ -131,16 +133,57 @@ rewriting a load command into a different load command — `LC_MAIN` carries
 count of registers plus a PC — which is real Mach-O surgery, and something to do
 deliberately with a run behind it, not as a side effect of a rebuild.
 
-**So: not verified, and not loadable as it stands.** The filetype correction is
-necessary; on its own it is not sufficient.
+### And mldr refuses a dylinker that names one
+
+    src/startup/mldr/loader.c:346:
+        "Dynamic linker can't reference another dynamic linker"
+
+ld64.lld emits `LC_LOAD_DYLINKER` unconditionally, and this build has it, so
+that check fails too — after the filetype and after the entry point.
+
+## The fixup pass
+
+All three of these are one script now: `build-freebsd/fixup-dylinker.sh`. It
+takes a freshly linked `system_loader` and writes an image with
+
+* filetype 7,
+* no `LC_LOAD_DYLINKER`,
+* `LC_UNIXTHREAD` instead of `LC_MAIN`, carrying the entry address as an
+  x86_64 thread state (flavour 4, count 42, rip in slot 16),
+
+and it keeps the file the same length, so no segment offset moves. Run on the
+current build it reports:
+
+    filetype 2 -> 7 (MH_DYLINKER)
+    LC_MAIN -> LC_UNIXTHREAD (x86_THREAD_STATE64, 42, rip=0x100000770)
+    LC_LOAD_DYLINKER: removed
+    load commands: 15 -> 10, sizeofcmds 1840 -> 1824 (-16)
+    wrote ... 2289824 bytes, size unchanged
+
+Two independent checks on that output: `llvm-nm` puts `__dyld_start` at
+`0x100000770`, which is exactly the address the script derived from `__TEXT`
+vmaddr plus `LC_MAIN` entryoff; and the thread command it writes is byte-for-byte
+the same shape as the one in the overlay's working dyld (184 bytes, flavour 4,
+count 42, rip in slot 16, twenty zero registers). The log-patch string is still
+in the binary afterwards.
+
+**Still not verified by loading.** Everything above is checked against the
+kernel's rules, against the reference dyld and against the symbol table. Whether
+the image runs is still the open question, and the run below is the only thing
+that answers it.
 
 ## Trying it
 
-Keep the current overlay binary, then put the patched build in its place and run
-the usual Chrome smoke test:
+Build, fix up, install, run:
 
+    cmake -G Ninja -B $DARLING_BUILD_DIR/dyld-only .
+    ninja -C $DARLING_BUILD_DIR/dyld-only system_loader
+    sh build-freebsd/fixup-dylinker.sh \
+      $DARLING_BUILD_DIR/dyld-only/src/external/dyld/dyld \
+      $DARLING_BUILD_DIR/dyld-only/src/external/dyld/dyld.patched
     cp -p $DARLING_OVERLAY/usr/lib/dyld $DARLING_OVERLAY/usr/lib/dyld.keep
-    cp <dyld.patched-dylinker> $DARLING_OVERLAY/usr/lib/dyld
+    cp $DARLING_BUILD_DIR/dyld-only/src/external/dyld/dyld.patched \
+       $DARLING_OVERLAY/usr/lib/dyld
     WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/tmp/wayland-test \
       WAIT_SECS=60 sh build-freebsd/launch-chrome.sh
 
