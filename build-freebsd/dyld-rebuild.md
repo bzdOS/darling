@@ -362,10 +362,44 @@ not in its image map; it is the loader's own code.
 
 That moves the remaining failure out of the loader's startup and into the
 syscall-trap path, which is a different subsystem again: mldr's trap, the
-`dserver_rpc_task_self_trap` round trip, or what darlingserver answers. Note also
-the warning at the top of every log,
+`dserver_rpc_task_self_trap` round trip, or what darlingserver answers.
+
+The vchroot warning that is in every log turns out not to be it —
 
     Cannot open /usr/local/libexec/darling/usr/libexec/darling/vchroot
 
-so the vchroot path this RPC relies on is not where the harness expects it. That
-is worth checking before anything in the loader is touched again.
+— it is in the two 09-09 logs that loaded 41 images just as much as in the broken
+ones. Noise, not the cause. (The path in the dserver binary is
+`mldr!/usr/local/libexec/darling/usr/libexec/darling/vchroot`, i.e. the prefix
+applied to itself, so it is never going to resolve in this harness.)
+
+### The dyld that boots is still on disk, and it boots
+
+The runs that loaded anything were on 09-09. The raw build made on 14-09
+replaced the dyld that was in the overlay, and since then every run has loaded
+zero images and taken a fatal signal. The one it replaced was not thrown away:
+
+    $DARLING_OVERLAY/usr/lib/dyld.June-backup   (also dyld.bak)
+    md5 b8df2a76420adc9c6bfbc36282cdc6f5, 5221712 bytes, universal i386 + x86_64
+
+Put that back and the guest works, on the same machine, with the same overlay:
+
+    hello-dynamic-macho   prints "hello-dynamic"
+    chrome-macho          41 images loaded, 0 fatal signals
+
+Forty-one is the same count as the 09-09 logs, and the run ends where it always
+ended — at Chrome's framework `dlopen` failing with "image not found", which is
+the next problem and not a crash. So everything around the loader is healthy,
+and the September loader is the only thing that broke.
+
+The catch is the one that matters for this exercise: that binary has no log
+patch. `strings` finds no `calling sNotifyObjCMapped` in it, though it does have
+the `sNotifyObjCMapped` symbol. Every dyld that carries the log line cannot
+boot; the one that boots does not carry it.
+
+Getting to the line therefore means adding it to a loader that boots, and the
+reference that boots is a June revision whose base commit is not obtainable
+here — the submodule's object store does not contain it, and the remote does not
+exist. So it cannot be done by rebuilding from the base, and rebuilding the
+September sources does not boot. That is the wall, and it is a source problem
+rather than a build-flag one.
