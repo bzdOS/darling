@@ -596,3 +596,30 @@ The fixup then ran over the previous binary and produced a byte-identical result
 which would have looked like "the change made no difference" — a conclusion drawn
 from a build that never happened. `touch` the restored file, or restore without
 `-p`, and check that the linker actually ran.
+
+### The three loaders, side by side
+
+Generated from the binaries themselves, not from memory — this is the whole
+comparison, so nobody has to re-derive it:
+
+| loader       | size | segments | load commands |
+|--------------|------|----------|----------------|
+| June (boots) | 5.2 MB | 4 | LC_SEGMENT_64, LC_UNIXTHREAD, LC_ID_DYLINKER, LC_SEGMENT_SPLIT_INFO, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_EXPORTS_TRIE, LC_SOURCE_VERSION, LC_BUILD_VERSION |
+| Sept 807K    | 0.8 MB | 4 | LC_SEGMENT_64, LC_UNIXTHREAD, LC_DYLD_INFO_ONLY |
+| this build   | 2.3 MB | 5 | LC_SEGMENT_64, LC_UNIXTHREAD, LC_DYLD_CHAINED_FIXUPS, LC_DYLD_EXPORTS_TRIE, LC_BUILD_VERSION |
+
+Reading it: this build already matches the loader that boots on platform, SDK
+version, chained fixups, exports trie, entry command and the absence of
+`LC_LOAD_DYLIB`. What is left is `LC_SEGMENT_SPLIT_INFO` and
+`LC_SOURCE_VERSION` (both present in the June build, absent here), one extra
+segment, and the size — most of which is the second architecture slice the June
+build carries and this one does not.
+
+`LC_SEGMENT_SPLIT_INFO` is the only remaining difference that could plausibly
+change behaviour rather than just describe the build: it tells the loader that
+`__DATA` is split, which is what a dylinker built for use alongside a shared
+cache carries. Adding it is a sixteen-byte load command, and the fixup already
+frees space for exactly that kind of edit — so it is the one experiment left
+worth running. It is a guess, though, and it is labelled as one: everything
+inside the four September files has been ruled out by experiment, so what is
+being guessed at now is a header field, not code.
