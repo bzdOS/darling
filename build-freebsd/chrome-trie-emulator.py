@@ -503,8 +503,11 @@ class Walker:
         if not (flags & REEXPORT):
             return None
         if imported == "":
-            # importedName[0] == '\\0' -> reuse the name we were asked for
-            imported = s_path[-1] if s_path else ""
+            # importedName[0] == '\0' -> reuse the name we were asked for, and
+            # that is the WHOLE name, so the edges along the path are
+            # concatenated. Taking only the last one is wrong for any symbol
+            # split over more than one edge, which is most of them.
+            imported = "".join(s_path)
         image = self.reexport
         if ordinal is None or ordinal <= 0 or ordinal > len(image.libraries):
             self.notes.append(
