@@ -22,6 +22,7 @@ they have inside the submodule.
 | `src/external/dyld/src/dyldFreeBSDRebase.c` | new file: manual classic-rebase applier (ld64.lld emits an empty chained-starts payload, so dyld's own chained path silently does nothing) |
 | `src/external/dyld/src/dyldInitialization.cpp` | full file, calling the rebase above from the raw-clang build path |
 | `src/external/dyld/darling/src/sandbox-dummy.c` | new file: no-op `sigexc_setup()` / `sandbox_check()` so the raw-clang dyld links without libsystem_platform's exception-port setup |
+| `src/external/dyld/CMakeLists.txt` | the `system_loader` link line with `-Wl,-fixup_chains` replaced by `-Wl,-no_fixup_chains`, so the image gets classic rebase and bind opcodes the way the raw build did — see `build-freebsd/dyld-rebuild.md` |
 
 They are whole files, not hunks: with the base commit unavailable the exact
 change could not be isolated, so treat them as "copy over the submodule
@@ -30,9 +31,10 @@ worktree" material.
 ## How to put them back
 
     git submodule update --init src/external/dyld
-    for f in $(cd build-freebsd/dyld-salvage && find . -type f -name '*.[ch]' -o -name '*.cpp'); do
-        cp "build-freebsd/dyld-salvage/$f" "src/external/dyld/$f"
-    done
+    ( cd build-freebsd/dyld-salvage && \
+      find . -type f \( -name '*.[ch]' -o -name '*.cpp' -o -name 'CMakeLists.txt' \) \
+      -exec cp --parents {} /tmp/dyld-salvage-stage/ \; )
+    ( cd /tmp/dyld-salvage-stage && tar cf - . ) | ( cd src/external/dyld && tar xf - )
 
 Then commit inside the submodule, push that branch, and bump the gitlink here.
 That last step is an infrastructure decision (a new public repository and
