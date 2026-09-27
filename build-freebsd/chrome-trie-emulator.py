@@ -531,6 +531,22 @@ class Walker:
         self.chain_seen.add(chain_key)
         self.chain.append((image.path, imported, provider_path, None))
 
+        # Resolving a re-export hop needs the overlay root, and this is the
+        # only place it is used. Without it this used to die on
+        # os.path.join(None, ...) with "TypeError: expected str, bytes or
+        # os.PathLike object, not NoneType", which says nothing about the
+        # missing variable -- and this tool gets used by hand, on a log, at the
+        # moment a run comes back. It is checked HERE rather than at startup so
+        # that a lookup which never re-exports still works with no root set.
+        if self.root is None:
+            raise SystemExit(
+                "%s re-exports %r, so following it needs the overlay root: dyld2 "
+                "resolves a re-export's provider against the loaded images, and "
+                "this tool reproduces that by looking the provider up under "
+                "$DARLING_OVERLAY. It is not set and no root argument was given.\n"
+                "  export DARLING_OVERLAY=/path/to/overlay\n"
+                "  or pass it:  chrome-trie-emulator.py [--deep] <file> <symbol> "
+                "<overlay-dir>" % (os.path.basename(image.path), imported))
         target = os.path.join(self.root, provider_path.lstrip("/"))
         if not os.path.exists(target):
             # "Missing weak-dylib" -> libImage() is NULL -> return NULL.
@@ -944,6 +960,14 @@ def main():
     path = args[0]
     root = args[2] if len(args) > 2 else os.environ.get("DARLING_OVERLAY")
     symbol = args[1].encode() if len(args) > 1 and not args[1].startswith("/") else None
+    # A root that is not a directory would otherwise turn every re-export hop
+    # into a silent "provider is not present under ...", i.e. a wrong ANSWER
+    # rather than an error. Fail where the mistake is.
+    if root is not None and not os.path.isdir(root):
+        raise SystemExit(
+            "the overlay root %r is not a directory. It is only needed to resolve "
+            "re-export providers; pass the overlay dir as the third argument or "
+            "set $DARLING_OVERLAY." % root)
 
     m = MachO(path)
     buf, blob_off, blob_size, blob_src = m.trie()
