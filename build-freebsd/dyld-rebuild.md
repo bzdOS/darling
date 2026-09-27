@@ -337,3 +337,35 @@ failure somewhere new:
 None of them prints the log line yet. The `CMakeLists.txt` with the flag changed
 is in `build-freebsd/dyld-salvage/`, next to the other dyld files, because it
 lives in the submodule and the superproject cannot carry it any other way.
+
+### The classic build actually runs, and dies on its first trapped syscall
+
+`rip 0x1000e0d10` in that last run is not a wild address after all. It is exactly
+the first instruction of a real function:
+
+    00000001000e0d10 <_task_self_trap_impl>:
+    1000e0d10: 55                 pushq  %rbp
+    1000e0d11: 48 89 e5           movq   %rsp, %rbp
+    1000e0d14: 48 83 ec 10        subq   $0x10, %rsp
+    1000e0d1c: e8 2f b2 00 00     callq  0x1000ebf50 <_dserver_rpc_task_self_trap>
+
+and mldr's side of the same log has a line the other runs do not have:
+
+    [darling-mldr] patched raw-syscall trampolines to ud2:
+        generic-thunk=1 sigreturn-tramp=1
+    [darling-mldr] macOS BSD syscall trap installed (SIGSYS/x86-64)
+
+So with classic opcodes the loader gets as far as running and making its first
+trapped syscall — `task_self_trap` is how it asks darlingserver to do one — and
+faults there. The decoder calls the address unmapped only because the loader is
+not in its image map; it is the loader's own code.
+
+That moves the remaining failure out of the loader's startup and into the
+syscall-trap path, which is a different subsystem again: mldr's trap, the
+`dserver_rpc_task_self_trap` round trip, or what darlingserver answers. Note also
+the warning at the top of every log,
+
+    Cannot open /usr/local/libexec/darling/usr/libexec/darling/vchroot
+
+so the vchroot path this RPC relies on is not where the harness expects it. That
+is worth checking before anything in the loader is touched again.
