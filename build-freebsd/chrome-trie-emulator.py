@@ -48,6 +48,7 @@ image offset, then the reexport ordinal or the stub-and-resolver address, then
 the weak-definition address.
 """
 
+import hashlib
 import os
 import struct
 import sys
@@ -620,10 +621,323 @@ class Walker:
             print("           path: %s" % "".join(x for x in path if x))
 
 
+class Auditor:
+    """--audit: bounds-audit EVERY node of a trie, with no name semantics.
+
+    The name-driven walk above can only ever visit the nodes one lookup reaches,
+    and its --enumerate mode is a documented open defect (it mis-parses the
+    large overlay tries). Neither is good enough to answer "can this trie put
+    trieWalk's foot anywhere it must not?", so this walks the child-offset
+    graph itself: from the root, for every node, every child edge, depth first,
+    with each node visited once.
+
+    The point of the audit is not which nodes exist but which READS can leave the
+    trie, so each node is checked against the reads dyld2 performs there, split
+    by whether dyld2 checks them:
+
+      UNCHECKED -- a read dyld2 performs with no guard. Any of these is a fault.
+        1837  terminalSize = *p++                      one byte, no test
+        1853  childrenRemaining = *children++          reachable when
+              1848's `children > end` passes but children == end, so the byte
+              read is one past the end. This is the read at trieWalk+0xe4.
+        1862  char c = *p; while (c != '\\0') ...       the edge scan, no test
+        1876  while ((*p & 0x80) != 0) ++p             the child-uleb skip; the
+              test that would catch it is AFTER the read
+
+      GUARDED -- dyld2 tests it, so a violation is a logged refusal, not a
+      fault: read_uleb128 throws when p == end (1837's uleb), 1848 logs and
+      returns NULL, 1877 logs and returns NULL, 1889 logs and returns NULL.
+
+    A FAIL is an UNCHECKED finding. GUARDED findings are printed and counted
+    separately, because calling a caught-and-refused read a fault would make
+    the audit cry wolf.
+
+    Two structural invariants keep the audit honest about itself, because a
+    traversal that mis-parses a trie reports nonsense bounds as confidently as
+    it reports real ones:
+      * a child offset is decoded from the position where the uleb actually
+        starts, recorded BEFORE it is skipped. The --enumerate path
+        reconstructs it after the fact with read_uleb(buf, p - 1), which is
+        right only for a one-byte uleb and is the known mis-parse;
+      * every exported name the traversal can spell is reconstructed, so the
+        caller can diff the set against an independent implementation
+        (llvm-objdump --exports-trie). Names agreeing means this parse and
+        another one agree about the trie's shape.
+    """
+
+    def __init__(self, buf):
+        self.buf = buf
+        self.end = len(buf)
+        self.findings = []     # (node, line, "UNCHECKED"/"GUARDED", text)
+        self.visited = set()
+        self.nodes = 0
+        self.edges = 0
+        self.max_depth = 0
+        self.names = set()
+        self.guarded = [0]
+
+    def _find(self, node, line, severity, text):
+        self.findings.append((node, line, severity, text))
+        if severity == "GUARDED":
+            self.guarded[0] += 1
+
+    def _uleb(self, p, node, line, severity):
+        """Decode a uleb128, reporting whether it terminated inside the trie.
+
+        Returns (value, next_p) or None when it ran off the end. p is the real
+        start of the uleb, which is what makes the decoded value trustworthy.
+        """
+        buf, end = self.buf, self.end
+        result = 0
+        bit = 0
+        while True:
+            if p >= end:
+                self._find(node, line, severity,
+                           "uleb128 starting at 0x%x never terminates inside the "
+                           "trie end 0x%x" % (p, end))
+                return None
+            b = buf[p]
+            result |= (b & 0x7F) << bit
+            bit += 7
+            p += 1
+            if not (b & 0x80):
+                return result, p
+
+    def audit(self):
+        buf, end = self.buf, self.end
+        # Explicit stack, not recursion: a malformed trie can be deep, and the
+        # interpreter's recursion limit is not a property of the trie.
+        stack = [(0, 0, ())]
+        while stack:
+            node, depth, path = stack.pop()
+            if node in self.visited:
+                continue
+            self.visited.add(node)
+            self.nodes += 1
+            if self.nodes > MAX_NODES:
+                raise SystemExit("node budget of %d exceeded -- refusing to keep "
+                                 "auditing" % MAX_NODES)
+            if node > end:
+                self._find(node, L_NODE_OFFSET_CHECK, "GUARDED",
+                           "node offset 0x%x is past the trie end 0x%x; dyld2's "
+                           "line 1889 test (&start[nodeOffset] > end) catches this "
+                           "on a matching edge" % (node, end))
+                continue
+            if node == end:
+                # The subtle one. 1889 tests &start[nodeOffset] > end, and
+                # &start[end] == end, so an offset of exactly `end` PASSES it.
+                # dyld2 then walks to that node and executes 1837's *p++ with
+                # p == end: one byte past the trie, with nothing to catch it.
+                self._find(node, L_TERMINAL_SIZE, "UNCHECKED",
+                           "node offset is exactly the trie end 0x%x. 1889 tests "
+                           "(&start[nodeOffset] > end), and &start[end] == end, so "
+                           "this offset is ACCEPTED; the terminalSize = *p++ at "
+                           "1837 then reads one byte PAST the end" % end)
+                continue
+            self.max_depth = max(self.max_depth, depth)
+            name = "".join(path)
+
+            # 1837: terminalSize = *p++   -- the read itself is unguarded
+            first = buf[node]
+            p = node + 1
+            terminal_size = first
+            if first > 127:
+                got = self._uleb(node, node, L_TERMINAL_SIZE, "GUARDED")
+                if got is None:
+                    continue          # dyld2's read_uleb128 throws here
+                terminal_size, p = got
+
+            if terminal_size != 0:
+                # A node with a non-empty terminal payload spells an exported
+                # name, whether or not it also has children.
+                self.names.add(name)
+
+            # 1847: children = p + terminalSize
+            children = p + terminal_size
+
+            # 1848: dyld2 checks this and logs. Guarded.
+            if children > end:
+                self._find(node, L_CHILDREN_CHECK, "GUARDED",
+                           "children = p + terminalSize = 0x%x is past the trie "
+                           "end 0x%x; dyld2 logs and returns NULL (terminalSize=%d)"
+                           % (children, end, terminal_size))
+                continue
+
+            # 1853: childrenRemaining = *children++  -- unguarded, and reachable
+            # because 1848 tests `>` and not `>=`. children == end reads one byte
+            # past the trie. This is trieWalk+0xe4.
+            if children == end:
+                self._find(node, L_CHILDREN_REMAINING, "UNCHECKED",
+                           "children = p + terminalSize = 0x%x equals the trie end, "
+                           "so childrenRemaining = *children++ (trieWalk+0xe4) reads "
+                           "one byte PAST the end; 1848 tests only `children > end` "
+                           "and lets this through" % children)
+                continue
+
+            children_remaining = buf[children]
+            p = children + 1
+
+            for _ in range(children_remaining):
+                # 1862: the edge scan reads *p with no bounds test.
+                edge_start = p
+                while True:
+                    if p >= end:
+                        self._find(node, L_EDGE_SCAN, "UNCHECKED",
+                                   "edge starting at 0x%x has no NUL before the "
+                                   "trie end 0x%x; the scan at trieWalk+0x%X runs "
+                                   "off the end" % (edge_start, end,
+                                                    L_EDGE_SCAN - 1831))
+                        p = None
+                        break
+                    if buf[p] == 0:
+                        break
+                    p += 1
+                if p is None:
+                    break
+                edge = buf[edge_start:p].decode("utf-8", "replace")
+                p += 1                      # 1874/1887: past the terminator
+
+                # 1876: the continuation-byte scan reads *p before the `p > end`
+                # test that follows it.
+                uleb_start = p
+                while True:
+                    if p >= end:
+                        self._find(node, L_CHILD_ULEB_SKIP, "UNCHECKED",
+                                   "child uleb128 after edge %r starts at 0x%x and "
+                                   "its continuation scan reads past the trie end "
+                                   "0x%x before the `p > end` test can run"
+                                   % (edge, uleb_start, end))
+                        p = None
+                        break
+                    b = buf[p]
+                    p += 1
+                    if not (b & 0x80):
+                        break
+                if p is None:
+                    break
+
+                if p > end:
+                    self._find(node, L_CHILD_ULEB_SKIP, "GUARDED",
+                               "after skipping edge %r, p = 0x%x is past the trie "
+                               "end 0x%x; dyld2 logs and returns NULL"
+                               % (edge, p, end))
+                    break
+
+                child_off, _ = self._uleb(uleb_start, node, L_NODE_OFFSET_CHECK,
+                                          "GUARDED")
+                if child_off is None:
+                    break
+                self.edges += 1
+                if child_off == 0 or child_off > end:
+                    # 1889 range-checks only the edge that MATCHED, so a skipped
+                    # edge is stepped over and never followed: structural
+                    # damage, not necessarily a fault.
+                    self._find(node, L_NODE_OFFSET_CHECK, "GUARDED",
+                               "edge %r points at nodeOffset=0x%x, outside the trie "
+                               "(end 0x%x); dyld2 range-checks only a matching edge, "
+                               "so this is stepped over unless the lookup takes it"
+                               % (edge, child_off, end))
+                    continue
+                stack.append((child_off, depth + 1, path + (edge,)))
+        return self.findings
+
+
+def _run_audit(buf, path, blob_src, blob_off, blob_size):
+    """--audit: bounds-audit every node, print the verdict, name the reads."""
+    print("mode:   --audit structural bounds audit -- every node reached through "
+          "child offsets, no name semantics")
+    print("reads:  UNCHECKED = 1837 *p++, 1853 *children++ (children == end), "
+          "1862 edge scan, 1876 child-uleb continuation")
+    print("        GUARDED   = 1837 uleb (read_uleb128 throws), 1848, 1877, 1889 "
+          "(dyld2 logs and returns NULL)")
+    print()
+    a = Auditor(buf)
+    findings = a.audit()
+    unchecked = [f for f in findings if f[2] == "UNCHECKED"]
+    guarded = [f for f in findings if f[2] == "GUARDED"]
+
+    print("nodes audited: %d   edges audited: %d   max depth: %d"
+          % (a.nodes, a.edges, a.max_depth))
+    print("exported names reconstructed: %d   sha256(sorted, newline-joined): %s"
+          % (len(a.names),
+             hashlib.sha256("\n".join(sorted(a.names)).encode()).hexdigest()))
+
+    # Optional cross-check against an independent name list (llvm-objdump
+    # --exports-trie, passed as a file of names). EQUALITY is the wrong test and
+    # measuring it is what showed why: llvm-objump does not list every terminal
+    # in the trie. libxpc, for one, spells 112 re-exported __vproc_* names the
+    # audit reaches and dyld2's own lookup resolves, that llvm-objdump omits
+    # entirely. So the audit is expected to be a SUPERSET, and the failure mode
+    # that matters is the audit LOSING a name that another implementation found:
+    # that means its traversal is dropping subtrees, and every "in bounds" it
+    # reports about them is vacuous.
+    lost = False
+    cmp_path = os.environ.get("AUDIT_COMPARE_NAMES")
+    if cmp_path:
+        try:
+            with open(cmp_path, "r", errors="replace") as f:
+                theirs = {ln.strip() for ln in f if ln.strip()}
+        except OSError as exc:
+            print("compare: could not read %s: %s" % (cmp_path, exc))
+            theirs = None
+        if theirs is not None:
+            lost = bool(theirs - a.names)
+            if a.names == theirs:
+                rel = "EQUAL"
+            elif theirs - a.names:
+                rel = "MISSING %d name(s) the other implementation found" % len(theirs - a.names)
+            else:
+                rel = ("SUPERSET: the audit spells %d name(s) the other "
+                       "implementation does not list" % len(a.names - theirs))
+            print("compare: %s   (audit=%d other=%d)"
+                  % (rel, len(a.names), len(theirs)))
+            if lost:
+                for nm in sorted(theirs - a.names)[:10]:
+                    print("  LOST  %s" % nm)
+
+    if unchecked:
+        print()
+        print("UNCHECKED findings: %d -- reads dyld2 performs with no guard" % len(unchecked))
+        for node, line, _sev, text in unchecked[:20]:
+            print("  0x%06x  ImageLoader.cpp:%d  %s" % (node, line, text))
+        if len(unchecked) > 20:
+            print("  ... and %d more" % (len(unchecked) - 20))
+    else:
+        print()
+        print("UNCHECKED findings: 0")
+
+    if guarded:
+        print()
+        print("GUARDED findings: %d -- dyld2 tests these and refuses the lookup; "
+              "listed so a refusal is not mistaken for a fault" % len(guarded))
+        for node, line, _sev, text in guarded[:20]:
+            print("  0x%06x  ImageLoader.cpp:%d  %s" % (node, line, text))
+        if len(guarded) > 20:
+            print("  ... and %d more" % (len(guarded) - 20))
+
+    print()
+    if lost:
+        print("VERDICT: FAIL -- the traversal LOST %d name(s) another "
+              "implementation found, so it is not auditing those subtrees"
+              % len(theirs - a.names))
+        return 1
+    if unchecked:
+        print("VERDICT: FAIL -- %d unguarded read(s) can leave the trie" % len(unchecked))
+        for node, line, _sev, text in unchecked:
+            print("  node 0x%06x  ImageLoader.cpp:%d  %s" % (node, line, text))
+    else:
+        print("VERDICT: PASS -- no unguarded read in trieWalk can leave this trie, "
+              "at any of its %d node(s)%s"
+              % (a.nodes, "; traversal verified against an independent name list"
+                 if cmp_path else ""))
+    return 1 if unchecked else 0
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     brief = "--brief" in sys.argv
     enumerate_mode = "--enumerate" in sys.argv or "structural" in sys.argv
+    audit_mode = "--audit" in sys.argv
     deep = "--deep" in sys.argv
     if not args:
         raise SystemExit(__doc__)
@@ -636,6 +950,9 @@ def main():
     print("file:   %s" % path)
     print("trie:   %s dataoff=0x%x size=%d (0x%x)"
           % (blob_src, blob_off, blob_size, blob_size))
+
+    if audit_mode:
+        return _run_audit(buf, path, blob_src, blob_off, blob_size)
     print("walk:   dyld2 ImageLoader::trieWalk (src/ImageLoader.cpp:1831)")
     if symbol:
         print("symbol: %s  (faithful dyld2 lookup along this path)" % symbol.decode())

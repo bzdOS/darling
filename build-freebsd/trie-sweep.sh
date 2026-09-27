@@ -7,6 +7,9 @@
 #                                                     # wrappers, via $DARLING_OVERLAY
 #   sh build-freebsd/trie-sweep.sh --all-overlay       # EVERY Mach-O in the
 #                                                     # overlay, narrow + shallow + deep
+#   sh build-freebsd/trie-sweep.sh --all-audit         # EVERY Mach-O, but the
+#                                                     # structural BOUNDS audit:
+#                                                     # every node, no names
 #
 # --deep follows re-export chains: for a name whose terminal node carries
 # EXPORT_SYMBOL_FLAGS_REEXPORT it resolves the ordinal against the image's
@@ -57,6 +60,7 @@ DEEP=""
 ALL=""
 [ "${1:-}" = "--deep" ] && { DEEP="--deep"; shift; }
 [ "${1:-}" = "--all-overlay" ] && { ALL="yes"; shift; }
+[ "${1:-}" = "--all-audit" ] && { AUDIT="yes"; shift; }
 ROOTS="${DARLING_OVERLAY:-}"
 
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
@@ -142,6 +146,119 @@ sweep_file() {
 		printf '%-44s %3d lookup(s), %d failed\n' "$(basename "${_f}")" "${cnt}" "${bad}"
 	fi
 }
+
+# ------------------------------------------------------------------ all-audit
+# The structural bounds audit. Where --all-overlay asks "does a symbol lookup
+# survive", this asks the stronger question: can ANY read in trieWalk leave the
+# trie, at ANY node, for ANY name. It visits every node through child offsets,
+# so it is not limited by which names happen to be tried, and it does not use
+# the name-driven walk -- that one can only reach the nodes a lookup reaches,
+# and its --enumerate sibling is a documented mis-parse of the large tries.
+#
+# Each file is also CROSS-CHECKED: the audit reconstructs the set of exported
+# names its traversal can spell, and that set must equal llvm-objdump's
+# --exports-trie list. Two independent parses agreeing is the evidence that the
+# traversal is reading the trie correctly; a mismatch means the audit's
+# traversal is wrong about that file, and the file is reported as NOT audited
+# rather than quietly passed.
+if [ -n "${AUDIT}" ]; then
+	OD="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
+	[ -f "${QUALIFY}" ] || { echo "FATAL: ${QUALIFY} missing" >&2; exit 1; }
+	SLICES="$(mktemp -d)"
+	trap 'rm -rf "${SLICES}"' EXIT INT TERM
+
+	ROOTS_REL="${OVERLAY_ROOTS:-usr/lib:Frameworks:System/Library/Frameworks}"
+	set -- $(printf '%s' "${ROOTS_REL}" | tr ':' ' ')
+	qualified=0
+	filtered=0
+	audited=0
+	afail=0
+	amismatch=0
+	aunenum=0
+	plan="${SLICES}/plan"
+	: >"${plan}"
+	echo "== narrowing: every Mach-O under ${ROOTS_REL} =="
+	qa_args=""
+	for r in "$@"; do
+		qa_args="${qa_args} --root ${OD}/${r}"
+	done
+	# shellcheck disable=SC2086
+	python3 "${QUALIFY}" --slice-dir "${SLICES}" ${qa_args} >"${plan}.all" 2>"${plan}.err" || {
+		echo "FATAL: overlay-qualify.py failed" >&2; cat "${plan}.err" >&2; exit 1; }
+	cat "${plan}.err"
+	while IFS="$(printf '\t')" read -r tag a b c; do
+		case "${tag}" in
+			OK)
+				qualified=$((qualified + 1))
+				printf '%s\t%s\t%s\n' "${a}" "${b}" "${c}" >>"${plan}"
+				;;
+			SKIP)
+				filtered=$((filtered + 1))
+				printf '  FILTER %-58s %s\n' "$(basename "${a}")" "${b}"
+				;;
+		esac
+	done <"${plan}.all"
+
+	echo
+	echo "== auditing ${qualified} qualified file(s): every node, every read =="
+	while IFS="$(printf '\t')" read -r sweep orig detail; do
+		rel="${orig#"${OD}"/}"
+		rc=0
+		out="$(python3 "${EM}" --audit "${sweep}" 2>&1)" || rc=$?
+		verdict="$(printf '%s' "${out}" | sed -n 's/^VERDICT: //p')"
+		anames="$(printf '%s' "${out}" | sed -n 's/.*reconstructed: \([0-9]*\).*/\1/p')"
+		ahash="$(printf '%s' "${out}" | sed -n 's/.*newline-joined): //p')"
+		if [ "${rc}" -ne 0 ] || [ -z "${verdict}" ]; then
+			printf '  ERROR   %-52s audit did not produce a verdict (rc=%s)\n' "${rel}" "${rc}"
+			afail=$((afail + 1))
+			continue
+		fi
+		# independent name set, for the traversal cross-check
+		# The audit does the set comparison itself (it can tell a superset from a
+		# loss; the shell cannot). llvm-objdump's list is deliberately NOT
+		# required to be equal: it omits terminals the audit reaches and dyld2
+		# resolves -- libxpc alone spells 112 re-exported __vproc_* names it never
+		# lists. What must never happen is the audit LOSING a name, because then
+		# it is not visiting the subtree it claims to have audited.
+		llvm-objdump --macho --exports-trie "${sweep}" 2>/dev/null \
+			| awk '/^0x/ {print $2}' | LC_ALL=C sort -u >"${SLICES}/names.txt"
+		AUDIT_COMPARE_NAMES="${SLICES}/names.txt" python3 "${EM}" --audit "${sweep}" \
+			>"${SLICES}/audit.out" 2>&1 || true
+		out="$(cat "${SLICES}/audit.out")"
+		rc=0; [ -n "${out}" ] || rc=1
+		grep -q '^VERDICT: FAIL' "${SLICES}/audit.out" && rc=1
+		rel_cmp="$(printf '%s' "${out}" | sed -n 's/^compare: //p')"
+		audited=$((audited + 1))
+		if [ "${rc}" -eq 0 ]; then
+			printf '  PASS    %-52s %5s nodes, %s\n' \
+				"${rel}" "$(printf '%s' "${out}" | sed -n 's/^nodes audited: \([0-9]*\).*/\1/p')" \
+				"${rel_cmp:-no cross-check}"
+		else
+			printf '  FAIL    %-52s %s\n' "${rel}" "${rel_cmp:-unguarded read(s)}"
+			printf '%s\n' "${out}" | sed -n '/^VERDICT: FAIL/,$p' | sed 's/^/      /'
+			afail=$((afail + 1))
+		fi
+	done <"${plan}"
+
+	seen="$(sed -n 's/.*files_seen=\([0-9]*\).*/\1/p' "${plan}.err")"
+	notmacho="$(sed -n 's/.*not_macho=\([0-9]*\).*/\1/p' "${plan}.err")"
+	echo
+	if [ "${afail}" -eq 0 ] && [ "${amismatch}" -eq 0 ]; then
+		printf 'no overlay trie can put trieWalk outside the trie: %d/%d qualified, %d audited, every node and every read in bounds\n' \
+			"${audited}" "${qualified}" "${audited}"
+		printf '  %s file(s) seen under %s; %d Mach-O, %d qualified, %d filtered, %d not Mach-O\n' \
+			"${seen:-?}" "${ROOTS_REL}" "$(( ${seen:-0} - ${notmacho:-0} ))" \
+			"${qualified}" "${filtered}" "${notmacho:-0}"
+	elif [ "${afail}" -eq 0 ]; then
+		printf 'audit INCOMPLETE: %d/%d qualified, %d audited, %d traversal MISMATCH -- not a clean bill of health\n' \
+			"${audited}" "${qualified}" "${audited}" "${amismatch}"
+	else
+		printf 'audit FAIL: %d/%d qualified, %d file(s) with an unguarded read\n' \
+			"${qualified}" "${qualified}" "${afail}"
+	fi
+	[ "${afail}" -eq 0 ] && [ "${amismatch}" -eq 0 ]
+	exit $?
+fi
 
 # ---------------------------------------------------------------- all-overlay
 if [ -n "${ALL}" ]; then
