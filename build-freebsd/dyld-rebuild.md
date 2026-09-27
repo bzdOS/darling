@@ -441,3 +441,32 @@ does not compile:
 So the rebase path is off the list of suspects, and the syscall-trap path — mldr's
 SIGSYS handling and the `dserver_rpc_task_self_trap` round trip — is what's
 left.
+
+### Except the trap path is not September's
+
+Before blaming the trap, check whether the working build even goes through it.
+It does, and by the same route:
+
+    _task_self_trap_impl            june 1   september 1
+    _dserver_rpc_task_self_trap     june 1   september 1
+    dserver_rpc* symbols            june 147 september 147
+
+Same functions, same RPC client, in both. So the trap is not something the
+September tree introduced.
+
+What is left as a difference between the loader that boots and every loader built
+since is the link itself:
+
+    June build (boots)        universal i386+x86_64, 5.2 MB,
+                              4x LC_LOAD_DYLIB, links the shared
+                              libSystem/libc from the SDK
+    every build since         x86_64 only, ~2.2 MB, no LC_LOAD_DYLIB at all,
+                              links libc_static / libsystem_static /
+                              compiler_rt_static straight out of the tree
+
+That is a hypothesis, not a conclusion — it has not been tested, and testing it
+means pointing the `system_loader` target at the shared dylibs instead of the
+static ones, which is a bigger change than a flag. But it fits everything
+observed: every static loader fails somewhere in its own early startup, in a
+different place each time, and the one loader that is linked the other way walks
+41 images and runs the guest program.
