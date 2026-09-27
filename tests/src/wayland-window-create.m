@@ -94,36 +94,54 @@ static const char *kBackendRelativePath =
 - (void *) wmBase;
 @end
 
-/* The buffer record, recovered from the method's own type encoding:
+/* The buffer record, recovered from the method's own type encoding AND
+ * cross-checked against its disassembly:
+ *
  *   _acquireBackBufferForWidth:height:  is
  *     ^{?=^{wl_buffer}^vQiiiic}24@0:8i16i20
- * i.e. it returns a 48-byte struct BY VALUE -- not an object pointer. The
- * struct is {struct wl_buffer *, void *, unsigned long long, int x4, char}.
- * Getting this wrong is not cosmetic: a struct this size is returned through
- * a hidden pointer (sret) in RDI, so declaring the method as returning `id`
- * would have the caller read that pointer as the result and shift the two
- * int arguments -- i.e. the one call this test exists for would have smashed
- * its own arguments and reported garbage. Verified against the dylib by
- * build-freebsd/check-wayland-window-probe.py.
  *
- * `buffer` is the wl_buffer the shim created, and `pixels` is the mmap of
- * the shm backing file -- the strongest evidence available that the shm fd
- * was really made and mapped, so the test writes through it. */
+ * Two things about that are easy to get wrong, and both were:
+ *
+ * 1. The leading `^` means POINTER to the struct. The method returns
+ *    `struct WLBackBuffer *`, NOT the struct by value. The prologue is the
+ *    plain four-register form -- RDI=self, RSI=_cmd, RDX=width, ECX=height --
+ *    with no hidden sret pointer, and the epilogue returns a pointer loaded
+ *    from the stack in RAX. Declaring the struct as a by-value return would
+ *    make the caller allocate a 48-byte temporary and pass ITS ADDRESS in
+ *    RDI, where the callee expects `self`; everything after that is garbage.
+ *
+ * 2. The field order is not the obvious one. The struct is 48 bytes (0x30,
+ *    the stride of the _buffers ivar array), and inside the method two
+ *    comparisons settle two of the four ints:
+ *        movl 0x1c(%rax), %eax ; cmpl -0x1c(%rbp), %eax   -> field@28 == width
+ *        movl 0x20(%rax), %eax ; cmpl -0x20(%rbp), %eax   -> field@32 == height
+ *    with 0x1c/0x20 the `width:`/`height:` arguments. So width is at 28 and
+ *    height at 32, and the two fields at 24 and 36 are NOT width/height as a
+ *    first guess would put them. Their meaning is not recoverable without the
+ *    sources, so they are carried as raw ints and deliberately NOT used for
+ *    addressing pixels.
+ *
+ * `buffer` is the wl_buffer the shim created (the method NULL-checks field 0
+ * before reusing an entry) and `pixels` is the mmap of the shm backing file,
+ * so writing through it proves the shm fd was not merely created but mapped
+ * and writable. Only the first pixel is written: the row pitch lives in one
+ * of the two unidentified fields, and guessing it would turn the evidence
+ * into an out-of-bounds write. */
 struct wl_buffer;
 
 typedef struct WLBackBuffer {
 	struct wl_buffer *buffer;
 	void *pixels;
 	unsigned long long serial;
-	int width;
-	int height;
-	int stride;
-	int offset;
-	char flipped;
+	int field_24;              /* unidentified: not width, not height */
+	int width;                 /* offset 28, confirmed by disassembly */
+	int height;                /* offset 32, confirmed by disassembly */
+	int field_36;              /* unidentified: possibly the row pitch */
+	char flipped;              /* offset 40 */
 } WLBackBuffer;
 
 @protocol WLWindowProbe <NSObject>
-- (WLBackBuffer) _acquireBackBufferForWidth: (int)width height: (int)height;
+- (WLBackBuffer *) _acquireBackBufferForWidth: (int)width height: (int)height;
 - (void) flushBuffer;
 @end
 
@@ -254,11 +272,15 @@ int main(void) {
 		/* --- the shm fd: _wayland_window_create_shm_fd lives here --- */
 		step("_acquireBackBufferForWidth:640 height:480 (reaches _wayland_window_create_shm_fd)");
 		nBefore = snapshotCwd(before, 64);
-		WLBackBuffer rec = [(id<WLWindowProbe>)window _acquireBackBufferForWidth: 640 height: 480];
+		WLBackBuffer *rec = [(id<WLWindowProbe>)window _acquireBackBufferForWidth: 640 height: 480];
 		nAfter = snapshotCwd(after, 64);
-		note("wl_buffer=%p pixels=%p serial=%llu", rec.buffer, rec.pixels, rec.serial);
-		note("record: %dx%d stride=%d offset=%d flipped=%d",
-			rec.width, rec.height, rec.stride, rec.offset, (int)rec.flipped);
+		note("buffer record=%p", (void *)rec);
+		note("  buffer=%p pixels=%p serial=%llu", rec ? rec->buffer : NULL,
+			rec ? rec->pixels : NULL, rec ? rec->serial : 0ull);
+		note("  field_24=%d width=%d height=%d field_36=%d flipped=%d",
+			rec ? rec->field_24 : -1, rec ? rec->width : -1, rec ? rec->height : -1,
+			rec ? rec->field_36 : -1, rec ? (int)rec->flipped : -1);
+		note("  asked for 640x480 -- the width/height fields above are what the backend stored");
 		note("cwd entries before=%d after=%d", nBefore, nAfter);
 
 		for (i = 0; i < nAfter; i++) {
@@ -274,30 +296,24 @@ int main(void) {
 			}
 		}
 
-		if (rec.pixels == NULL || rec.buffer == NULL) {
-			step("RESULT: no buffer (buffer=%p pixels=%p) -- shm allocation did NOT succeed.",
-				rec.buffer, rec.pixels);
+		if (rec == NULL || rec->pixels == NULL || rec->buffer == NULL) {
+			step("RESULT: no buffer (record=%p buffer=%p pixels=%p) -- shm allocation did NOT succeed.",
+				(void *)rec, rec ? rec->buffer : NULL, rec ? rec->pixels : NULL);
 			note("the backend log line above says which of shm alloc / mmap /");
 			note("wl_shm_pool_create_buffer failed, and at what size.");
 			return 7;
 		}
 
-		/* pixels is the mmap of the shm file, so writing one pixel proves the
-		 * fd was not just created but mapped and writable. */
-		step("write through pixels (proves the shm fd is mapped, not just created)");
+		/* pixels is the mmap of the shm file, so writing the first pixel
+		 * proves the fd was not just created but mapped and writable. Only
+		 * the first pixel: the row pitch is one of the two fields whose
+		 * meaning is unconfirmed, and guessing it would make this an
+		 * out-of-bounds write instead of evidence. */
+		step("write through pixels[0] (proves the shm fd is mapped, not just created)");
 		{
-			unsigned int *px = (unsigned int *)rec.pixels;
-			if (rec.stride > 0 && rec.width > 0 && rec.height > 0) {
-				px[0] = 0xFF204060u;                 /* first pixel, top-left  */
-				px[(rec.height - 1) * (rec.stride / 4) + (rec.width - 1)] = 0xFF60A0C0u;
-				note("wrote 2 pixels at offsets 0 and %d",
-					((rec.height - 1) * (rec.stride / 4) + (rec.width - 1)) * 4);
-				note("readback: first=0x%08X last=0x%08X", px[0],
-					px[(rec.height - 1) * (rec.stride / 4) + (rec.width - 1)]);
-			} else {
-				note("SKIPPED: non-positive stride/extent (%d x %d stride %d)",
-					rec.width, rec.height, rec.stride);
-			}
+			unsigned int *px = (unsigned int *)rec->pixels;
+			px[0] = 0xFF204060u;
+			note("wrote 0x%08X at offset 0, readback 0x%08X", px[0], px[0]);
 		}
 
 		step("buffer acquired: shm fd created, mapped and written");
