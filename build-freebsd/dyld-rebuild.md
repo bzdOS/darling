@@ -464,9 +464,41 @@ since is the link itself:
                               links libc_static / libsystem_static /
                               compiler_rt_static straight out of the tree
 
-That is a hypothesis, not a conclusion — it has not been tested, and testing it
-means pointing the `system_loader` target at the shared dylibs instead of the
-static ones, which is a bigger change than a flag. But it fits everything
-observed: every static loader fails somewhere in its own early startup, in a
-different place each time, and the one loader that is linked the other way walks
-41 images and runs the guest program.
+**That hypothesis was wrong, and it is withdrawn.** It rested on my reading of
+the June binary's `LC_LOAD_DYLIB`s, and that reading was a bad parse — I walked
+the fat header as if it were a Mach-O header. Parsed properly, with `otool -l`:
+
+    dyld.June-backup (boots)   4 segments, NO LC_LOAD_DYLIB,
+                                LC_DYLD_CHAINED_FIXUPS + LC_DYLD_EXPORTS_TRIE,
+                                LC_SEGMENT_SPLIT_INFO, LC_UNIXTHREAD
+    dyld.pre-salvage (807K)    4 segments, 4x LC_LOAD_DYLIB,
+                                LC_DYLD_INFO_ONLY, LC_UNIXTHREAD
+    this build                 5 segments, no LC_LOAD_DYLIB, LC_MAIN,
+                                LC_DYLD_CHAINED_FIXUPS or _INFO_ONLY by flag
+
+The four `LC_LOAD_DYLIB`s belong to the September build, not to June. So the
+loader that boots links nothing dynamically, exactly like these do, and it uses
+chained fixups — which means the `-Wl,-no_fixup_chains` change described above
+was made for the wrong reason, and moving the build to classic opcodes moved it
+*away* from the configuration that boots.
+
+The flag is therefore back to `-Wl,-fixup_chains`, and the chained build was
+rerun: it fails the same way the first chained run did (signal 10, from inside
+mldr's crash handler). So chained versus classic is not the discriminator
+either.
+
+What is actually left between the loader that boots and this one: the
+September source changes, and `LC_SEGMENT_SPLIT_INFO`, which the June build has
+and this one does not.
+
+### A build-system trap worth writing down
+
+Restoring a file with `cp -p` preserves its modification time, so ninja
+considered the target up to date and did not relink:
+
+    [4/4] cd $DARLING_SRC_DIR && true
+
+The fixup then ran over the previous binary and produced a byte-identical result,
+which would have looked like "the change made no difference" — a conclusion drawn
+from a build that never happened. `touch` the restored file, or restore without
+`-p`, and check that the linker actually ran.
