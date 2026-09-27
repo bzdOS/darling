@@ -100,11 +100,39 @@ A dynamic linker is loaded through `load_dylinker()` at depth 2 (mach_loader.c
 work as a dylinker: it fails header validation, before any of its own code
 runs. The four-byte correction is what makes the image pass that gate.
 
-**Still not verified by running.** Nobody has loaded the patched binary. What
-the source settles is the filetype gate; what remains open is whether a
-dylinker carrying `LC_MAIN` instead of `LC_UNIXTHREAD`, and linking nothing
-dynamically (`LC_LOAD_DYLIB` absent, everything static), is accepted after that
-gate. The run below is what answers it.
+### The entry command is wrong too, and this one is not fixable in four bytes
+
+The kernel takes the entry point from `LC_UNIXTHREAD`, and takes it from
+`LC_MAIN` only for the main executable:
+
+    1199  case LC_UNIXTHREAD:
+    1200      if (pass != 1) break;
+    ...
+    1212  case LC_MAIN:
+    1213      if (pass != 1) break;
+    1215      if (depth != 1) {
+    1216          break;          /* ignored for a dylinker, which is depth 2 */
+    1218      ret = load_main(...);
+
+The two builds differ exactly there:
+
+    overlay dyld     LC_UNIXTHREAD  LC_DYLD_INFO_ONLY  4x LC_LOAD_DYLIB
+    this build       LC_MAIN        LC_DYLD_CHAINED_FIXUPS  no LC_LOAD_DYLIB
+
+So at depth 2 the kernel walks past `LC_MAIN` and never sets an entry point at
+all — the image would be mapped and then started at nothing. Same root cause as
+the filetype: ld64.lld did not know it was linking a dylinker, so it produced
+the two things an *executable* gets (`MH_EXECUTE`, `LC_MAIN`) instead of the two
+things a *dynamic linker* gets (`MH_DYLINKER`, `LC_UNIXTHREAD`).
+
+Correcting the filetype is a four-byte edit. Correcting the entry command means
+rewriting a load command into a different load command — `LC_MAIN` carries
+`entryoff`/`stacksize`, `LC_UNIXTHREAD` carries a thread-state flavour and a
+count of registers plus a PC — which is real Mach-O surgery, and something to do
+deliberately with a run behind it, not as a side effect of a rebuild.
+
+**So: not verified, and not loadable as it stands.** The filetype correction is
+necessary; on its own it is not sufficient.
 
 ## Trying it
 
