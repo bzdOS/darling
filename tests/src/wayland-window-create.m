@@ -87,7 +87,6 @@ static const char *kBackendRelativePath =
 
 /* Private surface, read out of the built backend's ObjC metadata.
  * -shm/-compositor/-wmBase are @16@0:8, newWindowWithDelegate: is @24@0:8@16,
- * _acquireBackBufferForWidth:height: is 24@0:8i16i20 (int, int -> id),
  * flushBuffer is v16@0:8, setFrame: is v48@0:8{CGRect}16. */
 @protocol WLDisplayProbe <NSObject>
 - (void *) shm;
@@ -95,8 +94,36 @@ static const char *kBackendRelativePath =
 - (void *) wmBase;
 @end
 
+/* The buffer record, recovered from the method's own type encoding:
+ *   _acquireBackBufferForWidth:height:  is
+ *     ^{?=^{wl_buffer}^vQiiiic}24@0:8i16i20
+ * i.e. it returns a 48-byte struct BY VALUE -- not an object pointer. The
+ * struct is {struct wl_buffer *, void *, unsigned long long, int x4, char}.
+ * Getting this wrong is not cosmetic: a struct this size is returned through
+ * a hidden pointer (sret) in RDI, so declaring the method as returning `id`
+ * would have the caller read that pointer as the result and shift the two
+ * int arguments -- i.e. the one call this test exists for would have smashed
+ * its own arguments and reported garbage. Verified against the dylib by
+ * build-freebsd/check-wayland-window-probe.py.
+ *
+ * `buffer` is the wl_buffer the shim created, and `pixels` is the mmap of
+ * the shm backing file -- the strongest evidence available that the shm fd
+ * was really made and mapped, so the test writes through it. */
+struct wl_buffer;
+
+typedef struct WLBackBuffer {
+	struct wl_buffer *buffer;
+	void *pixels;
+	unsigned long long serial;
+	int width;
+	int height;
+	int stride;
+	int offset;
+	char flipped;
+} WLBackBuffer;
+
 @protocol WLWindowProbe <NSObject>
-- (id) _acquireBackBufferForWidth: (int)width height: (int)height;
+- (WLBackBuffer) _acquireBackBufferForWidth: (int)width height: (int)height;
 - (void) flushBuffer;
 @end
 
@@ -227,9 +254,11 @@ int main(void) {
 		/* --- the shm fd: _wayland_window_create_shm_fd lives here --- */
 		step("_acquireBackBufferForWidth:640 height:480 (reaches _wayland_window_create_shm_fd)");
 		nBefore = snapshotCwd(before, 64);
-		id buffer = [(id<WLWindowProbe>)window _acquireBackBufferForWidth: 640 height: 480];
+		WLBackBuffer rec = [(id<WLWindowProbe>)window _acquireBackBufferForWidth: 640 height: 480];
 		nAfter = snapshotCwd(after, 64);
-		note("buffer=%p", buffer);
+		note("wl_buffer=%p pixels=%p serial=%llu", rec.buffer, rec.pixels, rec.serial);
+		note("record: %dx%d stride=%d offset=%d flipped=%d",
+			rec.width, rec.height, rec.stride, rec.offset, (int)rec.flipped);
 		note("cwd entries before=%d after=%d", nBefore, nAfter);
 
 		for (i = 0; i < nAfter; i++) {
@@ -245,19 +274,38 @@ int main(void) {
 			}
 		}
 
-		if (buffer == nil) {
-			step("RESULT: buffer=nil -- the shm allocation did NOT succeed.");
+		if (rec.pixels == NULL || rec.buffer == NULL) {
+			step("RESULT: no buffer (buffer=%p pixels=%p) -- shm allocation did NOT succeed.",
+				rec.buffer, rec.pixels);
 			note("the backend log line above says which of shm alloc / mmap /");
 			note("wl_shm_pool_create_buffer failed, and at what size.");
 			return 7;
 		}
 
-		step("buffer acquired: shm fd path reached");
+		/* pixels is the mmap of the shm file, so writing one pixel proves the
+		 * fd was not just created but mapped and writable. */
+		step("write through pixels (proves the shm fd is mapped, not just created)");
+		{
+			unsigned int *px = (unsigned int *)rec.pixels;
+			if (rec.stride > 0 && rec.width > 0 && rec.height > 0) {
+				px[0] = 0xFF204060u;                 /* first pixel, top-left  */
+				px[(rec.height - 1) * (rec.stride / 4) + (rec.width - 1)] = 0xFF60A0C0u;
+				note("wrote 2 pixels at offsets 0 and %d",
+					((rec.height - 1) * (rec.stride / 4) + (rec.width - 1)) * 4);
+				note("readback: first=0x%08X last=0x%08X", px[0],
+					px[(rec.height - 1) * (rec.stride / 4) + (rec.width - 1)]);
+			} else {
+				note("SKIPPED: non-positive stride/extent (%d x %d stride %d)",
+					rec.width, rec.height, rec.stride);
+			}
+		}
+
+		step("buffer acquired: shm fd created, mapped and written");
 		step("flushBuffer (commit the acquired buffer to the compositor)");
 		[(id<WLWindowProbe>)window flushBuffer];
 		note("flushBuffer returned");
 
-		step("RESULT: window created and a shm buffer acquired + flushed");
+		step("RESULT: window created, shm buffer acquired + written + flushed");
 	}
 	return 0;
 }
