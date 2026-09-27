@@ -225,6 +225,49 @@ The line to look for, in the log that script prints:
 this whole exercise is about is which image still has the broken callback in
 `notifyBatchPartial`.
 
-`launch-chrome.sh` drives `launch-dynamic`, which needs root to stage the
-application bundle, and the operator has not cleared that. Everything above the
-run is done and verified; the run itself is the part that is missing.
+`launch-chrome.sh` drives `launch-dynamic`, which needs root: the harness itself
+refuses to start otherwise (`tests/launch-dynamic-smoke.c`, `getuid() != 0` ->
+"Must run as root"), and so does `darlingserver`
+(`src/external/darlingserver/src/darlingserver.cpp`, `getuid() != 0 ||
+getgid() != 0` -> "darlingserver needs to start as root"). Running the pair by
+hand as an ordinary user gets the same answer, and `mldr` then fails the
+check-in with `BAD SEND STATUS: -13`.
+
+## What the runs showed, once root was available
+
+Three runs of the same harness, same day, same target where noted. Logs are
+`$DARLING_BUILD_DIR/smoke-chrome-<date>.log`.
+
+| dyld | target | result |
+|---|---|---|
+| overlay's, `ad4850c1` | chrome-macho | `FATAL signal 11 at 0x10005e6d4`, 0 images loaded |
+| overlay's, `ad4850c1` | hello-dynamic-macho | same crash, same address, 0 images |
+| rebuilt + fixed up, `0d77b081` | hello-dynamic-macho | gets past it, then `FATAL signal 11 at addr=0x0` inside mldr, rip `0x220ee8` |
+
+Two things follow, and the second one is not good news.
+
+The first: the three header defects really were what stopped the image, because
+the failure moved. With the shipped dyld the guest dies at `0x10005e6d4` before
+anything is mapped; with the fixed-up rebuild it does not die there, gets to
+mldr's pre-start, and fails later from inside mldr's own signal handler. No
+loader rejection — no bad-Mach-O, no "dynamic linker can't reference another
+dynamic linker" — so the filetype, the entry command and the stripped
+`LC_LOAD_DYLINKER` were accepted.
+
+The second: the overlay's dyld is broken on its own. It crashes at `0x10005e6d4`
+on every guest binary, including the trivial one, and that predates any of this
+work. The logs in the build directory show when: the last runs that loaded
+anything were on 09-09 (41 images each), and everything from 14-09 onwards is
+`0 images` with a fatal signal. So "the rebuild does not work" is not a verdict
+on the rebuild — the thing it is being compared against does not work either,
+and has not for over a week.
+
+The line this whole exercise is for never appeared in any of those logs, the
+old ones included:
+
+    calling sNotifyObjCMapped=... first=...
+
+which is consistent with the log patch never having run in anger. Getting there
+now means fixing whatever leaves the guest with zero images mapped — which is a
+different problem from the one this document set out to solve, and is where the
+next hour should go.
