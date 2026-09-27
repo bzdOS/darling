@@ -1,3 +1,16 @@
+# Stub tool targets for when cctools-port is not built
+if(NOT TARGET lipo)
+    add_custom_target(lipo ALL COMMAND true)
+endif()
+if(NOT TARGET ranlib)
+    add_custom_target(ranlib ALL COMMAND true)
+endif()
+if(NOT TARGET ${APPLE_TARGET_TRIPLET_PRIMARY}-ar)
+    add_custom_target(${APPLE_TARGET_TRIPLET_PRIMARY}-ar ALL COMMAND true)
+endif()
+if(NOT TARGET ${APPLE_TARGET_TRIPLET_PRIMARY}-ld)
+    add_custom_target(${APPLE_TARGET_TRIPLET_PRIMARY}-ld ALL COMMAND true)
+endif()
 cmake_policy(SET CMP0069 NEW)
 cmake_policy(SET CMP0063 NEW)
 

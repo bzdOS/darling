@@ -123,6 +123,22 @@ project(darling)
 
 enable_language(ASM)
 
+# FreeBSD: remove clang resource dir from implicit C++ include paths.
+# It contains stddef.h which shadows libc++'s own stddef.h via #include_next,
+# breaking <cstddef> and all of libc++.
+if(FREEBSD_COMPAT)
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
+        OUTPUT_VARIABLE _clang_resource_dir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_clang_resource_dir)
+        list(REMOVE_ITEM CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES "${_clang_resource_dir}")
+        list(REMOVE_ITEM CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES "${_clang_resource_dir}")
+    endif()
+endif()
+
 set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "core")
 
 set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
