@@ -30,9 +30,28 @@
 #   frame                           {CGRect}16@0:8                     test: CGWindow (AppKit decl)
 #   styleMask                       Q16@0:8                            test: CGWindow (AppKit decl)
 #   _acquireBackBufferForWidth:height: ^{?=^{wl_buffer}^vQiiiic}24@0:8i16i20
-#                                               test: WLWindowProbe (struct return!)
+#                                               test: WLWindowProbe
 #   flushBuffer                     v16@0:8                            test: WLWindowProbe
 #   init                            @16@0:8                            via +[NSDisplay currentDisplay]
+#
+# READ THAT ENCODING CAREFULLY. The leading `^` is a POINTER to the struct:
+# the method returns `struct WLBackBuffer *`, not the struct by value. The
+# prologue is the plain RDI=self / RSI=_cmd / RDX / ECX form with no hidden
+# sret pointer, and the epilogue returns a pointer in RAX. Both halves of that
+# were got wrong here at least once -- first declared as returning `id`, then
+# "fixed" to a by-value struct return, which is a different wrong answer: the
+# caller would allocate a 48-byte temporary and pass its address in RDI where
+# the callee reads `self`.
+#
+# A matching encoding is necessary, not sufficient: the encoding fixes the
+# field TYPES (ptr, ptr, Q, i, i, i, i, c) but not which of the four ints is
+# which. The disassembly settles two of them, and they are not the obvious
+# choice:
+#     movl 0x1c(%rax),%eax ; cmpl -0x1c(%rbp),%eax   -> offset 28 is width
+#     movl 0x20(%rax),%eax ; cmpl -0x20(%rbp),%eax   -> offset 32 is height
+# The other two ints sit at 24 and 36 with no recoverable meaning, so the
+# probe prints them raw and never addresses pixels with them. Size is 48
+# (0x30), which is also the element stride of the _buffers ivar array.
 #
 # windowNumber is NOT in the dylib and is expected to be absent: it comes
 # from CGWindow (CoreGraphics/CGWindow.m:124, which returns `(NSInteger)
