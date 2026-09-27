@@ -87,10 +87,23 @@ die() {
 		printf 'look in %s for:\n' "${LOG}" >&2
 		printf '%s\n' "${look}" | sed 's/^/    /' >&2
 	fi
-	if [ -f "${LOG}" ]; then
-		printf '\nlast 20 lines of %s:\n' "${LOG}" >&2
-		tail -20 "${LOG}" | sed 's/^/    /' >&2
+if [ -f "${LOG}" ]; then
+	printf '\nlast 20 lines of %s:\n' "${LOG}" >&2
+	tail -20 "${LOG}" | sed 's/^/    /' >&2
+	printf '\nfull log (loader trace + mldr handler output, interleaved):\n    %s\n' "${LOG}" >&2
+	printf 'size: %s bytes, %s lines\n' \
+		"$(wc -c <"${LOG}" | tr -d ' ')" "$(wc -l <"${LOG}" | tr -d ' ')" >&2
+	if ! grep -q 'trieWalk() malformed trie node' "${LOG}" 2>/dev/null; then
+		printf '\nnote: the loader never printed its own bounds complaint\n' >&2
+		printf '      "trieWalk() malformed trie node, terminalSize=... extends past\n' >&2
+		printf '      end of trie". That line is NOT commented out in dyld2'"'"'s source,\n' >&2
+		printf '      so its absence means the fault was NOT at that guard, and is one\n' >&2
+		printf '      of the three unchecked reads instead: 1837 (terminalSize = *p++),\n' >&2
+		printf '      1862 (edge scan c = *p) or 1876 (child uleb128 skip).\n' >&2
+		printf '      The backtrace above places it; the last "dyld: loaded:" line\n' >&2
+		printf '      before it names the image.\n' >&2
 	fi
+fi
 	exit 1
 }
 
@@ -318,21 +331,88 @@ done
 # --- 6. the run itself ----------------------------------------------------
 
 step_no=6
+
+# DYLD_PRINT_* for the guest's dyld.
+#
+# The single root prompt this project has left is worth spending on attribution
+# as well as on the result, so the guest's loader is asked to narrate itself.
+# These are not guesses: all nineteen names below were read out of the dyld
+# that actually runs, and each one is referenced exactly once from
+# dyld::processDyldEnvironmentVariable -- leaq <string>,%rsi ; callq _strcmp ;
+# movb $0x1,<flag> -- which is this dyld actually reading the variable and
+# setting a bit, not merely carrying the string. Two variables that
+# launch-dynamic sets for its own runs, DYLD_PRINT_FILES and
+# DYLD_PRINT_SEARCHING, are NOT in that set: neither string exists anywhere in
+# the binary, so this dyld ignores them. They are dyld4-era names.
+#
+# The ones that carry the attribution, and why:
+#   DYLD_PRINT_LIBRARIES           image load order; the last "dyld: loaded:"
+#                                  line before a fault names the suspect image
+#   DYLD_PRINT_BINDINGS            every symbol binding, i.e. the imports being
+#   DYLD_PRINT_WEAK_BINDINGS       resolved -- the closest thing to naming the
+#                                  lookup that was in progress
+#   DYLD_PRINT_APIS                the dyld API surface, so dlopen() calls show up
+#   DYLD_PRINT_INTERPOSING         interposing tuples
+#   DYLD_PRINT_SEGMENTS            segment layout of what did load
+#   DYLD_PRINT_STATISTICS          counts of each stage
+#   DYLD_PRINT_STATISTICS_DETAILS  the same, broken down
+#   DYLD_PRINT_RPATHS, _WARNINGS, _INITIALIZERS, _DOFS, _OPTS, _ENV,
+#   DYLD_PRINT_CODE_SIGNATURES     the rest of the set, for completeness
+#   DYLD_PRINT_REBASINGS           slide/rebase decisions
+#
+# DYLD_PRINT_TO_STDERR rather than DYLD_PRINT_TO_FILE on purpose: the loader's
+# narration and the mldr handler's crash output (backtrace and guest stack
+# dump) have to land on the SAME stream, because their relative order is part
+# of the evidence. Splitting them across two files would throw that away.
+# DYLD_PRINT_TO_FILE exists and is read too, but it redirects dyld's own output
+# to a path given as the variable's value.
+#
+# They go in as `env NAME=value` arguments rather than being exported, for two
+# reasons: launch-dynamic only ever *adds* to the environment it inherited and
+# then execs mldr, so anything it holds reaches the guest; and sudo resets the
+# environment by default, which only explicit `env` arguments survive.
+DYLD_TRACE="DYLD_PRINT_LIBRARIES DYLD_PRINT_LIBRARIES_POST_LAUNCH \
+DYLD_PRINT_BINDINGS DYLD_PRINT_WEAK_BINDINGS DYLD_PRINT_APIS \
+DYLD_PRINT_INTERPOSING DYLD_PRINT_SEGMENTS DYLD_PRINT_STATISTICS \
+DYLD_PRINT_STATISTICS_DETAILS DYLD_PRINT_RPATHS DYLD_PRINT_WARNINGS \
+DYLD_PRINT_INITIALIZERS DYLD_PRINT_DOFS DYLD_PRINT_OPTS DYLD_PRINT_ENV \
+DYLD_PRINT_CODE_SIGNATURES DYLD_PRINT_REBASINGS DYLD_PRINT_TO_STDERR"
+
 RUN_CMD="env DARLING_SRC_DIR=${SRC} DARLING_OVERLAY=${OD} DARLING_BUILD_DIR=${BD}"
 RUN_CMD="${RUN_CMD} DARLING_TEST_BINARY=${TEST_BIN}"
 RUN_CMD="${RUN_CMD} WAYLAND_DISPLAY=${WAYLAND_DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+for v in ${DYLD_TRACE}; do
+	RUN_CMD="${RUN_CMD} ${v}=1"
+done
 RUN_CMD="${RUN_CMD} ${BD}/launch-dynamic"
+
+# The log has to be able to survive long after the run, and it must never be
+# something a `git add -A` can pick up, so it is kept outside the source tree
+# and that is checked rather than assumed.
+case "${LOG}" in
+	"${SRC}"/*)
+		die "${step_no}" "the log path ${LOG} is inside the source tree; refusing" \
+			"set DARLING_BUILD_DIR to somewhere outside ${SRC}" ;;
+esac
 
 printf '\n=== run ===\n'
 printf 'log: %s\n' "${LOG}"
+printf 'dyld trace: %d variable(s) set, output interleaved with the crash output\n' \
+	"$(printf '%s\n' ${DYLD_TRACE} | wc -l | tr -d ' ')"
 if [ "${DRY_RUN}" = "1" ]; then
 	printf 'DRY_RUN=1 -- NOT running. The command that would be run is exactly:\n\n'
 	printf '    sudo %s\n\n' "${RUN_CMD}"
 	printf 'The virtual input devices will exist only while this script runs.\n'
+	printf 'The log would be written to:\n    %s\n' "${LOG}"
+	printf '(outside the source tree, so it is never committable)\n'
 	exit 0
 fi
 
 printf 'running: sudo %s\n' "${RUN_CMD}"
+# Both streams, and no line buffering games: the loader writes from a child
+# process and the handler writes from the guest, and losing either half to a
+# full pipe would defeat the point. stdout and stderr are already merged into
+# one file by the redirection, which is what makes the interleaving meaningful.
 # shellcheck disable=SC2086
 sudo ${RUN_CMD} >"${LOG}" 2>&1 || true
 
@@ -349,4 +429,12 @@ grep -q 'RESULT: window created' "${LOG}" 2>/dev/null || die "${step_no}" \
 printf '\n=== result ===\n'
 grep -E '^\[step|RESULT|NEW cwd entry' "${LOG}" 2>/dev/null || true
 ok "the probe reached the shm buffer and flushed it"
+
+# The log is the product of this run even when the run fails, so its path is
+# echoed last, after the trap has already cleaned up. It sits outside the
+# source tree on purpose: it is a machine-local artefact full of addresses and
+# paths, and nothing about it belongs in the repository.
+printf '\nfull log (loader trace + mldr handler output, interleaved):\n    %s\n' "${LOG}"
+printf 'size: %s bytes, %s lines\n' \
+	"$(wc -c <"${LOG}" | tr -d ' ')" "$(wc -l <"${LOG}" | tr -d ' ')"
 exit 0
