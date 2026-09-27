@@ -206,6 +206,68 @@ fi
 	"${TEST_BIN} missing after build" ""
 ok "probe binary: ${SRC}/tests/${TEST_BIN}"
 
+# --- 3b. every dylib the probe wants must exist in the overlay -----------
+#
+# The probe is the only thing that has never been through the guest loader, and
+# a load failure happens before any of our code runs, so it reads like a
+# missing library rather than a problem with the probe.
+#
+# dyld refuses a dylib whose compatibility version is lower than the loading
+# binary requires (dyld3/ClosureBuilder.cpp:372), and the probe links
+# Foundation and AppKit, which the overlay declares as 65535.255.255 -- exactly
+# what the probe requires. check-guest-dylib-compat.py verifies that for every
+# dependency rather than trusting it, and also that each one is present at all.
+step_no=3
+if python3 "${SCRIPT_DIR}/check-guest-dylib-compat.py" \
+		"${SRC}/tests/${TEST_BIN}" "${OD}" >"${BD}/dylib-compat.log" 2>&1; then
+	n_deps="$(grep -c '^ok ' "${BD}/dylib-compat.log" || true)"
+	ok "all ${n_deps} dylib dependencies present in the overlay at a high enough compat version"
+else
+	die "${step_no}" "a dylib dependency is missing or too old; see below" \
+		"dyld: library not loaded: ...
+    dyld: found '...' which has compat version (...) which is less than required (...)"
+fi
+
+# --- 3c. the probe's Mach-O shape ----------------------------------------
+#
+# Compared against guest binaries that demonstrably work. Two of these are
+# load-time requirements, one is a false alarm worth keeping in mind:
+#   * no @rpath -- the guest resolves everything through DYLD_ROOT_PATH (the
+#     overlay), so every LC_LOAD_DYLIB must be an absolute guest path (3b
+#     enforces that too).
+#   * LC_MAIN and x86_64 EXECUTE: what the other guest binaries use.
+#   * the 65535.255.255 requirement above is NOT silently ignored because of a
+#     header flag: MachOFile::enforceCompatVersion() (MachOFile.cpp:931) has no
+#     flag test at all, it returns false only for a deployment target of
+#     macOS >= 10.14. This probe targets 10.12, so the requirement really is
+#     enforced -- which is why 3b checks the versions instead.
+step_no=3
+if command -v llvm-objdump >/dev/null 2>&1; then
+	# `|| true` on purpose: a command substitution takes the status of the
+	# command, so under `set -e` a malformed or unreadable binary would
+	# abort the script with llvm-objdump's status and no message at all --
+	# the silent confusing failure this whole script exists to prevent.
+	# An empty result is caught by the checks below, which say what is wrong.
+	probe_hdr="$(llvm-objdump --macho --private-headers "${SRC}/tests/${TEST_BIN}" 2>/dev/null || true)"
+	case "${probe_hdr}" in
+		*X86_64*EXECUTE*) ;;
+		*) die "${step_no}" "the probe is not a Mach-O x86_64 EXECUTE" \
+			"dyld: image not found" ;;
+	esac
+	case "${probe_hdr}" in
+		*LC_MAIN*) ;;
+		*) die "${step_no}" "the probe has no LC_MAIN entry point" \
+			"dyld: no LC_MAIN, cannot start the guest program" ;;
+	esac
+	if printf '%s' "${probe_hdr}" | grep -q '@rpath'; then
+		die "${step_no}" "the probe has an @rpath load command" \
+			"dyld: library not loaded: ... @rpath/..."
+	fi
+	ok "probe shape: x86_64 EXECUTE, LC_MAIN, no @rpath"
+else
+	note "llvm-objdump absent -- skipping the Mach-O shape checks"
+fi
+
 # --- 4. the vendored backend is the one that will actually run ------------
 
 step_no=4
