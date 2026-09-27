@@ -72,15 +72,33 @@ set(FREEBSD_COMPAT_FLAGS
     "-DDARLING_FREEBSD"
     "-D__BSD_VISIBLE=1"
     "-D_BSD_SOURCE"
+    "-I/usr/local/include"
+)
+
+# freebsd_compat.h is HEAVY — it pulls in <sys/user.h> → <vm/vm.h> which
+# conflicts with Darwin mach headers (boolean_t, vm_map_t, PAGE_SHIFT).
+# Only startup-layer targets (mldr, darling) need it; everything else gets
+# the lightweight flags above.
+set(FREEBSD_COMPAT_FLAGS_GLOBAL "${FREEBSD_COMPAT_FLAGS}")
+set(FREEBSD_COMPAT_FLAGS_STARTUP "${FREEBSD_COMPAT_FLAGS}"
     "-I${DARLING_FREEBSD_SHIM_INCLUDES}"
     "-I${DARLING_FREEBSD_COMPAT_DIR}"
-    "-I/usr/local/include"
     "-include ${DARLING_FREEBSD_COMPAT_DIR}/freebsd_compat.h"
 )
 string(JOIN " " FREEBSD_COMPAT_FLAGS_STR ${FREEBSD_COMPAT_FLAGS})
 
+# Global flags: only defines, no compat-includes -I paths (they break
+# C++ libc++ resolution and shadow system headers for non-startup targets).
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   ${FREEBSD_COMPAT_FLAGS_STR}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FREEBSD_COMPAT_FLAGS_STR}")
+
+# On FreeBSD, cmake's implicit include directories include clang's resource
+# dir, which contains a stddef.h that shadows libc++'s own through
+# #include_next and so breaks <cstddef>. The actual override must happen AFTER
+# project() (when cmake detects the compiler), so this file only records the
+# need for it and CMakeLists.txt applies it. See the post-project section there:
+# the path is asked of the compiler rather than written down, so it follows
+# whatever clang is installed.
 
 # ── Disable Linux-only components ─────────────────────────────────────────────
 # These components depend on Linux kernel interfaces that do not exist on
