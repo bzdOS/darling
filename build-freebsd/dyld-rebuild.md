@@ -553,6 +553,38 @@ That is a one-place change, but it needs the callback's semantics read out of
 `MachOAnalyzer.cpp` first; guessing them would produce a quietly corrupted image
 that looks like a different bug.
 
+### Tried: the analyzer's own walker. Same failure.
+
+Read the semantics first, as noted above. `forEachRebase(diag, block)` hands the
+callback the *runtime address* of the location to fix — the other caller in that
+file only tests `(runtimeOffset & 7)` for alignment — and the walker picks classic
+or chained from the link-edit info, so one call covers both.
+
+The "no malloc" part of the September comment is weaker than it reads, by the
+way: `BLOCK_ACCESSIBLE_ARRAY` is a stack array handed to an `OverflowSafeArray`
+that only reaches for `malloc` if it has to grow, and the walker pre-sizes it to
+the segment count, so it should not. That makes the analyzer's walker look more
+usable at that point than the comment claims, and it is a one-place change to
+try:
+
+    dyld3::Diagnostics diag;      // actually just Diagnostics, it is not in dyld3
+    ma->forEachRebase(diag, ^(uint64_t runtimeOffset, bool isLazy, bool& stop) {
+        *(uint64_t*)runtimeOffset += 0;   // slide is not plumbed through here
+    });
+
+Rebuilt, fixed up, run: **signal 10**, the same failure as the chained build. So
+the rebase implementation is not the cause either — not the hand-rolled one, not
+its absence, and not the analyzer's.
+
+That is six controlled experiments now, and nothing in the four September files
+accounts for it: the header defects were real and are fixed, and the log
+statement, the classic rebase, the exception-port stub and the choice of rebase
+implementation have each been ruled out by changing one thing at a time. What is
+left is not a change in those files but the possibility that the loader that
+boots was built from a different source revision altogether, which would make
+"the September changes" the wrong frame entirely. Nothing here can settle that:
+the base commit is not in the object store and the remote does not exist.
+
 ### A build-system trap worth writing down
 
 Restoring a file with `cp -p` preserves its modification time, so ninja
