@@ -48,13 +48,30 @@ image offset, then the reexport ordinal or the stub-and-resolver address, then
 the weak-definition address.
 """
 
+import os
 import struct
 import sys
+import threading
+
+# The overlay's export tries are large and deeply nested -- Foundation is
+# 35 KB of trie and AppKit 85 KB -- and the walk recurses once per node, so the
+# default 1000-frame limit is not enough. Raising the limit alone is not safe
+# either: CPython recurses on the C stack too, and a deep walk can run it out
+# and die with no message. So the walk runs on a thread with a large stack and
+# a matching recursion limit.
+RECURSION_LIMIT = 200000
+STACK_BYTES = 64 * 1024 * 1024
+# Hard ceiling on nodes visited, so a malformed trie cannot make the walk run
+# away and eat the machine. 85 KB is the largest blob seen (AppKit), which is
+# a few tens of thousands of nodes, so this is far above anything real.
+MAX_NODES = 5000000
 
 MH_MAGIC_64 = 0xFEEDFACF
 LC_SEGMENT_64 = 0x19
+LC_DYLD_INFO = 0x22
 # LC_REQ_DYLD | 0x33 -- the 0x80000000 marks it as a dyld-only load command.
 LC_DYLD_EXPORTS_TRIE = 0x80000033
+LC_DYLD_INFO_ONLY = 0x80000022
 
 KIND_MASK = 0x03
 KIND_REGULAR = 0x00
@@ -81,19 +98,62 @@ class MachO:
         if magic != MH_MAGIC_64:
             raise SystemExit("%s: not a 64-bit thin Mach-O (magic %08x)" % (path, magic))
         self.exports_trie = None
+        self.dyld_info = None
         off = 32
         for _ in range(ncmds):
             cmd, cmdsize = struct.unpack_from("<II", self.d, off)
             if cmd == LC_DYLD_EXPORTS_TRIE:
                 dataoff, datasize = struct.unpack_from("<II", self.d, off + 8)
                 self.exports_trie = (dataoff, datasize)
+            elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
+                # dyld_info_command: rebase, bind, weak_bind, lazy_bind, export.
+                # export_off/export_size is the last pair; it is the same
+                # export trie as LC_DYLD_EXPORTS_TRIE describes.
+                f = struct.unpack_from("<10I", self.d, off + 8)
+                self.dyld_info = (f[8], f[9])
             off += cmdsize
 
+    def export_blob(self):
+        """Where dyld2 gets the export trie from, in dyld2's own order of
+        preference (ImageLoaderMachOCompressed::findShallowExportedSymbol):
+
+            uint32_t trieFileOffset = fDyldInfo ? fDyldInfo->export_off
+                                                : fExportsTrie->dataoff;
+            uint32_t trieFileSize   = fDyldInfo ? fDyldInfo->export_size
+                                                : fExportsTrie->datasize;
+
+        Two things follow, and both are load-time behaviour rather than
+        cosmetics:
+
+          * an image with LC_DYLD_INFO_ONLY is walked through ITS export_off,
+            not through any LC_DYLD_EXPORTS_TRIE it may also carry;
+          * if fDyldInfo is present, dyld2 does NOT fall back to the trie
+            command when export_size is 0 -- findShallowExportedSymbol returns
+            NULL instead. A file with both commands and a zero export_size
+            therefore exports nothing as far as dyld2 is concerned.
+
+        Returns (offset, size, source-description).
+        """
+        if self.dyld_info is not None:
+            off, size = self.dyld_info
+            src = "LC_DYLD_INFO_ONLY export_off/export_size"
+            if off == 0 or size == 0:
+                src += " (zero: dyld2 returns NULL and does NOT fall back)"
+            return off, size, src
+        if self.exports_trie is not None:
+            off, size = self.exports_trie
+            return off, size, "LC_DYLD_EXPORTS_TRIE dataoff/datasize"
+        return None
+
     def trie(self):
-        if self.exports_trie is None:
-            raise SystemExit("no LC_DYLD_EXPORTS_TRIE in this file")
-        off, size = self.exports_trie
-        return self.d[off:off + size]
+        blob = self.export_blob()
+        if blob is None:
+            raise SystemExit("no export blob: neither LC_DYLD_INFO_ONLY nor "
+                             "LC_DYLD_EXPORTS_TRIE in this file")
+        off, size, src = blob
+        if size == 0:
+            raise SystemExit("export blob is empty (%s)" % src)
+        return self.d[off:off + size], off, size, src
 
 
 class UlebError(Exception):
@@ -136,6 +196,9 @@ class Walker:
         # enumeration of the trie, not a symbol lookup.
         self.enumerate = enumerate
         self.edges = []
+        self.cycles = []   # (node, depth, path) -- structural mode only
+        self.notes = []    # (node, text) -- observations, not dyld2 faults
+        self.names = []    # exported names, harvested while enumerating
         self.violations = []   # (offset, line, what)
         self.nodes = 0
         self.max_depth = 0
@@ -153,17 +216,32 @@ class Walker:
             return None
         return self.buf[p]
 
-    def walk(self, start_offset=0, depth=0, s=b"", path=()):
+    def walk(self, start_offset=0, depth=0, s=b"", path=(), on_path=frozenset()):
         buf, end = self.buf, self.end
         p = start_offset
         while p is not None:
             self.nodes += 1
+            if self.nodes > MAX_NODES:
+                raise SystemExit("node budget of %d exceeded -- the trie walk is "
+                                 "not converging, refusing to keep going" % MAX_NODES)
             self.max_depth = max(self.max_depth, depth)
             node_off = p
+
+            # Structural mode visits edges dyld2 would never follow -- dyld2
+            # breaks out of the child loop on the FIRST match -- so it can
+            # reach a node twice, or loop, on a path no symbol lookup takes.
+            # That is worth reporting, but it is not a dyld2 fault, so it is
+            # kept apart from the bounds violations that are.
+            if self.enumerate and node_off in on_path:
+                self.cycles.append((node_off, depth, path))
+                return None   # this branch is done; the caller keeps siblings
+            here = on_path | {node_off}
 
             # 1837: terminalSize = *p++;   NO CHECK ON p
             byte = self.read(p, L_TERMINAL_SIZE, "terminalSize byte")
             if byte is None:
+                if self.enumerate:
+                    return None   # this branch ends here; siblings continue
                 return None
             p += 1
             terminal_size = byte
@@ -206,20 +284,29 @@ class Walker:
                      "0x%x -- dyld2 logs 'terminalSize=0x%lx extends past end "
                      "of trie' and returns NULL" % (children, end, terminal_size)))
                 return None
-            children_remaining = self.read(children, L_CHILDREN_REMAINING,
-                                           "childrenRemaining")
-            if children_remaining is None:
-                return None
-            p = children + 1
 
-            # the terminal payload dyld2 steps over with its bare pointer
+            # The terminal payload sits BETWEEN p and children, so it has to be
+            # consumed while p is still at the start of it -- the order dyld3's
+            # recurseTrie uses, and the order that matters here. Parsing it
+            # after p has been moved to children+1 reads the child-count byte
+            # and the first edge as if they were flags and an image offset, and
+            # then every child count, edge and node offset downstream is noise.
             payload = None
             if terminal_size != 0:
                 try:
                     payload, p = self._payload(p, end, node_off)
                 except UlebError as exc:
+                    if self.enumerate:
+                        self.notes.append((node_off, str(exc)))
+                        return None
                     self.violations.append((node_off, L_TERMINAL_SIZE, str(exc)))
                     return None
+
+            children_remaining = self.read(children, L_CHILDREN_REMAINING,
+                                           "childrenRemaining")
+            if children_remaining is None:
+                return None
+            p = children + 1
 
             node_offset = 0
             matched = None
@@ -236,6 +323,8 @@ class Walker:
                 while True:
                     c = self.read(p, L_EDGE_SCAN, "edge character")
                     if c is None:
+                        if self.enumerate:
+                            break
                         return None
                     if c == 0:
                         break
@@ -283,13 +372,18 @@ class Walker:
                             self.violations.append((node_off, L_CHILD_ULEB_SKIP, str(exc)))
                             return None
                         if skipped == 0 or skipped > end:
-                            self.violations.append(
-                                (node_off, L_NODE_OFFSET_CHECK,
-                                 "edge %r points at nodeOffset=0x%x, outside the "
-                                 "trie (end 0x%x)" % (edge, skipped, end)))
-                            return None
+                            # dyld2 does NOT range-check a non-matching edge:
+                            # line 1889 is inside the matching branch only, and
+                            # a skipped edge is stepped over, never followed.
+                            # So this is an observation about the trie, not a
+                            # fault dyld2 can hit.
+                            self.notes.append(
+                                (node_off, "edge %r points at nodeOffset=0x%x, "
+                                 "outside the trie (end 0x%x); dyld2 skips this "
+                                 "edge and never follows it" % (edge, skipped, end)))
+                            continue
                         self._descend(node_off, skipped, end,
-                                      depth, path, edge)
+                                      depth, path, edge, here)
                 else:
                     # 1888: nodeOffset = read_uleb128(p, end);
                     try:
@@ -316,14 +410,16 @@ class Walker:
             if not self.brief:
                 self._print_node(node_off, depth, terminal_size, via, payload,
                                  children_remaining, children_at_end, path)
+            if self.enumerate and terminal_size != 0 and children_remaining == 0:
+                self.names.append("".join(x for x in path if x))
             if node_offset != 0:
                 rest = s[ss:] if matched else b""
                 return self.walk(node_offset, depth + 1, rest,
-                                 path + (matched or "",))
+                                 path + (matched or "",), here)
             p = None
         return None
 
-    def _descend(self, node_off, child_off, end, depth, path, edge):
+    def _descend(self, node_off, child_off, end, depth, path, edge, on_path=()):
         """Structural mode only: visit every child, not just the matching one.
 
         dyld2 never does this -- it breaks out of the child loop on the first
@@ -331,7 +427,12 @@ class Walker:
         and it is labelled as such in the output.
         """
         self.edges.append((node_off, edge, child_off, depth))
-        return self.walk(child_off, depth + 1, b"", path + (edge,))
+        deeper = path + (edge,)
+        # A node with no children and a non-zero terminal size is a leaf, so
+        # the edge path is a complete exported name.
+        self._leaves = getattr(self, "_leaves", set())
+        self._leaves.add(child_off)
+        return self.walk(child_off, depth + 1, b"", deeper, frozenset(on_path))
 
     def _payload(self, p, end, node_off):
         """Read the terminal payload the way dyld3's recurseTrie does."""
@@ -381,25 +482,39 @@ class Walker:
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     brief = "--brief" in sys.argv
+    enumerate_mode = "--enumerate" in sys.argv or "structural" in sys.argv
     if not args:
         raise SystemExit(__doc__)
     path = args[0]
     symbol = args[1].encode() if len(args) > 1 else None
 
     m = MachO(path)
-    buf = m.trie()
+    buf, blob_off, blob_size, blob_src = m.trie()
     print("file:   %s" % path)
-    print("trie:   LC_DYLD_EXPORTS_TRIE dataoff=0x%x size=%d (0x%x)"
-          % (m.exports_trie[0], m.exports_trie[1], m.exports_trie[1]))
+    print("trie:   %s dataoff=0x%x size=%d (0x%x)"
+          % (blob_src, blob_off, blob_size, blob_size))
     print("walk:   dyld2 ImageLoader::trieWalk (src/ImageLoader.cpp:1831)")
     if symbol:
         print("symbol: %s  (faithful dyld2 lookup along this path)" % symbol.decode())
+    elif enumerate_mode:
+        print("mode:   structural -- every child visited, NOT a symbol lookup")
+        print("WARNING: the structural walk is an OPEN DEFECT on the large overlay")
+        print("         tries (it mis-parses Foundation and AppKit, producing")
+        print("         impossible child counts and re-entering nodes). It is kept")
+        print("         for inspection only. The dyld2-faithful symbol path below")
+        print("         is the part that has been cross-checked.")
     else:
-        print("mode:   structural -- every child visited, not a symbol lookup")
+        print("mode:   no symbol given -- pass one or more symbol names, or")
+        print("         --enumerate to inspect the trie structure (see WARNING)")
+        raise SystemExit(2)
     print()
 
-    w = Walker(buf, brief=brief, enumerate=(symbol is None))
+    # Phase 1: structural enumeration, to map the trie and harvest the names it
+    # exports. dyld2 does not do this -- it only ever follows the one edge that
+    # matches the symbol being looked up -- so nothing found here is a verdict.
+    w = Walker(buf, brief=brief, enumerate=enumerate_mode)
     w.walk(0, 0, symbol if symbol else b"")
+    lookup_names = [symbol.decode()] if symbol else sorted(set(w.names))
 
     print()
     print("nodes visited: %d, max depth: %d" % (w.nodes, w.max_depth))
@@ -435,6 +550,37 @@ def main():
         for off, edge, child, depth in w.edges:
             print("  node 0x%04x  edge %-26r -> node 0x%04x" % (off, edge, child))
 
+    # Phase 2: the dyld2-faithful test. Walk each exported name the way
+    # findExportedSymbol would, following only the matching edge, and let the
+    # verdict come from that alone. A couple of names that are NOT in the trie
+    # are included, because a lookup that misses is the case that walks furthest.
+    if not symbol:
+        missing = [n + "_not_in_this_trie" for n in (lookup_names[:1] or ["x"])]
+        probe = lookup_names + missing
+        w2 = Walker(buf, brief=True, enumerate=False)
+        for nm in probe:
+            w2.walk(0, 0, nm.encode())
+        print()
+        print("dyld2-faithful lookups: %d exported name(s) + %d deliberate miss(es)"
+              % (len(lookup_names), len(missing)))
+        print("nodes visited during lookups: %d, max depth: %d"
+              % (w2.nodes, w2.max_depth))
+        if w.notes:
+            print("structural notes (NOT dyld2 faults, dyld2 skips these edges): %d"
+                  % len(w.notes))
+            for off, text in w.notes[:5]:
+                print("  node 0x%06x  %s" % (off, text))
+        if w2.violations:
+            print()
+            print("VERDICT: FAIL -- a dyld2 symbol lookup would read outside the trie")
+            for off, line, what in w2.violations:
+                print("  node 0x%06x  ImageLoader.cpp:%d" % (off, line))
+                print("    %s" % what)
+            return 1
+        print()
+        print("VERDICT: PASS -- every dyld2 symbol lookup stayed inside the trie")
+        return 0
+
     print()
     if w.violations:
         print("VERDICT: FAIL -- dyld2 would read outside the trie")
@@ -446,5 +592,29 @@ def main():
     return 0
 
 
+def _run():
+    """Entry point: run main() on a thread with a large stack."""
+    global _EXIT
+    sys.setrecursionlimit(RECURSION_LIMIT)
+    result = {}
+
+    def work():
+        try:
+            result["code"] = main()
+        except BaseException as exc:            # noqa: BLE001 - reported, not swallowed
+            result["exc"] = exc
+
+    try:
+        threading.stack_size(STACK_BYTES)
+    except (ValueError, RuntimeError):
+        pass                                   # platform refused; fall through
+    t = threading.Thread(target=work)
+    t.start()
+    t.join()
+    if "exc" in result:
+        raise result["exc"]
+    return result.get("code", 1)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())
