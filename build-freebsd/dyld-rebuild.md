@@ -262,12 +262,37 @@ anything were on 09-09 (41 images each), and everything from 14-09 onwards is
 on the rebuild — the thing it is being compared against does not work either,
 and has not for over a week.
 
-The line this whole exercise is for never appeared in any of those logs, the
-old ones included:
+### Where the shipped dyld actually dies, and why the log line never printed
 
-    calling sNotifyObjCMapped=... first=...
+The shipped dyld is not a mystery binary: it is byte-for-byte the output of the
+raw build, `md5 ad4850c1` — the same file as the `dyld-final` left in the build
+tree by that day's script. The intermediate `dyld-nocmd` from the same run kept
+its symbol table, and its `__TEXT` is byte-identical to the shipped file (every
+differing byte is inside the load-command area), so its symbol map can be used
+to read the crash.
 
-which is consistent with the log patch never having run in anger. Getting there
-now means fixing whatever leaves the guest with zero images mapped — which is a
-different problem from the one this document set out to solve, and is where the
-next hour should go.
+`rip 0x10005e6d4` is not inside a function at all. It is a lazy binding stub:
+
+    10005e6d4: 68 9c 07 00 00    pushq  $0x79c
+    10005e6d9: e9 26 fc ff ff    jmp    0x10005e304 <__stub_helper>
+
+So the shipped dyld dies resolving a binding, inside `__stub_helper` /
+`_stub_binding_helper`. Not in the bootstrap, not in the rebase fallback, not in
+the log patch.
+
+And the log patch is in that binary — `strings` finds
+`calling sNotifyObjCMapped=%p first=%s` in the shipped file exactly as in the
+rebuilt one, and `sNotifyObjCMapped`, `notifyBatchPartial`, `rebaseDyldClassic`
+and `sigexc_setup` are all present as symbols. The line never printed because
+dyld never got as far as calling it: the binding path kills it first. The
+symbols sit at `sNotifyObjCMapped 0x100075ba8` and
+`notifyBatchPartial 0x1004ed10`, well past the crash.
+
+The rebuilt binary gets further and then dies from inside mldr's
+`crash_debug_handler` (`rip 0x220ee8`, i.e. `+0x1d8`) — a null dereference in the
+crash reporter itself, after the guest has already faulted.
+
+So the next thing to look at is the binding path, and specifically whether the
+"ld64.lld emits an empty chained-starts payload" problem that
+`dyldFreeBSDRebase.c` works around on the rebase side has a twin on the binding
+side. That is where the guest stops making progress, in both builds.
