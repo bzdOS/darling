@@ -186,28 +186,45 @@ but here it is not evidence of an unchecked read either, because no trie walk
 was in progress. The lines 1837 / 1862 / 1876 named in the task are ruled
 out, positively, by the absence of any signal at all.
 
-## Open discrepancy — not resolved, and it matters
+## Resolved discrepancy — the root path, and who sets it
 
-The source and the log disagree about the root path, and I could not
-reconcile them. Every site I can find says the root should be the overlay:
+An earlier draft of this section left the root path open: read one way, the
+source says every site sets the overlay, while the log says the staging
+cache. That is a misreading of the source. The two agree, and the code
+settles it.
 
-- `tests/launch-dynamic-smoke.c:453` — `setenv("__mldr_DYLD_ROOT_PATH", od, 1)`,
-  where `od` is the overlay.
-- The `od = LOCAL_OVERLAY` reassignment at line 380 is **inside**
-  `if (strcmp(test_bin, "chrome-macho") == 0)` (line 279) and does not run
-  for this probe, so `od` is still the overlay.
+`od = LOCAL_OVERLAY;` is at `tests/launch-dynamic-smoke.c:380`. It is **not**
+inside `if (strcmp(test_bin, "chrome-macho") == 0)` (line 279) — that branch
+closes at line **377**. Line 380 stands in the *unconditional* block whose
+bare brace is at line **168**, so it runs for every test binary, this probe
+included. The probe is `wayland-window-create-macho`, not `chrome-macho`, and
+the reassignment happens regardless.
+
+That block is the local staging copy, and its motive is in the comment at
+lines 162-167: the overlay sits on a virtiofs/9p mount where FreeBSD's driver
+returns `BUS_OBJERR` on page-fault reads from mmap'd files, and where a
+malformed `FUSE_READLINK` reply fails every symlink walk with `EIO` while
+leaking one `fuse_msgbuf` per step until the guest OOMs (lines 191-199). So
+the overlay is mirrored to local tmpfs for the run, and the comment gives the
+reason the paths are mirrored exactly: "so `__mldr_DYLD_ROOT_PATH` still
+works". The cache is the intended root, not an accident.
+
+Every consumer of `od` runs after line 380, so each one reads the cache:
+
+- `tests/launch-dynamic-smoke.c:405` — `setenv("DARLING_VCHROOT_PATH", od, 1)`,
+  the darlingserver vchroot. Set to the cache.
+- `tests/launch-dynamic-smoke.c:453` — `setenv("__mldr_DYLD_ROOT_PATH", od, 1)`.
+  Set to the cache, and this is the value the log prints.
 - `src/startup/mldr/mldr.c:269-273` renames `__mldr_DYLD_ROOT_PATH` to
-  `DYLD_ROOT_PATH`; `mldr.c:599-606` takes it as `lr->root_path`;
-  `mldr.c:1058-1073` falls back to the darlingserver `vchroot_path` RPC,
-  which `tests/launch-dynamic-smoke.c:405` feeds with the same `od`.
+  `DYLD_ROOT_PATH`; `mldr.c:599-606` takes it as `lr->root_path`. The
+  `vchroot_path` fallback at `mldr.c:1058-1073` yields the same string, so
+  dyld receives the cache on either branch.
 
-The log says `DYLD_ROOT_PATH=/tmp/darling-local-overlay`. I am flagging this
-rather than resolving it: either a site I did not find sets the cache
-directly, or the mldr under test is not the source above. Until that is
-settled, "add PrivateFrameworks to the staging list" is a fix to a
-harness whose root-path logic is not yet understood, and there is a real
-chance the honest fix is in the root-path logic instead. **This is the first
-question for the next front.**
+So `DYLD_ROOT_PATH=/tmp/darling-local-overlay` is exactly what this harness
+is written to produce. **Nothing is unresolved here.** The alternative
+reading — the mldr under test is not the source above — is dead, and so is
+the idea that the honest fix might be in the root-path logic: that logic is
+correct and deliberate. The root path is not the defect. The staging list is.
 
 ## What this means for the next front
 
@@ -217,9 +234,8 @@ question for the next front.**
    should not be repaired on the strength of it.
 2. The blocker is now the host-side harness and a preflight gap, both
    inspectable without spending another root run:
-   - resolve the `DYLD_ROOT_PATH` discrepancy above;
    - make the staging list cover what the closure actually demands, or derive
-     it instead of hardcoding three trees;
+     it from the closure instead of hardcoding three trees;
    - extend preflight 3b from the probe's direct deps to the transitive
      closure, so this class of miss is caught before a root prompt.
 3. Only after 3b walks the closure is a second root run worth spending, and
@@ -233,7 +249,6 @@ Stated plainly so nothing here is over-read:
   spent; no repeat.
 - **Not** fixed. The on-screen defect (a missing directory in a staging list)
   is left in place, and `dyld` and the overlay were not touched, per the task.
-- **Not** resolved: the `DYLD_ROOT_PATH` discrepancy, and which code sets it.
 - **Not** verified: whether the closure has any *further* unstaged dependency
   behind Onyx2D. The run stopped at the first one, so anything Onyx2D itself
   needs is unknown — its own `LC_LOAD_DYLIB` list was not walked.
