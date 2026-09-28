@@ -46,6 +46,40 @@
 #define SOCK_PATH     PREFIX "/.darlingserver.sock"
 #define LOCAL_OVERLAY "/tmp/darling-local-overlay"
 
+/* Fallback for the harnesses that do not derive a staging list (run-smoke, the
+ * real-macho tests). It is the pre-closure list and it is knowingly short --
+ * see the comment at the staging site. The probe never uses it: its preflight
+ * passes DARLING_STAGING_TREES computed from the dylib closure. */
+#define DEFAULT_STAGING_TREES "usr/lib:System/Library/Frameworks"
+
+/* Stage one overlay-relative tree into the local cache.
+ *
+ * Regular files only, via find -type f (which lstat()s and never readlink()s).
+ *
+ * Do NOT use cp -a / cp -RL here: the overlay lives on the virtiofs mount,
+ * whose host server returns a malformed FUSE_READLINK reply (embedded NUL).
+ * Every symlink walked fails with EIO *and* leaks a fuse_msgbuf in the FreeBSD
+ * FUSE client -- enough of them wires all of RAM and the guest dies in an
+ * unrecoverable OOM spiral. */
+static void stage_tree(const char *od, const char *rel) {
+    char src[1024], dst[1024], cmd[2048];
+    struct stat st;
+
+    snprintf(src, sizeof(src), "%s/%s", od, rel);
+    snprintf(dst, sizeof(dst), "%s/%s", LOCAL_OVERLAY, rel);
+
+    if (stat(src, &st) < 0) {
+        printf("staging: %s is not in the overlay, skipped\n", rel);
+        return;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "mkdir -p '%s' && cd '%s' && find . -type f | pax -rw '%s'",
+             dst, src, dst);
+    (void)system(cmd);
+    printf("cached locally: %s\n", dst);
+}
+
 static const char *build_dir(void) {
     const char *v = getenv("DARLING_BUILD_DIR");
     return v ? v : "/var/darling-build";
@@ -166,7 +200,6 @@ int main(void) {
      * We mirror the exact Mach-O paths so __mldr_DYLD_ROOT_PATH still works.
      */
     {
-        char src[512], dst[512];
         struct stat cached;
 
         /* Reuse an existing local copy. Re-reading the ~80MB tree over
@@ -179,79 +212,93 @@ int main(void) {
             system("rm -rf " LOCAL_OVERLAY);
         }
 
-        /* Copy the whole usr/lib tree (~80MB). Copying only dyld +
-         * libSystem.B.dylib + usr/lib/system/ is not enough: the transitive
-         * dependency closure reaches further (libdispatch.dylib pulls in
-         * libobjc.A.dylib, and so on), and every miss surfaces as an opaque
-         * "image not found" from dyld. */
-        (void)src; (void)dst;
-        {
-            char cmd[1024];
-            snprintf(cmd, sizeof(cmd),
-                     /* Regular files only, via find -type f (which lstat()s and
-                      * never readlink()s).
-                      *
-                      * Do NOT use cp -a / cp -RL here: the overlay lives on the
-                      * virtiofs mount, whose host server returns a malformed
-                      * FUSE_READLINK reply (embedded NUL). Every symlink walked
-                      * fails with EIO *and* leaks a fuse_msgbuf in the FreeBSD
-                      * FUSE client — enough of them wires all of RAM and the
-                      * guest dies in an unrecoverable OOM spiral. */
-                     "mkdir -p '%s/usr/lib' && cd '%s/usr/lib' && "
-                     "find . -type f | pax -rw '%s/usr/lib'",
-                     LOCAL_OVERLAY, od, LOCAL_OVERLAY);
-            /* A cached copy makes this a no-op (the tree already exists).
-             * Verify by checking the two files we cannot run without, rather
-             * than by the copy command's exit status. */
-            (void)system(cmd);
+        /* Which trees to stage is no longer a hand-written list. It comes from
+         * the transitive dylib closure of the test binary, computed host-side
+         * by check-guest-dylib-compat.py --closure --emit-staging-trees and
+         * handed over in DARLING_STAGING_TREES (colon-separated, paths relative
+         * to the overlay).
+         *
+         * This list used to be hardcoded to usr/lib, System/Library/Frameworks
+         * and private/etc, and that cost a root run: AppKit pulls in Onyx2D out
+         * of System/Library/PrivateFrameworks, which was on none of them, and
+         * the guest died on a bare "image not found". Nothing about that
+         * failure looked like a staging bug, which is why a list curated by
+         * hand from two examples is the wrong shape for this.
+         *
+         * The default is only for the harnesses that do not run that preflight
+         * (run-smoke, the real-macho tests); the probe passes its own derived
+         * list. It is announced, never silent: a staging list nobody derived is
+         * the exact condition that produced the Onyx2D run, and whoever reads
+         * the log should be able to see which mode produced it without reading
+         * this file. */
+        const char *trees = getenv("DARLING_STAGING_TREES");
+        if (trees == NULL || trees[0] == '\0') {
+            printf("staging trees: NOT derived -- using the built-in default; "
+                   "run the probe's preflight to derive them from the closure\n");
+            trees = DEFAULT_STAGING_TREES;
+        } else {
+            printf("staging trees: derived from the closure -- %s\n", trees);
+        }
 
-            struct stat lst;
-            if (stat(LOCAL_OVERLAY "/usr/lib/dyld", &lst) < 0) {
-                fprintf(stderr, "Failed to copy dyld to local overlay\n");
-                return 1;
+        /* Copy the trees the closure lands in. Copying a whole tree rather than
+         * only the closure's own files is deliberate: the tree is a superset of
+         * the closure, so this cannot regress a run that works today, and it is
+         * the granularity that has always been staged here.
+         *
+         * A tree the overlay does not have is skipped, not an error: a test
+         * binary with a small closure has no PrivateFrameworks, and the probe
+         * preflight is the thing that must notice a MISSING tree, not this. */
+        const char *t = trees;
+        while (*t) {
+            const char *sep = strchr(t, ':');
+            size_t len = sep ? (size_t)(sep - t) : strlen(t);
+            if (len > 0) {
+                char tree[512];
+                if (len >= sizeof(tree)) len = sizeof(tree) - 1;
+                memcpy(tree, t, len);
+                tree[len] = '\0';
+                stage_tree(od, tree);
             }
-            if (stat(LOCAL_OVERLAY "/usr/lib/libSystem.B.dylib", &lst) < 0) {
-                fprintf(stderr, "Failed to copy libSystem.B.dylib to local overlay\n");
-                return 1;
-            }
-            printf("usr/lib cached locally: %s/usr/lib\n", LOCAL_OVERLAY);
+            if (sep == NULL) break;
+            t = sep + 1;
+        }
 
-            /* Frameworks (e.g. CoreFoundation.framework) — same copy
-             * approach, only staged if the overlay actually has one, since
-             * most test binaries don't need it. */
-            char fw_src[512];
-            snprintf(fw_src, sizeof(fw_src), "%s/System/Library/Frameworks", od);
-            struct stat fw_st;
-            if (stat(fw_src, &fw_st) == 0) {
-                char fw_cmd[1024];
-                snprintf(fw_cmd, sizeof(fw_cmd),
-                         "mkdir -p '%s/System/Library/Frameworks' && cd '%s' && "
-                         "find . -type f | pax -rw '%s/System/Library/Frameworks'",
-                         LOCAL_OVERLAY, fw_src, LOCAL_OVERLAY);
-                (void)system(fw_cmd);
-                printf("Frameworks cached locally: %s/System/Library/Frameworks\n", LOCAL_OVERLAY);
-            }
+        /* A cached copy makes every copy above a no-op, so their exit status
+         * is not evidence. Verify the two files we cannot run without. */
+        struct stat lst;
+        if (stat(LOCAL_OVERLAY "/usr/lib/dyld", &lst) < 0) {
+            fprintf(stderr, "Failed to copy dyld to local overlay\n");
+            return 1;
+        }
+        if (stat(LOCAL_OVERLAY "/usr/lib/libSystem.B.dylib", &lst) < 0) {
+            fprintf(stderr, "Failed to copy libSystem.B.dylib to local overlay\n");
+            return 1;
+        }
 
-            /* etc (master.passwd/pwd.db/group) — real Foundation code calls
-             * getpwuid()/getpwnam() (e.g. for NSHomeDirectory()-for-root and
-             * similar lookups) which resolve through the vchroot'd overlay,
-             * not the guest's own /etc. Without a passwd db there the lookup
-             * just fails, but some callers don't handle that failure — worth
-             * caching same as usr/lib/Frameworks above. od's "etc" is a
-             * symlink (Darwin-style etc -> private/etc); go straight to the
-             * real target so this doesn't need a readlink over virtiofs. */
-            char etc_src[512];
-            snprintf(etc_src, sizeof(etc_src), "%s/private/etc", od);
-            struct stat etc_st;
-            if (stat(etc_src, &etc_st) == 0) {
-                char etc_cmd[1024];
-                snprintf(etc_cmd, sizeof(etc_cmd),
-                         "mkdir -p '%s/etc' && cd '%s' && "
-                         "find . -maxdepth 1 -type f | pax -rw '%s/etc'",
-                         LOCAL_OVERLAY, etc_src, LOCAL_OVERLAY);
-                (void)system(etc_cmd);
-                printf("etc cached locally: %s/etc\n", LOCAL_OVERLAY);
-            }
+        /* etc (master.passwd/pwd.db/group) -- real Foundation code calls
+         * getpwuid()/getpwnam() (e.g. for NSHomeDirectory()-for-root and
+         * similar lookups) which resolve through the vchroot'd overlay, not
+         * the guest's own /etc. Without a passwd db there the lookup just
+         * fails, but some callers don't handle that failure -- worth caching
+         * same as usr/lib above. od's "etc" is a symlink (Darwin-style
+         * etc -> private/etc); go straight to the real target so this does
+         * not need a readlink over virtiofs.
+         *
+         * NOT part of the closure -- no dylib is loaded out of here. It is
+         * staged for the data, not for the loader, so it stays out of the
+         * derived list and must not be lost when that list replaces the
+         * hardcoded one. */
+        char etc_src[512];
+        snprintf(etc_src, sizeof(etc_src), "%s/private/etc", od);
+        struct stat etc_st;
+        if (stat(etc_src, &etc_st) == 0) {
+            char etc_cmd[1024];
+            snprintf(etc_cmd, sizeof(etc_cmd),
+                     "mkdir -p '%s/etc' && cd '%s' && "
+                     "find . -maxdepth 1 -type f | pax -rw '%s/etc'",
+                     LOCAL_OVERLAY, etc_src, LOCAL_OVERLAY);
+            (void)system(etc_cmd);
+            printf("etc cached locally: %s/etc\n", LOCAL_OVERLAY);
         }
 
         /* Copy the Mach-O test binary too — it's on the same 9p mount */

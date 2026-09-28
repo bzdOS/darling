@@ -219,27 +219,88 @@ fi
 	"${TEST_BIN} missing after build" ""
 ok "probe binary: ${SRC}/tests/${TEST_BIN}"
 
-# --- 3b. every dylib the probe wants must exist in the overlay -----------
+# --- 3b. the transitive dylib closure must exist, and must be staged --------
 #
-# The probe is the only thing that has never been through the guest loader, and
-# a load failure happens before any of our code runs, so it reads like a
-# missing library rather than a problem with the probe.
+# This used to check the probe's 8 DIRECT LC_LOAD_DYLIB entries, and it passed
+# 6/6 on a run that then died on a missing Onyx2D: Onyx2D is a dependency of
+# AppKit, one level down, so every direct dep was present and the check was
+# right about all eight and blind to the one that mattered. A first-ring check
+# cannot catch a second-ring miss, so this now walks the whole closure.
 #
-# dyld refuses a dylib whose compatibility version is lower than the loading
-# binary requires (dyld3/ClosureBuilder.cpp:372), and the probe links
-# Foundation and AppKit, which the overlay declares as 65535.255.255 -- exactly
-# what the probe requires. check-guest-dylib-compat.py verifies that for every
-# dependency rather than trusting it, and also that each one is present at all.
+# Re-export chains are included: LC_REEXPORT_DYLIB is one of the commands
+# enumerated, so an image reachable only through a re-export is walked too.
+# The compat-version rule the first ring applied to those 8 is now applied to
+# every edge of the closure (167 of them for this probe), so nothing the old
+# check caught is lost by widening it.
+#
+# What is FATAL here, and what is not, and why:
+#
+#   fatal  the overlay is missing something the closure needs, or a name will
+#          not resolve, or a version is too old, or the derived list does not
+#          cover the closure. No staging list can supply a file the overlay
+#          does not have, so no run can work.
+#   note   an existing staging cache is short. The harness rebuilds the cache
+#          from the derived list during the run below, so failing here would
+#          block a run that was about to fix itself, and would leave the
+#          machine unable to run the probe until someone hand-deleted a
+#          directory.
+#
+# The check that returns non-zero on a short cache -- the one with the Onyx2D
+# verdict -- is check-guest-dylib-compat.py --staging-root, and the controls in
+# this file's commit message run exactly that. Preflight is not where a stale
+# cache should be fatal; it is where the list that fixes it is derived, and the
+# coverage self-check above runs with no cache at all.
 step_no=3
-if python3 "${SCRIPT_DIR}/check-guest-dylib-compat.py" \
-		"${SRC}/tests/${TEST_BIN}" "${OD}" >"${BD}/dylib-compat.log" 2>&1; then
-	n_deps="$(grep -c '^ok ' "${BD}/dylib-compat.log" || true)"
-	ok "all ${n_deps} dylib dependencies present in the overlay at a high enough compat version"
+CLOSURE_LOG="${BD}/dylib-closure.log"
+STAGING_TREES="${BD}/staging-trees.txt"
+LOCAL_CACHE="/tmp/darling-local-overlay"
+
+closure_args="${SCRIPT_DIR}/check-guest-dylib-compat.py ${SRC}/tests/${TEST_BIN} ${OD} --closure --emit-staging-trees"
+if [ -d "${LOCAL_CACHE}" ]; then
+	closure_args="${closure_args} --staging-root ${LOCAL_CACHE}"
+	printf 'note: a staging cache exists at %s and is checked below\n' "${LOCAL_CACHE}" >&2
+	printf '      it is rebuilt by this run, so a short cache is reported, not fatal\n' >&2
 else
-	die "${step_no}" "a dylib dependency is missing or too old; see below" \
-		"dyld: library not loaded: ...
-    dyld: found '...' which has compat version (...) which is less than required (...)"
+	printf 'note: no staging cache yet at %s -- one is built by this run\n' \
+		"${LOCAL_CACHE}" >&2
 fi
+
+if python3 ${closure_args} >"${CLOSURE_LOG}" 2>&1; then
+	n_images="$(sed -n 's/^closure: *\([0-9]*\) image.*/\1/p' "${CLOSURE_LOG}")"
+	ok "dylib closure walks clean: ${n_images} image(s), no unresolved names"
+else
+	# One exit status covers several verdicts, so read the log to find out which
+	# one this is. IN-STAGING alone is recoverable -- the run rebuilds the
+	# cache. Anything else names a defect no staging list can paper over.
+	if grep -q '^IN-STAGING' "${CLOSURE_LOG}" \
+			&& ! grep -qE '^(MISSING|UNRESOLVED|OLD|NOID|UNCOVERED)' "${CLOSURE_LOG}"; then
+		sed -n '/^IN-STAGING/,/^$/p' "${CLOSURE_LOG}" | sed 's/^/      /' >&2
+		n_images="$(sed -n 's/^closure: *\([0-9]*\) image.*/\1/p' "${CLOSURE_LOG}")"
+		note "staging cache is short (${n_images} image(s) in the closure); the derived list below covers it"
+	else
+		die "${step_no}" "the transitive dylib closure is not satisfied (see below)" \
+			"dyld: Library not loaded: /System/Library/PrivateFrameworks/Onyx2D...
+      Referenced from: /System/Library/Frameworks/AppKit.framework/Versions/C/AppKit
+      Reason: image not found"
+	fi
+fi
+
+# Derive the staging list from the same walk that just passed, and hand it to
+# the harness. Deriving it here rather than hardcoding it in the harness is the
+# point: the miss that cost the root run was a directory nobody had a reason to
+# think about, and a list nobody derives cannot notice one.
+# [[:space:]] rather than \t: the escape is a GNU extension, and a preflight
+# that silently extracted nothing on another sed would leave the harness on its
+# fallback list -- the exact failure this whole change exists to remove.
+sed -n 's/^#TREE[[:space:]]*//p' "${CLOSURE_LOG}" >"${STAGING_TREES}"
+n_trees="$(wc -l <"${STAGING_TREES}" | tr -d ' ')"
+[ "${n_trees}" -gt 0 ] || die "${step_no}" \
+	"the closure produced an empty staging list" ""
+STAGING_LIST="$(paste -sd: "${STAGING_TREES}")"
+printf 'staging list derived from the closure (%d tree(s)):\n' "${n_trees}"
+sed 's/^/    /' "${STAGING_TREES}"
+ok "staging list derived: ${STAGING_LIST}"
+
 
 # --- 3c. the probe's Mach-O shape ----------------------------------------
 #
@@ -380,6 +441,11 @@ DYLD_PRINT_CODE_SIGNATURES DYLD_PRINT_REBASINGS DYLD_PRINT_TO_STDERR"
 
 RUN_CMD="env DARLING_SRC_DIR=${SRC} DARLING_OVERLAY=${OD} DARLING_BUILD_DIR=${BD}"
 RUN_CMD="${RUN_CMD} DARLING_TEST_BINARY=${TEST_BIN}"
+# The staging list the harness stages, derived in 3b from the dylib closure.
+# Passed explicitly so the harness never falls back to its built-in list on this
+# path -- the fallback is announced in its output, and a run that printed it
+# would be staging a guess.
+RUN_CMD="${RUN_CMD} DARLING_STAGING_TREES=${STAGING_LIST}"
 RUN_CMD="${RUN_CMD} WAYLAND_DISPLAY=${WAYLAND_DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
 for v in ${DYLD_TRACE}; do
 	RUN_CMD="${RUN_CMD} ${v}=1"

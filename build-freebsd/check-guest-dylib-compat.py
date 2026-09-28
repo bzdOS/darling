@@ -252,9 +252,11 @@ def staging_tree(guest):
 def walk_closure(binary, root, guest_name):
     """Breadth-first transitive closure of `binary` under `root`.
 
-    Returns (closure, edges, unresolved) where closure maps a guest path to the
-    host file that backed it, edges is guest path -> [(referenced name,
-    resolved guest path or None)], and unresolved is [(name, referenced from)].
+    Returns (closure, edges, unresolved, versions) where closure maps a guest
+    path to the host file that backed it, edges is guest path -> [(referenced
+    name, resolved guest path or None, required compat version)], versions is
+    [(resolved guest path, required compat, found compat)] for every edge whose
+    target was found, and unresolved is [(name, referenced from)].
     """
     exe_dir = "/" + os.path.dirname(guest_name) if "/" in guest_name else "/"
     if not exe_dir.endswith("/"):
@@ -263,6 +265,7 @@ def walk_closure(binary, root, guest_name):
     closure = {}
     edges = collections.defaultdict(list)
     unresolved = []
+    versions = []
     queue = collections.deque([(guest_name, binary, exe_dir, [])])
     while queue:
         guest, host, loader_dir, inherited = queue.popleft()
@@ -278,9 +281,9 @@ def walk_closure(binary, root, guest_name):
             continue
         closure[guest] = host
         img_rpaths = rpaths(d) + inherited
-        for name, _need in load_commands(d):
+        for name, need in load_commands(d):
             dep, dep_host = resolve(name, loader_dir, exe_dir, img_rpaths, root)
-            edges[guest].append((name, dep))
+            edges[guest].append((name, dep, need))
             if dep is None or dep_host is None:
                 unresolved.append((name, guest))
                 continue
@@ -289,16 +292,16 @@ def walk_closure(binary, root, guest_name):
             if not os.path.exists(dep_host):
                 # Not an error yet: the caller distinguishes "the overlay does
                 # not have it" from "the staging cache does not have it".
-                edges[guest].append((name, dep))
                 continue
+            versions.append((dep, need, id_dylib_compat(dep_host)))
             queue.append((dep, dep_host, os.path.dirname(dep) + "/", img_rpaths))
-    return closure, edges, unresolved
+    return closure, edges, unresolved, versions
 
 
 # --- reporting ------------------------------------------------------------
 
 def report_closure(binary, overlay, staging_root, emit_trees, guest_name):
-    closure, edges, unresolved = walk_closure(binary, overlay, guest_name)
+    closure, edges, unresolved, versions = walk_closure(binary, overlay, guest_name)
 
     print("binary:    %s" % binary)
     print("overlay:   %s" % overlay)
@@ -308,6 +311,34 @@ def report_closure(binary, overlay, staging_root, emit_trees, guest_name):
     for name, frm in unresolved:
         print("UNRESOLVED %-70s referenced from %s" % (name, frm))
         bad += 1
+
+    # Every edge the walk could not find in the overlay. Distinguished from
+    # IN-STAGING below because the two have different owners: a file the overlay
+    # does not have cannot be staged at all, so no staging list can fix it.
+    found = {p for p, _n, _v in versions}
+    for guest in sorted(closure):
+        for name, dep, _need in edges.get(guest, []):
+            if dep is None or dep in found or os.path.exists(
+                    os.path.join(overlay, dep.lstrip("/"))):
+                continue
+            print("MISSING   %-70s in the closure, not in the overlay" % dep)
+            print("          required by %s; no staging list can supply it" % guest)
+            bad += 1
+
+    # The version rule the first ring applied to 8 deps, now applied to every
+    # edge in the closure. dyld refuses a dylib whose compat version is lower
+    # than the loader requires (dyld3/ClosureBuilder.cpp:372), and it says so in
+    # a way that reads like a missing library.
+    for guest, need, have in sorted(versions):
+        if have is None:
+            print("NOID      %-70s has no LC_ID_DYLIB to compare against" % guest)
+            bad += 1
+        elif have < need:
+            print("OLD       %-70s needs %s, overlay has %s" % (guest, vstr(need), vstr(have)))
+            print("          dyld would refuse this: 'found ... which has compat")
+            print("          version (%s) which is less than required (%s)'"
+                  % (vstr(have), vstr(need)))
+            bad += 1
 
     if staging_root:
         print("staging:   %s" % staging_root)
@@ -333,14 +364,31 @@ def report_closure(binary, overlay, staging_root, emit_trees, guest_name):
         # path rather than by staging a directory. Leaving it in would either
         # emit a tree that cannot exist or, worse, degrade to "/" and stage the
         # entire overlay.
-        trees = sorted({staging_tree(g) for g in closure
-                        if g != guest_name and staging_tree(g)})
+        derived = {staging_tree(g) for g in closure if g != guest_name}
+        trees = sorted(t for t in derived if t)
         print("\nstaging trees derived from the closure (%d):" % len(trees))
         for t in trees:
             print("    %s" % t)
         print("\n# machine-readable, one tree per line:")
         for t in trees:
             print("#TREE\t%s" % t)
+
+        # Self-check on the derivation itself. Every image the walk reached must
+        # fall inside one of the trees just emitted, or staging those trees
+        # would not have produced a usable root -- the whole failure this mode
+        # exists to prevent, re-introduced one level up. It costs nothing and it
+        # needs no staging cache, so it holds on a machine that has never run
+        # the probe.
+        uncov = sorted(g for g in closure
+                       if g != guest_name and staging_tree(g) not in derived)
+        for g in uncov:
+            print("UNCOVERED %-70s falls in no derived staging tree" % g)
+        if uncov:
+            print("          the tree derivation does not cover this path shape;")
+            print("          staging the derived list would not have staged it")
+            bad += 1
+        else:
+            print("\ncoverage: every image in the closure falls in a derived tree")
 
     print("\n%s: %d problem(s)" % ("FAIL" if bad else "PASS", bad))
     return 1 if bad else 0
