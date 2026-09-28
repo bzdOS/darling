@@ -219,6 +219,26 @@ fi
 	"${TEST_BIN} missing after build" ""
 ok "probe binary: ${SRC}/tests/${TEST_BIN}"
 
+# The harness is rebuilt whenever it is OLDER THAN ITS SOURCE, not only when it
+# is missing. The old condition (missing, or built on demand) meant a change to
+# launch-dynamic-smoke.c was silently not exercised: the binary in the build dir
+# was from 17 September, eleven days and two staging fixes behind, and a root
+# run was spent watching it fail with the pre-fix message and no new
+# information. A preflight whose whole job is to make a run's outcome mean
+# something cannot be the thing that lets a stale binary decide it.
+step_no=3
+HARNESS="${BD}/launch-dynamic"
+HARNESS_SRC="${SRC}/tests/launch-dynamic-smoke.c"
+if [ ! -x "${HARNESS}" ] || [ "${HARNESS_SRC}" -nt "${HARNESS}" ]; then
+	note "building launch-dynamic (${HARNESS})"
+	# Same recipe as build-all.sh, which is what puts the harness in place.
+	cc -o "${HARNESS}" "${HARNESS_SRC}" -lpthread >"${BD}/build-harness.log" 2>&1 \
+		|| die "${step_no}" "launch-dynamic failed to build; see ${BD}/build-harness.log" ""
+	ok "launch-dynamic rebuilt from ${HARNESS_SRC}"
+else
+	ok "launch-dynamic: ${HARNESS} (newer than its source)"
+fi
+
 # --- 3b. the transitive dylib closure must exist, and must be staged --------
 #
 # This used to check the probe's 8 DIRECT LC_LOAD_DYLIB entries, and it passed
