@@ -44,6 +44,12 @@
  * word. Refusal is not limited to faults either — `rsp` is data taken from a
  * context that is already known to be wrecked, so the address is range-checked
  * before any of this; see MLDR_STACK_MAX_ADDR.
+ *
+ * The jmp_buf is one per process, not per thread, so two threads dumping at
+ * the same instant could jump into each other's probe. The failure mode is a
+ * slot reported `(unreadable)` that was not — a wrong line in a dump printed
+ * while the process is already dying — and it costs one sigaction pair per word
+ * to paper over with a lock, which is a bad trade in a crash path.
  */
 
 #include <setjmp.h>
