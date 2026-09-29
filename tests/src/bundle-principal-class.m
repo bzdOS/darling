@@ -338,6 +338,25 @@ static void probe_getdirentries_elsewhere(void)
 	 * two-hour wrong turn starts. Length is printed so "it broke as the path
 	 * got longer" stays visible if that is what it turns out to be. */
 	static const char *dirs[] = {
+		/* Synthetic fixtures first: same path shape, only the number of
+		 * entries differs, so the threshold (if there is one) is read off
+		 * directly instead of inferred from which real directory happens to
+		 * be small. /usr/lib/dir-threshold/tN holds N-2 files, i.e. N
+		 * entries counting . and .. -- 3,4,5,6,7,8,9,10,11,14, which spans
+		 * the known failures (3 and 4) and the known successes (10+) with
+		 * every count in between filled in. */
+		"/usr/lib/dir-threshold/t3",
+		"/usr/lib/dir-threshold/t4",
+		"/usr/lib/dir-threshold/t5",
+		"/usr/lib/dir-threshold/t6",
+		"/usr/lib/dir-threshold/t7",
+		"/usr/lib/dir-threshold/t8",
+		"/usr/lib/dir-threshold/t9",
+		"/usr/lib/dir-threshold/t10",
+		"/usr/lib/dir-threshold/t11",
+		"/usr/lib/dir-threshold/t14",
+		/* then the real directories that produced the original matrix */
+		"/",
 		"/System",
 		"/System/Library",
 		"/System/Library/Frameworks",
@@ -349,9 +368,7 @@ static void probe_getdirentries_elsewhere(void)
 		"/System/Library/Frameworks/AppKit.framework/Versions/C",
 		"/usr/lib",
 		"/usr/lib/system",
-		"/usr/lib/system/dyld",
-		"/tmp",
-	};	unsigned i;
+	};unsigned i;
 	static char buf[32768];
 
 	for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
