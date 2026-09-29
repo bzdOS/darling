@@ -1,8 +1,14 @@
 #!/bin/sh
 # fill-bundle-contents.sh — put the vendored bundle's Contents/ over the line.
 #
-# Usage: sh build-freebsd/fill-bundle-contents.sh [remove]
-#   remove   take the pad files out again and leave Info.plist + MacOS
+# Usage:
+#   sh build-freebsd/fill-bundle-contents.sh                  # = contents
+#   sh build-freebsd/fill-bundle-contents.sh backends         # = Backends/
+#   sh build-freebsd/fill-bundle-contents.sh remove [contents|backends]
+#
+#   contents   the default: pad the vendored bundle's Contents/
+#   backends   pad Resources/Backends/ so the backend is discoverable
+#   remove     take the pad files out again
 #
 # Env: DARLING_OVERLAY (the overlay, i.e. the guest's root), DARLING_BUILD_DIR
 #      (scratch; only used for the short staging directory while Info.plist and
@@ -56,6 +62,37 @@
 # case-insensitive), and the bundle's executable, resources and hashes are
 # untouched. The pad bodies are one byte; nothing reads them.
 #
+# Backends/, the same wall one directory up
+# ------------------------------------------
+# `Resources/Backends/` holds one entry counting `.` and `..` — Wayland.backend
+# — which is below the eight-entry line, so `+[NSDisplay init]`'s discovery
+#
+#     [appKitBundle pathsForResourcesOfType: @"backend" inDirectory: @"Backends"]
+#
+# (src/external/cocotron/AppKit/NSDisplay.m:60-66) gets an empty array back,
+# never enters its instantiation loop, and raises "Failed to connect to a
+# window server. Available backends are: <CFArray>{count = 0}".
+#
+# The same head-window rule applies, and the geometry happens to be already
+# right: Wayland.backend is the first real entry, so it is at index 2, and the
+# seven pads go after it.
+#
+# Two things differ from Contents/ and both are load-bearing:
+#
+#   * The pad names must not end in `.backend`. The type is taken as
+#     everything after the LAST dot (`_CFBundleSplitFileName`,
+#     CFBundle_Resources.c:543-575) and filed under the query-table key
+#     `*.backend`, so a pad called `pad.backend` would be handed to
+#     NSDisplay as a real backend and `[NSBundle bundleWithPath:]` would be
+#     asked about a directory that is not a bundle. `pad-NN.txt` is type
+#     `txt` and matches nothing.
+#   * The directory being padded holds the bundle itself, not two files, so
+#     what gets moved aside and put back is `Wayland.backend` whole, and the
+#     hashes checked afterwards are the ones inside it.
+#
+# `fill backends` does that; `fill contents` is the original operation. Both
+# are idempotent and both are undone by `remove [contents|backends]`.
+#
 # What it does NOT do: it does not touch src/, the harness, the vendored backend
 # or the hash gate. The backend under Contents/MacOS is moved aside and put back
 # byte for byte, and the script verifies both hashes before and after, so a
@@ -63,7 +100,15 @@
 # informative failure.
 set -e
 
-MODE="${1:-fill}"
+MODE="${1:-contents}"
+
+case "${MODE}" in
+fill | contents | remove | backends) ;;
+*)
+	printf 'usage: %s [contents|backends|remove [contents|backends]]\n' "$0" >&2
+	exit 2
+	;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -72,7 +117,8 @@ OD="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 BD="${DARLING_BUILD_DIR:-/tmp}"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 
-BUNDLE="${OD}/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/Backends/Wayland.backend"
+BACKENDS="${OD}/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/Backends"
+BUNDLE="${BACKENDS}/Wayland.backend"
 CONTENTS="${BUNDLE}/Contents"
 PLIST="${CONTENTS}/Info.plist"
 MACOS="${CONTENTS}/MacOS"
@@ -90,72 +136,124 @@ sha() {
 	fi
 }
 
-[ -d "${CONTENTS}" ] || {
-	printf 'no such bundle: %s\n' "${CONTENTS}" >&2
-	printf 'set DARLING_OVERLAY to the overlay the probes run against\n' >&2
-	exit 1
+# The two checks every mode makes before it touches anything: the plist is
+# there and readable, and the backend is byte-identical to the committed copy.
+# A run that starts from a broken overlay should say so here, not four lines
+# later in a form that looks like this script's fault.
+check_bundle_intact() {
+	[ -d "${BUNDLE}" ] || {
+		printf 'no such backend bundle: %s\n' "${BUNDLE}" >&2
+		printf 'set DARLING_OVERLAY to the overlay the probes run against\n' >&2
+		exit 1
+	}
+	[ -f "${PLIST}" ] || { printf 'missing: %s\n' "${PLIST}" >&2; exit 1; }
+	[ -f "${MACOS_BIN}" ] || { printf 'missing: %s\n' "${MACOS_BIN}" >&2; exit 1; }
+	sha_vendored="$(sha "${VENDORED}")"
+	sha_bin_now="$(sha "${MACOS_BIN}")"
+	[ "${sha_bin_now}" = "${sha_vendored}" ] || {
+		printf 'the overlay backend does not match tests/vendor (%s vs %s)\n' \
+			"${sha_bin_now}" "${sha_vendored}" >&2
+		printf 'fix that first: this script moves that file and would report a\n' >&2
+		printf 'hash mismatch that is not its own\n' >&2
+		exit 1
+	}
 }
-[ -f "${PLIST}" ] || { printf 'missing: %s\n' "${PLIST}" >&2; exit 1; }
-[ -f "${MACOS_BIN}" ] || { printf 'missing: %s\n' "${MACOS_BIN}" >&2; exit 1; }
+
+sha_vendored=""
+sha_bin_now=""
+check_bundle_intact
 
 if [ "${MODE}" = "remove" ]; then
+	TARGET="${2:-contents}"
+	case "${TARGET}" in
+	backends) DIR="${BACKENDS}" ;;
+	contents) DIR="${CONTENTS}" ;;
+	*)
+		printf 'remove: second argument must be contents or backends\n' >&2
+		exit 2
+		;;
+	esac
 	n=0
 	for i in $(seq 1 ${NPADS}); do
-		f="${CONTENTS}/$(pad_name "${i}")"
+		f="${DIR}/$(pad_name "${i}")"
 		if [ -e "${f}" ]; then
 			rm -f "${f}"
 			n=$((n + 1))
 		fi
 	done
-	printf 'removed %d pad file(s) from %s\n' "${n}" "${CONTENTS}"
+	printf 'removed %d pad file(s) from %s\n' "${n}" "${DIR}"
 	printf 'entries now: %s (counting . and ..)\n' \
-		"$(ls -A "${CONTENTS}" | wc -l | tr -d ' ')"
-	ls -f "${CONTENTS}" | sed 's/^/    /'
+		"$(ls -A "${DIR}" | wc -l | tr -d ' ')"
+	ls -f "${DIR}" | sed 's/^/    /'
 	exit 0
 fi
 
-# Hashes before: the two files that must survive this unchanged.
-sha_plist_before="$(sha "${PLIST}")"
-sha_bin_before="$(sha "${MACOS_BIN}")"
+if [ "${MODE}" = "backends" ]; then
+	DIR="${BACKENDS}"
+	# Clear out the bundle and any earlier pads, put the bundle back so it is
+	# the first real entry again, and only then create the pads. The order of
+	# these three operations is the whole point: the bundle has to be at index
+	# 2 when the listing is taken, and the pads have to come after it.
+	STAGE="${BD}/fill-bundle-contents.$$"
+	rm -rf "${STAGE}"
+	mkdir -p "${STAGE}"
+	mv "${BUNDLE}" "${STAGE}/Wayland.backend"
+	for i in $(seq 1 ${NPADS}); do
+		p="${DIR}/$(pad_name "${i}")"
+		if [ -e "${p}" ]; then
+			mv "${p}" "${STAGE}/$(pad_name "${i}")"
+		fi
+	done
 
-# Take the two real entries AND any earlier pads out of Contents, so the order
-# below is the order the guest will see. mv within one filesystem is a rename,
-# so the backend dylib is not re-read.
-STAGE="${BD}/fill-bundle-contents.$$"
-rm -rf "${STAGE}"
-mkdir -p "${STAGE}"
-mv "${PLIST}" "${STAGE}/Info.plist"
-mv "${MACOS}" "${STAGE}/MacOS"
-for i in $(seq 1 ${NPADS}); do
-	p="${CONTENTS}/$(pad_name "${i}")"
-	if [ -e "${p}" ]; then
-		mv "${p}" "${STAGE}/$(pad_name "${i}")"
-	fi
-done
+	mv "${STAGE}/Wayland.backend" "${BUNDLE}"
 
-# Info.plist and MacOS first, in that order: they are what CFBundle is looking
-# for, and the listing they are read out of comes back from the front.
-mv "${STAGE}/Info.plist" "${PLIST}"
-mv "${STAGE}/MacOS" "${MACOS}"
+	i=1
+	while [ "${i}" -le "${NPADS}" ]; do
+		printf 'x' >"${DIR}/$(pad_name "${i}")"
+		i=$((i + 1))
+	done
 
-# Pads last. They exist only to lift the entry count over the eight-entry line,
-# and the later they are created the more of them land outside the window.
-i=1
-while [ "${i}" -le "${NPADS}" ]; do
-	printf 'x' >"${CONTENTS}/$(pad_name "${i}")"
-	i=$((i + 1))
-done
+	rm -rf "${STAGE}"
+else
+	DIR="${CONTENTS}"
+	# Take the two real entries AND any earlier pads out of Contents, so the
+	# order below is the order the guest will see. mv within one filesystem is
+	# a rename, so the backend dylib is not re-read.
+	STAGE="${BD}/fill-bundle-contents.$$"
+	rm -rf "${STAGE}"
+	mkdir -p "${STAGE}"
+	mv "${PLIST}" "${STAGE}/Info.plist"
+	mv "${MACOS}" "${STAGE}/MacOS"
+	for i in $(seq 1 ${NPADS}); do
+		p="${CONTENTS}/$(pad_name "${i}")"
+		if [ -e "${p}" ]; then
+			mv "${p}" "${STAGE}/$(pad_name "${i}")"
+		fi
+	done
 
-rm -rf "${STAGE}"
+	# Info.plist and MacOS first, in that order: they are what CFBundle is
+	# looking for, and the listing they are read out of comes back from the
+	# front.
+	mv "${STAGE}/Info.plist" "${PLIST}"
+	mv "${STAGE}/MacOS" "${MACOS}"
+
+	# Pads last. They exist only to lift the entry count over the eight-entry
+	# line, and the later they are created the more of them land outside the
+	# window.
+	i=1
+	while [ "${i}" -le "${NPADS}" ]; do
+		printf 'x' >"${CONTENTS}/$(pad_name "${i}")"
+		i=$((i + 1))
+	done
+
+	rm -rf "${STAGE}"
+fi
 
 sha_plist_after="$(sha "${PLIST}")"
 sha_bin_after="$(sha "${MACOS_BIN}")"
-[ "${sha_plist_before}" = "${sha_plist_after}" ] || {
-	printf 'Info.plist changed: %s -> %s\n' "${sha_plist_before}" "${sha_plist_after}" >&2
-	exit 1
-}
-[ "${sha_bin_before}" = "${sha_bin_after}" ] || {
-	printf 'backend changed: %s -> %s\n' "${sha_bin_before}" "${sha_bin_after}" >&2
+[ "${sha_bin_now}" = "${sha_bin_after}" ] || {
+	printf 'backend changed: %s -> %s\n' "${sha_bin_now}" "${sha_bin_after}" >&2
+	printf 'this script moved it; that is a bug in the script, not in the run\n' >&2
 	exit 1
 }
 sha_vendored="$(sha "${VENDORED}")"
@@ -166,17 +264,31 @@ sha_vendored="$(sha "${VENDORED}")"
 	exit 1
 }
 
-printf '%s\n' "${CONTENTS}"
-printf 'pads: %d, created last; Info.plist and MacOS put back first\n' "${NPADS}"
+printf '%s\n' "${DIR}"
+WANTED='Info.plist'
+if [ "${MODE}" = "backends" ]; then
+	printf 'pads: %d, created after Wayland.backend, which was put back at index 2\n' \
+		"${NPADS}"
+	WANTED='Wayland.backend'
+else
+	printf 'pads: %d, created last; Info.plist and MacOS put back first\n' "${NPADS}"
+fi
 printf 'listing order as the host sees it:\n'
-ls -f "${CONTENTS}" | sed 's/^/    /'
-n_entries="$(ls -A "${CONTENTS}" | wc -l | tr -d ' ')"
+ls -f "${DIR}" | sed 's/^/    /'
+n_entries="$(ls -A "${DIR}" | wc -l | tr -d ' ')"
 n_all=$((n_entries + 2))
 printf 'entries: %s real, %s counting . and ..\n' "${n_entries}" "${n_all}"
-printf 'the guest is handed the first N-7 records:\n'
-ls -f "${CONTENTS}" | head -n "$((n_all - 7))" | sed 's/^/    /'
-printf 'dropped from the tail: %s entr%s\n' \
-	"$((n_all - (n_all - 7)))" "$([ $((n_all - (n_all - 7))) = 1 ] && echo y || echo ies)"
-printf 'Info.plist is at index 2, so it is in the window for any window of 3+\n'
-printf 'Info.plist sha256 %s (unchanged)\n' "${sha_plist_after}"
-printf 'backend   sha256 %s (unchanged, matches tests/vendor)\n' "${sha_bin_after}"
+printf 'the guest is handed the first N-7 records (%s of them):\n' "$((n_all - 7))"
+ls -f "${DIR}" | head -n "$((n_all - 7))" | sed 's/^/    /'
+# The window is N-7 records and the entry that matters is at index 2, so the
+# window has to be at least 3 long. Say so with the real number rather than
+# asserting it: n_all - 7 is 3 here and 4 for Contents, and both are enough.
+if [ "$((n_all - 7))" -ge 3 ]; then
+	printf '%s is at index 2 and the window is %s record(s): in it\n' \
+		"${WANTED}" "$((n_all - 7))"
+else
+	printf 'WARNING: %s is at index 2 but the window is only %s record(s)\n' \
+		"${WANTED}" "$((n_all - 7))"
+fi
+printf 'Info.plist sha256 %s\n' "${sha_plist_after}"
+printf 'backend   sha256 %s (matches tests/vendor)\n' "${sha_bin_after}"
