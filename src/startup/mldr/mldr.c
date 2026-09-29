@@ -1071,11 +1071,19 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 	 * Linux answers 0 with the bit clear, while the BSDs answer -1/ENOMEM
 	 * for a range with no vm entry under it at all. Only some other errno
 	 * is a real failure of the probe.
+	 *
+	 * `occupied` is a flag and not `occupied_at != 0`, because the first
+	 * page of the range is a perfectly good offset for a hit: keying
+	 * "occupied" off the offset made a page 0 hit indistinguishable from a
+	 * clean range, and that is precisely the hit this probe exists to catch
+	 * -- the range starts at stack_top - size, and the mapping it would
+	 * clobber is the one there.
 	 */
 	{
 		long ps = sysconf(_SC_PAGESIZE);
 		if (ps <= 0)
 			ps = PAGE_SIZE;
+		bool occupied = false;
 		unsigned long occupied_at = 0;
 		int mincore_err = 0;
 		for (unsigned long off = 0; off < size; off += (unsigned long) ps) {
@@ -1083,6 +1091,7 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 			if (mincore((void *) (lr->stack_top - size + off), (size_t) ps, &resident) != 0) {
 				mincore_err = errno;
 				if (mincore_err != ENOMEM) {
+					occupied = true;
 					occupied_at = off;
 					break;
 				}
@@ -1090,11 +1099,12 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 				resident = 0;
 			}
 			if (resident & 1) {
+				occupied = true;
 				occupied_at = off;
 				break;
 			}
 		}
-		if (occupied_at == 0) {
+		if (!occupied) {
 			fprintf(stderr,
 			    "[darling-mldr] stack region %p..%p (%lu bytes) is free%s\n",
 			    (void *) (lr->stack_top - size), (void *) lr->stack_top, size,
@@ -1102,9 +1112,10 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 		} else {
 			fprintf(stderr,
 			    "[darling-mldr] FATAL: the %lu-byte guest stack cannot go at %p:"
-			    " that address is already occupied %lu bytes into the range."
-			    " Not unmapping it.\n",
-			    size, (void *) (lr->stack_top - size), occupied_at);
+			    " that address is already occupied %lu bytes into the range"
+			    " (page %p, mincore errno %d). Not unmapping it.\n",
+			    size, (void *) (lr->stack_top - size), occupied_at,
+			    (void *) (lr->stack_top - size + occupied_at), mincore_err);
 			exit(1);
 		}
 	}
