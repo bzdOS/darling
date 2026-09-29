@@ -232,7 +232,123 @@ downstream of the directory count.
   above are asking. This is the first thing to do, because it costs one
   non-seat probe run and answers the question both fixes are aimed at.
 
-## 5. The fixture, and why the pads come last
+## 5. Separating §4's two hypotheses: one is confirmed, and there is a third wall
+
+Two root runs, and the first was spent on my own bug — see the end of this
+section. The second answers the question, and the answer is not the one §4
+picked.
+
+The probe now reads four directories and asks the API question directly
+(`tests/src/bundle-principal-class.m`, `probe_framework_root`):
+
+```
+[probe] rootscan: framework root (the directory the layout scan reads)
+        -- /System/Library/Frameworks/AppKit.framework
+[probe] rootscan:   0 entries returned by readdir  <- EMPTY from the guest's side
+[probe] rootscan:   NO: the layout detector's scan CANNOT  see Resources, Contents or Support Files
+[probe] rootscan: same root via Versions/C
+[probe] rootscan:   0 entries returned by readdir  <- EMPTY from the guest's side
+[probe] rootscan: Resources/Backends (the directory the backend list comes from)
+[probe] rootscan:   opendir FAILED (errno 2: No such file or directory)
+[probe] rootscan: Resources/Backends via Versions/C
+[probe] rootscan:   d_name=.                d_fileno=8187284  d_namlen=1   d_type=4
+[probe] rootscan:   d_name=..               d_fileno=8187275  d_namlen=2   d_type=4
+[probe] rootscan:   d_name=Wayland.backend  d_fileno=8187285  d_namlen=15  d_type=4
+[probe] rootscan:   d_name=pad-01.txt       d_fileno=8187346  d_namlen=10  d_type=8
+[probe] rootscan:   4 entries returned by readdir
+[probe] rootscan: pathsForResourcesOfType:@"backend" inDirectory:@"Backends" -> 0 path(s)  <- the wall
+[probe] rootscan:   -> 0 path(s) on the second call
+```
+
+**§4's first hypothesis is confirmed.** The framework root answers zero
+entries, through both the plain path and the `Versions/C` alias, so
+`foundResources` is never set and the layout is never determined. The padding
+this branch's наряд asked for is a real fix for a real wall.
+
+**The second hypothesis was right too, and worse than §4 thought.** §4 put the
+`Resources` symlink down as a *candidate* for the same wall. It is not a
+candidate, it is a hard failure, and it is not in the emulation:
+`opendir(AppKit.framework/Resources/Backends)` returns **ENOENT** — the path
+does not exist in the guest at all — while the same directory reached through
+`Versions/C` lists four entries with `Wayland.backend` in the window, exactly
+as §4's fixture predicted.
+
+The reason is the harness, and it is one line of shell
+(`tests/launch-dynamic-smoke.c:76-80`):
+
+```c
+snprintf(cmd, sizeof(cmd),
+         "mkdir -p '%s' && cd '%s' && find . -type f | pax -rw '%s'",
+         dst, src, dst);
+```
+
+`find . -type f` emits **regular files only**. The guest's root is not the
+overlay but the staged copy — `od = LOCAL_OVERLAY` at
+`launch-dynamic-smoke.c:427` — and that copy therefore contains **no symlinks
+at all**. Measured, not inferred:
+
+| | symlinks |
+|---|---|
+| `$DARLING_OVERLAY/System/Library/Frameworks` (maxdepth 2) | 54 |
+| `/tmp/darling-local-overlay` (whole tree) | 0 |
+
+And the guest's own inodes place it in the staged tree, not the overlay:
+`..` came back as `d_fileno=8187275`, and `8187275` is an inode of
+`/tmp/darling-local-overlay/…` (the overlay's corresponding inode is
+`5222547`). So `AppKit.framework/Resources` is not unresolvable in the guest —
+**it was never copied.**
+
+`find -type f` is not an oversight. The comment above `stage_tree` says why:
+`cp -a` and `cp -RL` walk symlinks, the overlay's virtiofs returns a malformed
+`FUSE_READLINK` reply with an embedded NUL, and every symlink walk then fails
+with `EIO` while leaking a `fuse_msgbuf` per link — enough of them to OOM the
+guest unrecoverably. Dropping symlinks was the deliberate fix. The consequence
+that was not on anyone's list is that the guest's root loses 54 framework
+symlinks, and `Resources` is one of them.
+
+### Why the наряд's fix is not enough, and would have been a wasted run
+
+Padding the framework root makes §5's first wall go away, and then CF
+determines layout 0 and builds its resource path as `<base>/Resources` +
+`/Backends` — the path that returns `ENOENT`. So window run №7 would have
+answered "necessary but not sufficient" a second time, for a reason found on
+the host before spending the root.
+
+The three walls, in the order the guest meets them:
+
+1. **Framework root, 5 entries < 8** → 0 records → layout undetermined.
+   Fixable by the fixture. Confirmed here.
+2. **`Resources` is a symlink, and the staged tree has no symlinks** →
+   `ENOENT`. Not fixable by any directory layout; the link has to be copied,
+   or replaced by a real directory.
+3. Only then, `Resources/Backends` — already above the line and holding
+   `Wayland.backend` in the window since §4.
+
+**No window run was spent on this branch** (see below), and the framework-root
+fixture mode is *not* in it either: a fixture that fixes one of three walls
+would be a branch whose only demonstrated effect is a different exception, and
+the наряд that asked for it was written when two walls were known rather than
+three. The honest next step is wall 2, because it is the one that no amount of
+directory padding reaches, and it is a harness change with a known hazard
+(the FUSE bug) attached to it.
+
+### What it cost, and my own error
+
+The first of the two roots was wasted on a bug in the separator itself: it
+called `+[NSBundle bundleWithClass:]`, which this Foundation does not
+implement. That returned nil, and the next line sent a message to the nil
+bundle, and the guest died with `SIGSEGV` at `0xff0a0000` after printing a
+single diagnostic line. The framework root is now derived by cutting
+`/AppKit.framework` off the backend path the probe already opens, and the API
+half goes through `bundleWithPath:`, which the rest of the file uses and which
+returns. A nil from either is printed, and the calls behind it are skipped
+rather than sent to nil.
+
+A separator that dies before it separates anything is the most expensive kind
+of wrong code, and the наряд's whole point was that this question was cheap to
+answer. It was cheap; I made it expensive.
+
+## 6. The fixture, and why the pads come last
 
 `build-freebsd/fill-bundle-contents.sh`, in the overlay, because the overlay is
 the only place the guest can see a fixture from. It takes `Info.plist` and
@@ -258,7 +374,7 @@ turn the window probe's vendored-hash gate into a second and less informative
 failure. The backend hash is `a4797cdd…` before and after, which is the value
 the probe's own gate expects.
 
-## 6. One thing in the log is a lie, and it was the probe's
+## 7. One thing in the log is a lie, and it was the probe's
 
 Both runs print
 
@@ -276,7 +392,7 @@ is what "is there a record header here" actually means. **The probe builds with
 that change; it has not been run, so the raw lines in §2 are from the previous
 binary and will read differently next time.**
 
-## 7. What is not settled
+## 8. What is not settled
 
 - **The dropped count is not 7 here.** `Contents` has eleven entries and got
   five, in both runs — six dropped. The ten `t` fixtures, whose names are all
@@ -292,22 +408,32 @@ binary and will read differently next time.**
   eight-entry threshold itself is unaffected; it is the residual count that is
   open.
 - **`Backends/` is padded and `count = 0` persists.** §4. The count is no
-  longer the blocker; whether the framework-root scan or the `Resources`
-  symlink is fatal first is **not separated**, and separating them costs one
-  probe run that the наряд did not fund. §4 says which question to ask first.
+  longer the blocker. §5 separates the rest: the framework-root scan is
+  confirmed dead at zero records, and the `Resources` symlink is confirmed
+  absent from the guest's root, with the harness line that drops it named.
+  **Neither is fixed** — the root by a fixture that this branch deliberately
+  does not contain, the symlink not at all.
+- **Which of §5's walls the window would meet first is not measured.** The
+  order in §5's list is the order the code walks them, not the order a run
+  confirmed, because no run was spent past the separator. Fixing wall 1 might
+  reveal wall 2, or wall 2 might be what the next exception reports; either
+  way both have to go.
 - **The mechanism is still a lead.** "Returns the first few records and drops
   the last few" is now measured in both directions, which is more than
   `EMU-344.md` §5 had, but nothing in reach explains the seven.
-- **The number dropped is not a constant.** `Contents` drops six of eleven and
+- **The dropped count is not a constant.** `Contents` drops six of eleven and
   the `t` fixtures drop seven of eight-to-fourteen, and `Backends/` drops six
   of ten — the `N−7` of `SLOT-344.md` §1 fits the fixtures and is off by one
   on both real directories. Only the *direction* is relied on, and the
-  direction is measured, not assumed.
+  direction is measured, not assumed. This is also why the `Backends/`
+  prediction in §4 was a prediction and not a guarantee: the window there is
+  4 records of 10 entries, and a dropped-tail count one lower would have cut
+  `Wayland.backend` out.
 - Nothing in `src/` is changed by this branch. The workaround is a directory
   layout in the overlay, and it is a workaround: Chrome will hit the same wall
   on its own bundles, whose `Contents/` and `Backends/` we do not control.
 
-## 8. Reproduce
+## 9. Reproduce
 
 ```sh
 export DARLING_SRC_DIR="$PWD"                       # this checkout
@@ -324,6 +450,12 @@ DRY_RUN=1 sh build-freebsd/run-bundle-principal-class.sh   # RC=0, 7 checks, no 
 sh build-freebsd/run-bundle-principal-class.sh             # root run
 grep '^\[probe\] dirent\|^\[probe\] before-load\|^\[probe\] principalClass' \
     "$DARLING_BUILD_DIR/bundle-principal-class.log"
+grep '^\[probe\] rootscan\|^\[step\] separating' \           # §5, the separator
+    "$DARLING_BUILD_DIR/bundle-principal-class.log"
+
+# §5's third wall, without a root run: how many symlinks each root has.
+find /tmp/darling-local-overlay -type l | wc -l            # 0 — the staged tree
+find "$DARLING_OVERLAY/System/Library/Frameworks" -maxdepth 2 -type l | wc -l  # 54
 
 DRY_RUN=1 sh build-freebsd/run-wayland-window-probe.sh     # RC=0, 8 checks, needs sway
 sh build-freebsd/run-wayland-window-probe.sh               # root run, a seat
