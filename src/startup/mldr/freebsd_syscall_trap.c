@@ -2879,6 +2879,8 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
 
 #include <execinfo.h>
 
+#include "crash_dump.h"
+
 #if defined(__x86_64__)
 static void
 crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
@@ -2922,20 +2924,22 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
     }
 
     /* DEBUG: dump the GUEST stack at rsp (backtrace(3) on FreeBSD only walks
-     * the host signal frame, not the guest code). */
-    {
-        fprintf(stderr, "  guest stack dump at rsp=0x%016llx:\n", (unsigned long long)mc->mc_rsp);
-        extern void* __mldr_stack_map_base __attribute__((weak));
-        unsigned long long start = (unsigned long long)mc->mc_rsp;
-        const unsigned long long base = (unsigned long long)__mldr_stack_map_base;
-        if (base != 0 && start < base)
-            start = base;
-        volatile unsigned long long *sp = (unsigned long long *)(uintptr_t)start;
-        for (int i = 0; i < 80; i++) {
-            fprintf(stderr, "  [gstack+%4d] 0x%016llx\n", i * 8, sp[i]);
-        }
-        fflush(stderr);
-    }
+     * the host signal frame, not the guest code).
+     *
+     * The walk is delegated to crash_dump.c because it must not be able to
+     * fault: this handler runs BEFORE the re-raise below, so a fault inside
+     * the dump replaces the real crash — and its signal — with a crash inside
+     * the diagnostic. That is exactly what the unguarded loop this replaced
+     * did; see crash_dump.c's header for the log that shows it. The dead
+     * `__mldr_stack_map_base` clamp that used to sit here went with it: that
+     * symbol was weak, undefined in every file in the tree, and therefore
+     * always 0, so the clamp it guarded never ran and the walk started at the
+     * raw rsp of a context already known to be wrecked. Defining it was not
+     * an option — nothing in mldr knows what the "guest stack mapping base"
+     * would be, so any value would have been invented — and the guard answers
+     * the same question honestly, per word. */
+    mldr_dump_guarded_stack("guest stack dump at rsp",
+                            (uintptr_t)mc->mc_rsp, MLDR_STACK_DUMP_WORDS);
 
     /* Re-raise as default action so the process terminates with correct signal */
     struct sigaction sa_dfl = { .sa_handler = SIG_DFL };

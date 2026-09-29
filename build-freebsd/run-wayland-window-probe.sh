@@ -59,6 +59,11 @@ EXPECT_SHA="a4797cddc449477fe65317548e58d6c18f050e838804596d470b4f9ae69eff2c"
 
 CONJURE_PID=""
 
+# Set to 1 only once the redirect below has created ${LOG} for THIS run. Until
+# then the file at that path, if there is one, belongs to an earlier run and
+# `die` must not present it as evidence.
+LOG_OWNS_LOG=0
+
 # --- reporting -----------------------------------------------------------
 
 npass=0
@@ -78,6 +83,12 @@ note() {
 # The third argument is the point of this script: on failure, say which step
 # died AND which line of the backend's own log tells us why, so the failure is
 # diagnosable from the log alone without re-running anything.
+#
+# ${LOG} is only tailed when THIS run produced it. A log left behind by an
+# earlier run sitting in the same place is worse than no log at all: it is
+# plausible, it is large, and it ends at the previous run's failure — so a
+# preflight check that has nothing to do with it gets "diagnosed" with it. The
+# flag is set only after the redirect below has actually created the file.
 die() {
 	step_no="$1"
 	what="$2"
@@ -87,7 +98,7 @@ die() {
 		printf 'look in %s for:\n' "${LOG}" >&2
 		printf '%s\n' "${look}" | sed 's/^/    /' >&2
 	fi
-if [ -f "${LOG}" ]; then
+	if [ "${LOG_OWNS_LOG}" = "1" ] && [ -f "${LOG}" ]; then
 	printf '\nlast 20 lines of %s:\n' "${LOG}" >&2
 	tail -20 "${LOG}" | sed 's/^/    /' >&2
 	printf '\nfull log (loader trace + mldr handler output, interleaved):\n    %s\n' "${LOG}" >&2
@@ -103,6 +114,10 @@ if [ -f "${LOG}" ]; then
 		printf '      The backtrace above places it; the last "dyld: loaded:" line\n' >&2
 		printf '      before it names the image.\n' >&2
 	fi
+elif [ -f "${LOG}" ]; then
+	printf '\nno log from this run: %s exists but was not written by it.\n' \
+		"${LOG}" >&2
+	printf 'it is left over from an earlier run and is not evidence about this one.\n' >&2
 fi
 	exit 1
 }
@@ -495,12 +510,43 @@ if [ "${DRY_RUN}" = "1" ]; then
 fi
 
 printf 'running: sudo %s\n' "${RUN_CMD}"
+
+# The redirection below runs in THIS shell, before sudo does anything, so it is
+# performed with the caller's privileges. A log left there by a run that had
+# more of them — a root run of this very script — cannot be reopened for
+# writing: the redirection fails, the `|| true` two lines down swallows the
+# error, and every grep after that reads the PREVIOUS run's log as though the
+# verdict belonged to this one. Nothing about that looks like a permissions
+# problem, which is what makes it worth catching here instead.
+#
+# Moved aside, not deleted: that file is the only record of the run that made
+# it, and leaving evidence behind is what this script is for. It is also the
+# file the preflight failures above would otherwise have quoted.
+if [ -e "${LOG}" ] && ! ( : >>"${LOG}" ) 2>/dev/null; then
+	stale="${LOG}.foreign-$(id -un)-$(date +%Y%m%d-%H%M%S)"
+	if mv -f "${LOG}" "${stale}" 2>/dev/null; then
+		printf 'previous log belongs to another user; moved aside to:\n    %s\n' \
+			"${stale}"
+	else
+		printf '\nFAILED: %s is not writable by this user and could not be moved aside.\n' \
+			"${LOG}" >&2
+		printf 'Remove or rename it, or point DARLING_BUILD_DIR somewhere else.\n' >&2
+		exit 1
+	fi
+fi
+if ! ( : >>"${LOG}" ) 2>/dev/null; then
+	printf '\nFAILED: %s cannot be created by this user.\n' "${LOG}" >&2
+	printf 'Point DARLING_BUILD_DIR at a directory this user can write to.\n' >&2
+	exit 1
+fi
+
 # Both streams, and no line buffering games: the loader writes from a child
 # process and the handler writes from the guest, and losing either half to a
 # full pipe would defeat the point. stdout and stderr are already merged into
 # one file by the redirection, which is what makes the interleaving meaningful.
 # shellcheck disable=SC2086
 sudo ${RUN_CMD} >"${LOG}" 2>&1 || true
+LOG_OWNS_LOG=1
 
 # launch-dynamic exits 0 even when the guest dies, so the log decides, not $?.
 grep -q 'RESULT: window created' "${LOG}" 2>/dev/null || die "${step_no}" \

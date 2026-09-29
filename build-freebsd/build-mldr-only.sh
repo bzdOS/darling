@@ -77,6 +77,7 @@ add_executable(mldr
   \${SRC}/startup/mldr/elfcalls/elfcalls.c
   \${SRC}/startup/mldr/elfcalls/threads.c
   \${SRC}/startup/mldr/freebsd_syscall_trap.c
+  \${SRC}/startup/mldr/crash_dump.c
   \${SRC}/startup/mldr/process_spawn.c
   \${SRC}/startup/mldr/sigaction_translate.c
 )
