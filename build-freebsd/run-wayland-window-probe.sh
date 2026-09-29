@@ -23,6 +23,17 @@
 #                       Defaults to 60.
 #   DRY_RUN=1           do every check and print the exact command that would
 #                       have been run, but do not run it. Needs no root.
+#   TEST_BIN            which guest test binary to run. Defaults to the window
+#                       probe; TEST_BUILD_SH names the script that builds it.
+#   LOG                 where the run's log goes. Defaults to
+#                       ${DARLING_BUILD_DIR}/wayland-window-probe.log.
+#   NO_SEAT=1           skip the sway/conjure steps entirely and do not pass
+#                       WAYLAND_DISPLAY or XDG_RUNTIME_DIR to the guest. For a
+#                       test that never reaches wl_display_connect this is not
+#                       a shortcut: requiring a live seat would make the run
+#                       depend on something it does not use. Everything else —
+#                       the build gate, the vendored-backend hash, the closure
+#                       walk, the probe-shape check, the root run — still runs.
 #
 # NO PRIVATE PATH LITERALS: every path here is either derived from this
 # script's own location or comes from the environment, and the sudo line is
@@ -39,10 +50,12 @@ export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 
 DRY_RUN="${DRY_RUN:-0}"
 WAIT_SECS="${WAIT_SECS:-60}"
+NO_SEAT="${NO_SEAT:-0}"
 WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
-TEST_BIN="wayland-window-create-macho"
+TEST_BIN="${TEST_BIN:-wayland-window-create-macho}"
+TEST_BUILD_SH="${TEST_BUILD_SH:-build-wayland-window-test.sh}"
 CONJURE="${BD}/conjure-wayland-input"
-LOG="${BD}/wayland-window-probe.log"
+LOG="${LOG:-${BD}/wayland-window-probe.log}"
 CONJURE_LOG="${BD}/conjure-wayland-input.log"
 
 # The backend dylib as committed, and the same file as installed in the
@@ -142,6 +155,12 @@ fi
 # --- 1. sway is alive and reachable --------------------------------------
 
 step_no=1
+if [ "${NO_SEAT}" = "1" ]; then
+	note "NO_SEAT=1 -- steps 1, 2 and the seat wait are skipped"
+	printf '         (this test never reaches wl_display_connect)\n'
+	SWAYSOCK=""
+	WAYLAND_SOCK=""
+else
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
 	# Derive it: the runtime dir is the parent of a live sway ipc socket.
 	for sock in /tmp/wayland-*/sway-ipc.*.sock /run/user/*/sway-ipc.*.sock; do
@@ -187,11 +206,14 @@ WAYLAND_SOCK="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
 [ -n "${SWAYSOCK}" ] || die "${step_no}" "found a wayland socket but no sway ipc socket" ""
 command -v swaymsg >/dev/null 2>&1 || die "${step_no}" "swaymsg not in PATH" ""
 ok "sway is alive: ${WAYLAND_SOCK}, ipc ${SWAYSOCK}"
+fi # NO_SEAT
 
 # --- 2. conjure-wayland-input is built ------------------------------------
 
 step_no=2
-if [ ! -x "${CONJURE}" ]; then
+if [ "${NO_SEAT}" = "1" ]; then
+	note "NO_SEAT=1 -- conjure-wayland-input is not needed"
+elif [ ! -x "${CONJURE}" ]; then
 	note "building conjure-wayland-input (it makes the seat non-empty)"
 	GEN="${BD}/wlr-protocols-gen"
 	mkdir -p "${GEN}"
@@ -227,7 +249,7 @@ step_no=3
 if [ ! -f "${SRC}/tests/${TEST_BIN}" ]; then
 	note "building the probe (${TEST_BIN})"
 	DARLING_SRC_DIR="${SRC}" DARLING_BUILD_DIR="${BD}" DARLING_OVERLAY="${OD}" \
-		sh "${SCRIPT_DIR}/build-wayland-window-test.sh" >"${BD}/build-probe.log" 2>&1 \
+		sh "${SCRIPT_DIR}/${TEST_BUILD_SH}" >"${BD}/build-probe.log" 2>&1 \
 		|| die "${step_no}" "the probe failed to build; see ${BD}/build-probe.log" ""
 fi
 [ -f "${SRC}/tests/${TEST_BIN}" ] || die "${step_no}" \
@@ -396,6 +418,10 @@ printf '\n=== preflight: %d check(s) passed ===\n' "${npass}"
 # --- 5. raise the seat, then hold it up for the duration of the run -------
 
 step_no=5
+if [ "${NO_SEAT}" = "1" ]; then
+	printf '\n=== seat ===\n'
+	note "NO_SEAT=1 -- skipped, no seat is raised and none is needed"
+else
 printf '\n=== seat ===\n'
 printf 'before: %s\n' "$(SWAYSOCK="${SWAYSOCK}" swaymsg -t get_seats \
 	| tr -d ' \n' | sed 's/.*"capabilities":\([0-9]*\).*/capabilities=\1/')"
@@ -422,7 +448,8 @@ done
 	"seat never reached capabilities=3 (stuck at '${seat_caps:-?}')" \
 	"WaylandDisplay: no wl_output mode known yet, reporting a placeholder" \
 	# conjure is stopped by the trap
-	ok "seat capabilities=3 (keyboard+pointer)"
+ok "seat capabilities=3 (keyboard+pointer)"
+fi # NO_SEAT
 
 # --- 6. the run itself ----------------------------------------------------
 
@@ -481,7 +508,14 @@ RUN_CMD="${RUN_CMD} DARLING_TEST_BINARY=${TEST_BIN}"
 # path -- the fallback is announced in its output, and a run that printed it
 # would be staging a guess.
 RUN_CMD="${RUN_CMD} DARLING_STAGING_TREES=${STAGING_LIST}"
-RUN_CMD="${RUN_CMD} WAYLAND_DISPLAY=${WAYLAND_DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+if [ "${NO_SEAT}" = "1" ]; then
+	# No WAYLAND_DISPLAY / XDG_RUNTIME_DIR: passing them would hand the guest
+	# a seat that does not exist and make a later wl_display_connect failure
+	# ambiguous — is it the code, or the environment we invented?
+	note "NO_SEAT=1 -- WAYLAND_DISPLAY and XDG_RUNTIME_DIR are NOT passed to the guest"
+else
+	RUN_CMD="${RUN_CMD} WAYLAND_DISPLAY=${WAYLAND_DISPLAY} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+fi
 for v in ${DYLD_TRACE}; do
 	RUN_CMD="${RUN_CMD} ${v}=1"
 done
