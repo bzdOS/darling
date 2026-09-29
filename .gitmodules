@@ -391,10 +391,6 @@
 [submodule "src/external/dyld"]
 	path = src/external/dyld
 	url = ../darling-dyld.git
-[submodule "src/external/AvailabilityVersions"]
-	path = src/external/AvailabilityVersions
-	url = ../darling-AvailabilityVersions
-[submodule "src/external/libnotify"]
 	path = src/external/libnotify
 	url = ../darling-Libnotify.git
 [submodule "src/external/csu"]
