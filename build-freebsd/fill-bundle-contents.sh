@@ -93,6 +93,44 @@
 # `fill backends` does that; `fill contents` is the original operation. Both
 # are idempotent and both are undone by `remove [contents|backends]`.
 #
+# The framework root, `Resources/Backends/` one level further out
+# -----------------------------------------------------------
+# Two walls meet in the framework ROOT, and both are reached before
+# `Backends/` is ever opened.
+#
+# **The count.** `_CFBundleCreateQueryTableAtPath` determines the bundle
+# layout by iterating the framework root looking for `Resources`,
+# `Contents` or `Support Files`, matching `DT_DIR` or `DT_LNK`
+# (CFBundle_Resources.c:255-266). `AppKit.framework/` holds three entries —
+# `AppKit`, `Resources`, `Versions` — five counting `.` and `..`, which is
+# below the line, so the listing is empty, `foundResources` is never set and
+# the layout is never determined. Measured: 0 entries returned by readdir.
+#
+# **The symlink.** `Resources` is a symlink to `Versions/Current/Resources`,
+# and the staged copy of the tree carries no symlinks at all
+# (`launch-dynamic-smoke.c`: `find . -type f` emits regular files only), so
+# in the guest `AppKit.framework/Resources/Backends` does not exist and
+# `opendir` answers ENOENT. `launch-dynamic-smoke.c` now carries the links
+# across; this script does not touch that, and `remove framework-root` will
+# not bring a symlink back.
+#
+# The pads go AFTER the existing entries and nothing is moved: `AppKit`,
+# `Resources` and `Versions` have to stay at indices 0, 1 and 2, because they
+# are the three names the layout scan is looking for and the window is a
+# prefix of the listing. The pad names must not collide with `Resources`,
+# `Contents` or `Support Files` — a pad called `Contents.txt` is fine, a pad
+# called `Contents` would be found by the detector and change the layout it
+# was added to measure.
+#
+# One caution, recorded because it is not obvious: the window this relies on
+# is the head of the listing, and how many records the guest drops from the
+# tail is NOT pinned (WORKAROUND-344.md §9: 7, 7, 6, 6, 3 and 4 across six
+# measured directories). Twelve entries and a seven-record drop leaves five
+# records, which covers indices 0..4 and so covers all three names. That is
+# arithmetic, not a measurement, and the probe run that follows prints the
+# names it actually got — so if it is short, that printout is the correction
+# and not a surprise.
+
 # What it does NOT do: it does not touch src/, the harness, the vendored backend
 # or the hash gate. The backend under Contents/MacOS is moved aside and put back
 # byte for byte, and the script verifies both hashes before and after, so a
@@ -103,9 +141,9 @@ set -e
 MODE="${1:-contents}"
 
 case "${MODE}" in
-fill | contents | remove | backends) ;;
+fill | contents | backends | framework-root | remove) ;;
 *)
-	printf 'usage: %s [contents|backends|remove [contents|backends]]\n' "$0" >&2
+	printf 'usage: %s [contents|backends|framework-root|remove [what]]\n' "$0" >&2
 	exit 2
 	;;
 esac
@@ -118,6 +156,7 @@ BD="${DARLING_BUILD_DIR:-/tmp}"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 
 BACKENDS="${OD}/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/Backends"
+FWROOT="${OD}/System/Library/Frameworks/AppKit.framework"
 BUNDLE="${BACKENDS}/Wayland.backend"
 CONTENTS="${BUNDLE}/Contents"
 PLIST="${CONTENTS}/Info.plist"
@@ -167,9 +206,10 @@ if [ "${MODE}" = "remove" ]; then
 	TARGET="${2:-contents}"
 	case "${TARGET}" in
 	backends) DIR="${BACKENDS}" ;;
+	framework-root) DIR="${FWROOT}" ;;
 	contents) DIR="${CONTENTS}" ;;
 	*)
-		printf 'remove: second argument must be contents or backends\n' >&2
+		printf 'remove: second argument must be contents, backends or framework-root\n' >&2
 		exit 2
 		;;
 	esac
@@ -214,6 +254,24 @@ if [ "${MODE}" = "backends" ]; then
 	done
 
 	rm -rf "${STAGE}"
+elif [ "${MODE}" = "framework-root" ]; then
+	DIR="${FWROOT}"
+	WANTED='AppKit / Resources / Versions'
+	# Nothing is moved and nothing is removed: the three real entries have to
+	# keep their places, and the pads are created after them. Only a pad from
+	# an earlier run is cleared, so a second run is a no-op.
+	for i in $(seq 1 ${NPADS}); do
+		p="${DIR}/$(pad_name "${i}")"
+		if [ -e "${p}" ]; then
+			rm -f "${p}"
+		fi
+	done
+
+	i=1
+	while [ "${i}" -le "${NPADS}" ]; do
+		printf 'x' >"${DIR}/$(pad_name "${i}")"
+		i=$((i + 1))
+	done
 else
 	DIR="${CONTENTS}"
 	# Take the two real entries AND any earlier pads out of Contents, so the
@@ -270,6 +328,9 @@ if [ "${MODE}" = "backends" ]; then
 	printf 'pads: %d, created after Wayland.backend, which was put back at index 2\n' \
 		"${NPADS}"
 	WANTED='Wayland.backend'
+elif [ "${MODE}" = "framework-root" ]; then
+	printf 'pads: %d, created after the existing entries; nothing moved\n' "${NPADS}"
+	WANTED='the framework root'"'"'s own three entries'
 else
 	printf 'pads: %d, created last; Info.plist and MacOS put back first\n' "${NPADS}"
 fi
@@ -278,17 +339,25 @@ ls -f "${DIR}" | sed 's/^/    /'
 n_entries="$(ls -A "${DIR}" | wc -l | tr -d ' ')"
 n_all=$((n_entries + 2))
 printf 'entries: %s real, %s counting . and ..\n' "${n_entries}" "${n_all}"
-printf 'the guest is handed the first N-7 records (%s of them):\n' "$((n_all - 7))"
+printf 'the guest is handed a PREFIX of this; the length of that prefix is not\n'
+printf 'pinned (WORKAROUND-344.md §9), so read the names the probe prints.\n'
+printf 'first %s records, which is what a seven-record drop would leave here:\n' \
+	"$((n_all - 7))"
 ls -f "${DIR}" | head -n "$((n_all - 7))" | sed 's/^/    /'
-# The window is N-7 records and the entry that matters is at index 2, so the
-# window has to be at least 3 long. Say so with the real number rather than
-# asserting it: n_all - 7 is 3 here and 4 for Contents, and both are enough.
-if [ "$((n_all - 7))" -ge 3 ]; then
-	printf '%s is at index 2 and the window is %s record(s): in it\n' \
-		"${WANTED}" "$((n_all - 7))"
+if [ "${MODE}" = "framework-root" ]; then
+	# The three names the layout scan looks for are the three real entries at
+	# the front, so print their real indices rather than asserting a position.
+	printf 'the layout scan wants Resources, Contents or Support Files; here are\n'
+	printf 'the real entries that precede the first pad, in listing order:\n'
+	ls -f "${DIR}" | sed -n '3,8p' | while read -r n; do
+		case "${n}" in
+		pad-*) break ;;
+		*) printf '    %s\n' "${n}" ;;
+		esac
+	done
 else
-	printf 'WARNING: %s is at index 2 but the window is only %s record(s)\n' \
-		"${WANTED}" "$((n_all - 7))"
+	printf '%s is at index 2, so it is in the window for any window of 3+\n' \
+		"${WANTED}"
 fi
 printf 'Info.plist sha256 %s\n' "${sha_plist_after}"
 printf 'backend   sha256 %s (matches tests/vendor)\n' "${sha_bin_after}"
