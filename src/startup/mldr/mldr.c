@@ -314,11 +314,24 @@ int main(int argc, char** argv, char** envp)
 #ifdef DARLING_FREEBSD
 	{
 		unsigned long st = mldr_load_results.stack_top;
+		/* dyld_mh is printed next to mh for one reason: a fault inside dyld
+		 * cannot be located without it. mldr boots the guest THROUGH dyld,
+		 * so the boot entry point is dyld's __dyld_start, not the guest's
+		 * entry -- a faulting rip in dyld is offset from THAT, and without
+		 * dyld's load address the only way to place it is to subtract a
+		 * constant observed in one run and hope the next one matches.
+		 * build-freebsd/decode-crash.py already reads a "DEBUG dyld mh="
+		 * line to build a pseudo-segment for dyld, and on FreeBSD there
+		 * was no such line to read. */
 		fprintf(stderr,
-		    "[darling-mldr] DEBUG pre-start: mh=0x%lx entry=0x%lx stack_top=0x%lx\n",
+		    "[darling-mldr] DEBUG dyld mh=0x%lx\n",
+		    (unsigned long)mldr_load_results.dyld_mh);
+		fprintf(stderr,
+		    "[darling-mldr] DEBUG pre-start: mh=0x%lx entry=0x%lx stack_top=0x%lx stack_size=0x%lx\n",
 		    (unsigned long)mldr_load_results.mh,
 		    (unsigned long)mldr_load_results.entry_point,
-		    st);
+		    st,
+		    (unsigned long)mldr_load_results.stack_size_mapped);
 		/* Dump first 32 slots of the stack to verify applep pointers */
 		unsigned long *sp = (unsigned long *)st;
 		fprintf(stderr, "[darling-mldr] DEBUG stack slots:\n");
@@ -987,10 +1000,113 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
 
 	struct rlimit limit;
 	getrlimit(RLIMIT_STACK, &limit);
-	// allocate a few pages 16 pages if it's less than the limit; otherwise, allocate the limit
-	unsigned long size = PAGE_SIZE * 16;
-	if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < size) {
-		size = limit.rlim_cur;
+
+	/*
+	 * How big the guest's stack is.
+	 *
+	 * This used to be 16 pages, always, unless RLIMIT_STACK was SMALLER
+	 * than that -- so a 64 KiB stack in every configuration, whatever the
+	 * host allowed, while the comment above it promised the opposite
+	 * ("otherwise, allocate the limit"). The 64 KiB is not enough: dyld's
+	 * loadPhase6 declares a 32 KiB buffer on the stack
+	 * (uint8_t firstPages[MAX_MACH_O_HEADER_AND_LOAD_COMMANDS_SIZE],
+	 * src/external/dyld/src/ImageLoader.h:102), and on the third run of the
+	 * window probe the faulting instruction was that function's first
+	 * argument spill, 7,860 bytes below the bottom of a 64 KiB stack. The
+	 * cost of getting this wrong is not a degraded run, it is a crash whose
+	 * evidence the crash handler used to eat (build-freebsd/
+	 * PROBE-RUN-THREE.md).
+	 *
+	 * The rule is: honour a larger RLIMIT_STACK, never go below 16 pages,
+	 * and never take more than the cap.
+	 *
+	 * The cap is 8 MiB because that is what a Darwin main thread actually
+	 * gets, and this is a Darwin compatibility layer: a guest process
+	 * written against macOS is entitled to assume 8 MiB, and giving it less
+	 * is the bug above. It is also what both hosts ask for by default
+	 * (FreeBSD and Linux both default RLIMIT_STACK to 8 MiB), so in the
+	 * ordinary case the limit decides and the cap is only the backstop for
+	 * RLIM_INFINITY or a hand-raised limit. And 8 MiB bounds the MAP_FIXED
+	 * mapping placed just below the commpage, which is the only address this
+	 * code can use: the guest images in a real run sit at 0x2C944400000,
+	 * more than 4 TB below the commpage, so a cap of this size cannot reach
+	 * them and cannot reach the commpage either.
+	 */
+	const unsigned long min_stack = PAGE_SIZE * 16;
+	const unsigned long max_stack = 8UL * 1024 * 1024;
+	unsigned long size = min_stack;
+
+	if (limit.rlim_cur != RLIM_INFINITY) {
+		if (limit.rlim_cur > size)
+			size = (unsigned long) limit.rlim_cur;
+		if (limit.rlim_cur < min_stack) {
+			/* Not a silent override: a small rlimit here reproduces the
+			 * exact crash the size above is meant to prevent, and the value
+			 * used has to be findable in the log when that happens. */
+			fprintf(stderr,
+			        "[darling-mldr] WARNING: RLIMIT_STACK is %llu bytes, below the %lu-byte"
+			        " minimum for a guest stack; using %lu\n",
+			        (unsigned long long) limit.rlim_cur, min_stack, min_stack);
+		}
+	}
+	if (size > max_stack)
+		size = max_stack;
+	lr->stack_size_mapped = size;
+
+	/*
+	 * The stack has to go at a FIXED address: there is no other one below the
+	 * commpage, and MAP_FIXED will unmap whatever it finds there without
+	 * asking. At 16 pages the risk was small; at 8 MiB it is not, and a
+	 * clobbered host mapping is the kind of failure that shows up much later
+	 * and somewhere else entirely. So the range is probed before it is taken.
+	 *
+	 * mincore answers "is this page resident" without reading or writing it,
+	 * which is the only question that matters here: a page that is resident
+	 * belongs to somebody, and a page that is not is free to map. Failing
+	 * here is the honest outcome -- a guest stack of an arbitrary, smaller
+	 * size would be a second way to reproduce the crash this change exists
+	 * to remove.
+	 *
+	 * The two hosts spell "not resident" differently and both are free:
+	 * Linux answers 0 with the bit clear, while the BSDs answer -1/ENOMEM
+	 * for a range with no vm entry under it at all. Only some other errno
+	 * is a real failure of the probe.
+	 */
+	{
+		long ps = sysconf(_SC_PAGESIZE);
+		if (ps <= 0)
+			ps = PAGE_SIZE;
+		unsigned long occupied_at = 0;
+		int mincore_err = 0;
+		for (unsigned long off = 0; off < size; off += (unsigned long) ps) {
+			char resident = 0;
+			if (mincore((void *) (lr->stack_top - size + off), (size_t) ps, &resident) != 0) {
+				mincore_err = errno;
+				if (mincore_err != ENOMEM) {
+					occupied_at = off;
+					break;
+				}
+				/* ENOMEM: not mapped, so not somebody's */
+				resident = 0;
+			}
+			if (resident & 1) {
+				occupied_at = off;
+				break;
+			}
+		}
+		if (occupied_at == 0) {
+			fprintf(stderr,
+			    "[darling-mldr] stack region %p..%p (%lu bytes) is free%s\n",
+			    (void *) (lr->stack_top - size), (void *) lr->stack_top, size,
+			    mincore_err == ENOMEM ? " (no vm entry under it at all)" : "");
+		} else {
+			fprintf(stderr,
+			    "[darling-mldr] FATAL: the %lu-byte guest stack cannot go at %p:"
+			    " that address is already occupied %lu bytes into the range."
+			    " Not unmapping it.\n",
+			    size, (void *) (lr->stack_top - size), occupied_at);
+			exit(1);
+		}
 	}
 
 	if (compatible_mmap((void*)(lr->stack_top - size), size, PROT_READ | PROT_WRITE,
