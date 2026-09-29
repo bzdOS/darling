@@ -38,6 +38,7 @@
 #define O_DIRECTORY 0x100000
 #endif
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -276,7 +277,15 @@ static void probe_raw_getdirentries(NSBundle *bundle)
 
 		{
 			int records = 0, zero_ino = 0, bad_reclen = 0, off = 0;
-			for (off = 0; off + (int) sizeof(struct dirent) <= n; ) {
+			/* The lower bound for "is there a record header here" is
+			 * offsetof(d_name), NOT sizeof(struct dirent): the guest's
+			 * dirent.h sizes d_name for NAME_MAX, so sizeof is ~1KB while
+			 * a record is 28-36 bytes. With sizeof as the bound this loop
+			 * never runs for a directory whose listing is smaller than one
+			 * struct, and the run reports "0 record(s)" beside a buffer it
+			 * has just been handed 160-164 bytes of records in -- a
+			 * self-contradicting line that reads like a guest fault. */
+			for (off = 0; off + (int) offsetof(struct dirent, d_name) <= n; ) {
 				struct dirent *dp = (struct dirent *) (buf + off);
 				if (dp->d_reclen <= 0 || off + dp->d_reclen > n) {
 					bad_reclen++;
