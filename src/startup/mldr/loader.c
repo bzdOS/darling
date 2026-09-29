@@ -416,6 +416,8 @@ no_slide:
 
 	if (header.filetype == MH_EXECUTE)
 		lr->mh = (uintptr_t) mappedHeader;
+	if (expect_dylinker)
+		lr->dyld_mh = (uintptr_t) mappedHeader;
 	if (entryPoint && !lr->entry_point)
 		lr->entry_point = entryPoint;
 
