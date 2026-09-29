@@ -394,13 +394,13 @@ binary and will read differently next time.**
 
 ## 8. What is not settled
 
-- **The dropped count is not 7 here.** `Contents` has eleven entries and got
-  five, in both runs — six dropped. The ten `t` fixtures, whose names are all
-  six characters, drop exactly seven every time. So "N−7" describes the
-  fixtures and is off by one on this directory, and I did not spend a run
-  separating the two. The fixture only depends on the *direction*, and the
-  direction is not in doubt: the first record is `.` in ten directories out of
-  ten, and every `d_fileno` is non-zero.
+- **The line is in bytes, and how many records come back is not a rule.**
+  §9 settles the first half — `t7` and `l7` have the same seven entries and
+  opposite verdicts, so the threshold counts bytes, and "eight entries" was an
+  artifact of six-character names. The second half is open: the dropped tail
+  is 7, 7, 6, 6, 3, 4 across six directories, and the two long-name ones
+  differ by an entry and return the same 616 bytes. No model, and no run
+  bought to look for one.
 - **Real large directories still cannot be used to pin the count.** Their
   listing order in the guest need not be the host's, so summing record sizes
   against a returned byte count does not close — `/usr/lib` (146 entries, 392
@@ -421,24 +421,103 @@ binary and will read differently next time.**
 - **The mechanism is still a lead.** "Returns the first few records and drops
   the last few" is now measured in both directions, which is more than
   `EMU-344.md` §5 had, but nothing in reach explains the seven.
-- **The dropped count is not a constant.** `Contents` drops six of eleven and
-  the `t` fixtures drop seven of eight-to-fourteen, and `Backends/` drops six
-  of ten — the `N−7` of `SLOT-344.md` §1 fits the fixtures and is off by one
-  on both real directories. Only the *direction* is relied on, and the
-  direction is measured, not assumed. This is also why the `Backends/`
-  prediction in §4 was a prediction and not a guarantee: the window there is
-  4 records of 10 entries, and a dropped-tail count one lower would have cut
-  `Wayland.backend` out.
+- **`SLOT-344.md` §1's "N−7" is wrong twice over**, and §9 is the correction:
+  the threshold is a byte total, and the dropped tail is not seven. Only the
+  *direction* is relied on by any fixture here, and the direction is measured.
+  That is also why §4's `Backends/` prediction was a prediction and not a
+  guarantee: the window there is 4 records of 10 entries, and one fewer
+  dropped would have cut `Wayland.backend` out.
 - Nothing in `src/` is changed by this branch. The workaround is a directory
   layout in the overlay, and it is a workaround: Chrome will hit the same wall
   on its own bundles, whose `Contents/` and `Backends/` we do not control.
 
-## 9. Reproduce
+## 9. The threshold is a BYTE total, and "eight entries" was a coincidence
+
+The one open remainder of `SLOT-344.md` §5 was whether the line is eight
+entries or something that lands on eight when the names are six characters.
+The ten `t` fixtures cannot answer it: they vary the count and hold the name
+length fixed, so a byte rule and a count rule fit them equally well. Two more
+directories, same counts, names of 254 characters:
+
+```
+l7   5 files, 7 entries counting . and .., 1456 bytes total
+l8   6 files, 8 entries counting . and .., 1736 bytes total
+t7   5 files, 7 entries,                          216 bytes total
+t8   6 files, 8 entries,                          248 bytes total
+```
+
+One root run, no seat, the same `getdirentries` sweep:
+
+```
+t7  -> -1  errno=22 (Invalid argument)      7 entries,  216 B
+t8  ->  28  errno=0                        8 entries,  248 B
+l7  -> 616  errno=0                        7 entries, 1456 B
+l8  -> 616  errno=0                        8 entries, 1736 B
+```
+
+**It is a byte total, and not a count of entries.** `t7` and `l7` hold the
+same seven entries and get opposite verdicts — one `EINVAL`, one 616 bytes of
+records — and the only thing that differs between them is how many bytes those
+entries occupy. A count rule cannot produce that pair.
+
+Read against the fixtures the line sits between **216 and 248 bytes**, which
+is exactly the window where "8 entries" appeared: with six-character names a
+record is 32 bytes, so eight entries is 248 and seven is 216. "Eight" was never
+about eight. Every fixture laid out on the count — including this document's
+own, and the reason the first `Contents/` layout returned zero of what it
+needed — was laid out on a coincidence of the name length.
+
+**This does not change the fixture that works.** The rules the fixtures here
+rely on are both *lower* bounds in the same direction: a directory has to be
+big enough in entries to clear the byte line, and the wanted entry has to be
+early in the listing. Padding is still the right move, and `Contents/` and
+`Backends/` are still correctly laid out. What changes is the reason, and the
+reason is what tells you how much padding is *needed*: by bytes, not by
+count, so a directory of very long names clears the line with fewer entries
+than a directory of short ones. `l7` clears it with seven.
+
+### How many records come back, which is still not a rule
+
+| directory | entries | total | returned | records | dropped |
+|---|---|---|---|---|---|
+| `t8` | 8 | 248 B | 28 B | 1 | 7 |
+| `t14` | 14 | 440 B | 216 B | 7 | 7 |
+| `Contents` | 11 | 376 B | 160 B | 5 | 6 |
+| `Backends` | 10 | 348 B | 132 B | 4 | 6 |
+| `l7` | 7 | 1456 B | 616 B | 4 | 3 |
+| `l8` | 8 | 1736 B | 616 B | 4 | 4 |
+
+This is the part I cannot close, and it is now visibly not one rule. The
+dropped count is 7, 7, 6, 6, 3, 4 — it is neither constant nor a function of
+the entry count, and the long-name pair adds the awkward case: `l7` and `l8`
+differ by one entry and by 280 bytes, and return **the same 616 bytes**, which
+is 4 records both times. A rule of the form "drop the last N" is out, and so is
+"return the first N−k". I have one more observation and no model for it, and a
+run to find the next observation is not what this наряд bought, so it is left
+open rather than guessed at.
+
+What survives as a law, and what the fixtures depend on, is unchanged and now
+better supported than before: **the records come from the head of the listing**
+— every one of these runs prints `d_name="."` as its first record — and a
+directory must be above the line in bytes to answer at all.
+
+## 10. Reproduce
 
 ```sh
 export DARLING_SRC_DIR="$PWD"                       # this checkout
 export DARLING_OVERLAY=/path/to/overlay             # the overlay you build against
 export DARLING_BUILD_DIR=/path/to/build             # scratch, outside the source tree
+
+# §9's long-name fixtures, the pair that shows the line is in bytes. NAME_MAX
+# here is 255, so 254 is one below it and a record is 280 bytes.
+O="$DARLING_OVERLAY/usr/lib/dir-threshold"
+for d in l7 l8; do
+        mkdir -p "$O/$d"
+        for i in $(seq 1 $([ "$d" = l7 ] && echo 5 || echo 6)); do
+                n="long-$(printf '%02d' $i)-"
+                printf 'x' >"$O/$d/$n$(printf 'z%.0s' $(seq 1 $((254 - ${#n}))))"
+        done
+done
 
 sh build-freebsd/fill-bundle-contents.sh            # Contents/ layout + both hashes
 sh build-freebsd/fill-bundle-contents.sh backends   # Backends/ layout, §4

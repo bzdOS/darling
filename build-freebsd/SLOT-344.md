@@ -75,6 +75,30 @@ No fixture directory, and no real one, breaks the rule.
 > `WORKAROUND-344.md` §2 and §4. Build fixtures against that, not against
 > this section's shorthand.
 
+> **Correction, 30 September, second pass — the threshold is in BYTES.**
+> The eight-entry line above is an artifact of the fixture's six-character
+> names, and a second pair of fixtures settles it: two directories holding the
+> same seven and eight entries as `t7` and `t8`, with names of 254 characters
+> (one below this filesystem's NAME_MAX, so a record is 280 bytes instead of
+> 32). `t7` — 7 entries, 216 bytes — answers `EINVAL`. `l7` — the same 7
+> entries, 1456 bytes — answers **616 bytes of records**. Same entry count,
+> opposite verdicts, and the only thing that differs is the byte total. A rule
+> that counts entries cannot produce that pair.
+>
+> Read against the fixtures the line sits between 216 and 248 bytes, which is
+> precisely where "eight entries" lands when every record is 32 bytes. **"Eight"
+> was never about eight.** Every fixture laid out on the count was laid out on
+> a coincidence of the name length, including the first `Contents/` layout,
+> which is recorded in `WORKAROUND-344.md` §2.
+>
+> The direction correction below still stands and is independent of this: the
+> records come back from the **head** of the listing. The dropped tail is not
+> a constant either — 7, 7, 6, 6, 3 and 4 across the six directories now
+> measured, and the two long-name ones differ by an entry and return the same
+> 616 bytes.
+>
+> Canonical statement with the runs behind it: `WORKAROUND-344.md` §9.
+
 ### The returned bytes, which are a second finding
 
 The successes are exactly linear in the entry count, and the increment is one
