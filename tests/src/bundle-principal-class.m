@@ -33,6 +33,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #if !defined(O_DIRECTORY)
 #define O_DIRECTORY 0x100000
 #endif
@@ -364,9 +365,22 @@ static void probe_getdirentries_elsewhere(void)
 		memset(buf, 0xAA, sizeof(buf));
 		errno = 0;
 		n = __getdirentries64(fd, buf, 8192, &basep);
-		note("elsewhere: len=%-4lu %-100s -> %-6d errno=%d (%s)",
-		    (unsigned long) strlen(dirs[i]), dirs[i], n, errno,
-		    n < 0 ? strerror(errno) : "-");
+		/* The handler's only inputs are (fd, buf, len, basep). Every call
+		 * here uses the same len and the same buffer, so whatever decides
+		 * whether a directory lists has to be a property of the DESCRIPTOR.
+		 * These four numbers are what the handler's side of the boundary can
+		 * see from here; printing them for a working and a failing directory
+		 * is what turns "it is the fd" into "here is what about the fd". */
+		{
+			struct stat st;
+			int have = (fstat(fd, &st) == 0);
+			note("elsewhere: len=%-4lu fd=%-4d dev=%-12llu ino=%-12llu mode=%06o %-100s -> %-6d errno=%d (%s)",
+			    (unsigned long) strlen(dirs[i]), fd,
+			    have ? (unsigned long long) st.st_dev : 0ull,
+			    have ? (unsigned long long) st.st_ino : 0ull,
+			    have ? (unsigned) (st.st_mode & 07777) : 0u,
+			    dirs[i], n, errno, n < 0 ? strerror(errno) : "-");
+		}
 		if (n > 0) {
 			struct dirent *dp = (struct dirent *) buf;
 			note("elsewhere:   first record: d_reclen=%u d_fileno=%llu d_name=\"%s\"",
