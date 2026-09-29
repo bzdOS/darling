@@ -364,6 +364,21 @@ static void probe_getdirentries_elsewhere(void)
 		"/usr/lib/dir-threshold/t10",
 		"/usr/lib/dir-threshold/t11",
 		"/usr/lib/dir-threshold/t14",
+		/* Then the same two counts with long names, which is the whole
+		 * question: is the line a COUNT of entries or a BYTE total that
+		 * happens to sit at 248 bytes when the names are six characters?
+		 *
+		 * l7 holds 5 files and l8 holds 6 — 7 and 8 entries counting . and
+		 * .. — with names of 254 characters, so one dirent record is 280
+		 * bytes instead of 32. l8 is therefore 1736 bytes against t8's 248
+		 * with the same entry count: if l8 answers, the threshold counts
+		 * entries; if it answers EINVAL, then "eight" was never about eight
+		 * and every fixture built on the count is built on a coincidence.
+		 *
+		 * A count threshold and a byte threshold disagree here, which is the
+		 * only reason these two directories are worth a root run. */
+		"/usr/lib/dir-threshold/l7",
+		"/usr/lib/dir-threshold/l8",
 		/* then the real directories that produced the original matrix */
 		"/",
 		"/System",
