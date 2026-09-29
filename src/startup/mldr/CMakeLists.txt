@@ -20,6 +20,7 @@ set(mldr_sources
 	mldr.c
 	commpage.c
 	freebsd_syscall_trap.c
+	crash_dump.c
 	elfcalls/elfcalls.c
 	elfcalls/threads.c
 )
