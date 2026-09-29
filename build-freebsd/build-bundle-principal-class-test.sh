@@ -20,6 +20,12 @@
 #     before wl_display_connect is called, so a probe that reached for Wayland
 #     could only fail for reasons of its own.
 #
+# libsystem_kernel.dylib is linked for one symbol: __getdirentries64, the raw
+# directory syscall libc's readdir calls on this target. Darwin's public
+# getdirentries(2) is a compile-time trap under 64-bit inodes (the SDK replaces
+# it with a reference to an undefined symbol), so the raw entry point is the
+# only way to see what the syscall actually returns before libc filters it.
+#
 # The output goes to $DARLING_SRC_DIR/tests/$OUT_NAME because that is where
 # launch-dynamic looks for the test binary (it copies it into the staging dir
 # it hands over). Building does not need root; running does.
@@ -88,6 +94,7 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 \
 	"${OD}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${OD}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
 	"${OD}/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit" \
+	"${OD}/usr/lib/system/libsystem_kernel.dylib" \
 	"${OD}/usr/lib/libobjc.A.dylib" \
 	"${OD}/usr/lib/libicucore.A.dylib" \
 	"${OD}/usr/lib/libc++.1.dylib" \
