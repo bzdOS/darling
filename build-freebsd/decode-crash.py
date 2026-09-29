@@ -244,10 +244,16 @@ def main():
         print("no crash found in log")
         return
     print(f"crash: signal {fatal.group(1)} at {fatal.group(2)}")
-    if segs:
+    if n_real:
         print(f"images mapped: {n_real} address range(s) named by the log "
               f"({n_dylib} dylib mapping(s) + the main executable)"
               + (f", +{n_pseudo} derived from mldr DEBUG lines" if n_pseudo else ""))
+    else:
+        print("images mapped: none named by the log — it carries no "
+              "DYLD_PRINT_SEGMENTS lines, so only what mldr's own DEBUG lines "
+              "give can be attributed")
+        if n_pseudo:
+            print(f"           {n_pseudo} range(s) derived from mldr DEBUG lines")
 
     r = resolve(int(rip.group(1), 16), segs, overlay, tests)
     if r:
