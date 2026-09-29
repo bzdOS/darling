@@ -41,6 +41,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <dirent.h>
 
 #define PREFIX        "/tmp/darling-dynamic-smoke"
 #define SOCK_PATH     PREFIX "/.darlingserver.sock"
@@ -78,6 +79,158 @@ static void stage_tree(const char *od, const char *rel) {
              dst, src, dst);
     (void)system(cmd);
     printf("cached locally: %s\n", dst);
+}
+
+/* Symlinks: the manifest transfer, and why it exists.
+ *
+ * stage_tree's `find . -type f` emits REGULAR FILES ONLY, so the staged copy
+ * of a framework tree comes out with no symlinks in it at all. Measured on
+ * this overlay: 54 under System/Library/Frameworks, 0 in the staged tree.
+ *
+ * That is not cosmetic. AppKit.framework/Resources is a symlink to
+ * Versions/Current/Resources, and CFBundle builds its resource path as
+ * <bundle>/Resources/Backends (CFBundle_Resources.c,
+ * _CFBundleGetResourceDirForVersion). In the guest that path does not exist
+ * at all -- opendir returns ENOENT, not EIO and not an empty listing -- while
+ * the same directory reached through Versions/C lists fine. One root run's
+ * worth of an exception that reads like a discovery bug and is a staging bug.
+ *
+ * THE HAZARD THIS AVOIDS, and why the manifest is the shape it is:
+ * do NOT use cp -a / cp -RL, and do not let pax walk links. The comment above
+ * stage_tree records why: the overlay's virtiofs returns a malformed
+ * FUSE_READLINK reply (embedded NUL), every symlink walk fails with EIO *and*
+ * leaks a fuse_msgbuf in the FreeBSD FUSE client, and enough of them wire all
+ * of RAM and kill the guest in an unrecoverable OOM spiral. That was a real
+ * run, and the `find -type f` form is the fix for it.
+ *
+ * So the links are NOT handed to a recursive copier. Each one is found with
+ * lstat(), read with a single readlink() into a buffer we own, and recreated
+ * with a single symlink() into the staged tree. That is one readlink per link,
+ * with no traversal, no recursion into a link target, and no unbounded walk
+ * for a buggy server to leak on. readlink() is the call that leaks; calling it
+ * exactly 54 times is not the failure mode the OOM was.
+ *
+ * symlink() does not require its target to exist, so the links may be created
+ * in any order: AppKit.framework/Resources -> Versions/Current/Resources and
+ * Versions/Current -> C resolve at opendir time, not at creation time.
+ *
+ * The walk uses lstat and never stats a link, so it does not follow into a
+ * symlinked directory and cannot loop. Directories are created on demand with
+ * mkdir, and an existing destination link is replaced rather than skipped, so
+ * the transfer is idempotent across runs.
+ *
+ * ROLLBACK: DARLING_STAGE_SYMLINKS=0 stages regular files only, which is
+ * byte-for-byte the behaviour before this function existed. If a run ever
+ * reproduces the EIO/OOM, that one variable is the whole revert. */
+struct stage_symlinks_stats {
+    unsigned long found;
+    unsigned long created;
+    unsigned long failed;
+    unsigned long mkdirs;
+};
+
+static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
+                               struct stage_symlinks_stats *st) {
+    DIR *d = opendir(src);
+    struct dirent *de;
+
+    if (d == NULL) {
+        /* A directory that will not open here is not worth aborting for: the
+         * regular-file pass has already copied what it could, and a link we
+         * cannot reach is a link we would not have copied correctly either. */
+        return 0;
+    }
+
+    while ((de = readdir(d)) != NULL) {
+        char sp[2048], dp[2048], target[1024];
+        struct stat lst;
+
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+
+        snprintf(sp, sizeof(sp), "%s/%s", src, de->d_name);
+        snprintf(dp, sizeof(dp), "%s/%s", dst, de->d_name);
+
+        /* lstat, always: a stat here would follow a link and could walk into
+         * whatever it points at, including a loop. */
+        if (lstat(sp, &lst) < 0)
+            continue;
+
+        if (S_ISLNK(lst.st_mode)) {
+            ssize_t n = readlink(sp, target, sizeof(target) - 1);
+            st->found++;
+            if (n < 0) {
+                st->failed++;
+                printf("staging: readlink(%s) failed: %s\n", de->d_name,
+                       strerror(errno));
+                continue;
+            }
+            target[n] = '\0';
+            /* mkdir -p the parent, one level at a time, by hand: no shell, no
+             * recursion into anything, and the path is ours. */
+            {
+                char *slash = dp;
+                while ((slash = strchr(slash + 1, '/')) != NULL) {
+                    *slash = '\0';
+                    if (mkdir(dp, 0755) == 0)
+                        st->mkdirs++;
+                    *slash = '/';
+                }
+            }
+            unlink(dp); /* an existing link is replaced, not skipped */
+            if (symlink(target, dp) == 0)
+                st->created++;
+            else {
+                st->failed++;
+                printf("staging: symlink(%s) failed: %s\n", de->d_name,
+                       strerror(errno));
+            }
+            continue;
+        }
+
+        if (S_ISDIR(lst.st_mode)) {
+            /* Depth cap: the source trees are shallow (a framework is a
+             * handful of levels), and a cap costs one comparison and makes
+             * the walk impossible to hang on a cyclic bind mount. */
+            if (depth >= 12)
+                continue;
+            if (mkdir(dp, 0755) < 0 && errno != EEXIST)
+                continue;
+            stage_symlinks_walk(sp, dp, depth + 1, st);
+        }
+    }
+
+    closedir(d);
+    return 0;
+}
+
+static void stage_symlinks(const char *od, const char *rel) {
+    char src[1024], dst[1024];
+    struct stat st;
+    struct stage_symlinks_stats stats = {0, 0, 0, 0};
+    const char *flag = getenv("DARLING_STAGE_SYMLINKS");
+    int enabled = (flag == NULL || strcmp(flag, "0") != 0);
+
+    if (!enabled) {
+        printf("staging: symlinks OFF (DARLING_STAGE_SYMLINKS=0) -- regular"
+               " files only, the behaviour before the manifest transfer\n");
+        return;
+    }
+
+    snprintf(src, sizeof(src), "%s/%s", od, rel);
+    snprintf(dst, sizeof(dst), "%s/%s", LOCAL_OVERLAY, rel);
+
+    if (stat(src, &st) < 0)
+        return; /* same "not in the overlay" case stage_tree already reports */
+
+    if (mkdir(dst, 0755) < 0 && errno != EEXIST) {
+        printf("staging: %s: mkdir failed: %s\n", dst, strerror(errno));
+        return;
+    }
+
+    stage_symlinks_walk(src, dst, 0, &stats);
+    printf("staging: symlinks under %s: %lu found, %lu created, %lu failed\n",
+           rel, stats.found, stats.created, stats.failed);
 }
 
 static const char *build_dir(void) {
@@ -258,6 +411,11 @@ int main(void) {
                 memcpy(tree, t, len);
                 tree[len] = '\0';
                 stage_tree(od, tree);
+                /* Immediately after, and never inside stage_tree: the link
+                 * pass must be a separate, separately-disableable step, so
+                 * that reverting to regular-files-only is one variable and
+                 * not an edit. See the comment above stage_symlinks. */
+                stage_symlinks(od, tree);
             }
             if (sep == NULL) break;
             t = sep + 1;

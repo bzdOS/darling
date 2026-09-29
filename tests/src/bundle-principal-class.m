@@ -644,6 +644,84 @@ static void probe_framework_root(void)
 	[appKit release];
 }
 
+/* Does a message to nil survive in this guest?
+ *
+ * §5 of WORKAROUND-344.md cost a root run to a SIGSEGV that happened right
+ * after a method returned nil, and the obvious reading — that objc_msgSend
+ * here has no nil check, where in real ObjC sending to nil is a no-op that
+ * returns nil or zero — is a wall-sized claim and has never been tested. It
+ * is tested here, because if it is true then every idiomatic [nil whatever]
+ * in Chrome is a crash and the whole GUI effort is built on a false floor.
+ *
+ * So: the return type is varied on purpose. objc_msgSend's return path
+ * differs by type — a plain id is the same register either way, an integer
+ * is returned in the same register but zero-extended differently, and a
+ * struct larger than a pointer comes back in memory whose address the
+ * callee has to produce. A nil check written for the first case is not
+ * automatically right for the third, and only running all three says
+ * whether the check exists at all.
+ *
+ * Each message is preceded by a note() so that a crash names the line that
+ * caused it: without them the log would end at whichever call faulted, with
+ * nothing to say which of the four it was.
+ *
+ * Everything here is a constant expression on a known-nil object, so the
+ * compiler must not be allowed to fold it away. The results are printed,
+ * which is what keeps the sends.
+ */
+static id probe_nil_id(id target, const char *label)
+{
+	id r = [target description];
+	note("nilmsg: %s -> %s", label, r ? "an object" : "(nil)");
+	return r;
+}
+
+static NSInteger probe_nil_int(id target, const char *label)
+{
+	NSInteger r = [target hash];
+	note("nilmsg: %s -> %lld", label, (long long) r);
+	return r;
+}
+
+/* A real struct return, not an invented one. NSRange is two words, so it comes
+ * back differently from a pointer on every ABI that matters here, and
+ * -rangeOfString: is a declared Foundation method, so the send is one Chrome
+ * would actually make. A hand-rolled struct behind a made-up selector would
+ * test the compiler as much as the runtime. */
+static NSRange probe_nil_struct(id target, const char *label)
+{
+	NSRange r = [target rangeOfString: @"abc"];
+	note("nilmsg: %s -> {%lu, %lu}", label,
+	     (unsigned long) r.location, (unsigned long) r.length);
+	return r;
+}
+
+static void probe_nil_messages(void)
+{
+	step("does a message to nil survive here?");
+
+	id n = nil;
+	note("nilmsg: target = nil, four sends: id, NSInteger, struct, class pointer");
+
+	/* Through a volatile so the sends are really sent. */
+	volatile id v = n;
+
+	probe_nil_id((id) v, "id      -description");
+	probe_nil_int((id) v, "NSInteger -hash");
+	probe_nil_struct((id) v, "struct   -pair");
+
+	/* A message through a class pointer rather than an instance: objc_msgSend
+	 * takes the receiver differently here and this is the one Chrome's own
+	 * dispatch code leans on hardest. */
+	Class cls = Nil;
+	note("nilmsg: class pointer = %s", cls ? "a class" : "(nil)");
+	id made = [cls alloc];
+	note("nilmsg:   +alloc on a nil class -> %s", made ? "an object" : "(nil)");
+
+	note("nilmsg: all sends returned; a real ObjC answers nil/0 and does not"
+	     " fault, so a clean pass here means the nil check exists");
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -704,6 +782,12 @@ int main(void)
 	 * the answer it managed to reach: the separator for WORKAROUND-344.md
 	 * §4's two hypotheses. */
 	probe_framework_root();
+
+	/* And the question §5's crash was read as implying. Ahead of the
+	 * framework scan, not after it: if a message to nil does fault here,
+	 * this process dies and the scan below never prints anything, which
+	 * would look like the scan failing rather than like this dying. */
+	probe_nil_messages();
 
 	step("done");
 	return 0;
