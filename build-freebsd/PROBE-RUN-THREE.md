@@ -1,8 +1,7 @@
 # PROBE-RUN-THREE — the window probe, run with a working crash path
 
 Base: `pr-arm64` = `1fd7868aa` (the merged `task/crash-diagnostics`).
-Machine: as documented in `docs/CONTEXT-build-185.md`. One root run, the one
-this task is about.
+One root run, the one this task is about.
 
 **Short answer: the crash is not where the last two analyses put it. It is
 `dyld::loadPhase6` faulting on its own stack — a 33,312-byte frame written into
