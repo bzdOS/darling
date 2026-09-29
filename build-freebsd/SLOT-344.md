@@ -54,6 +54,27 @@ that the fixture did not change the phenomenon:
 
 No fixture directory, and no real one, breaks the rule.
 
+> **Correction, 30 September.** The direction of the window in this section was
+> read from the wrong end, and it matters more than the threshold does. **The
+> records come back from the HEAD of the listing and the tail is what gets
+> dropped** — every successful call in the table above begins with
+> `d_name="."`, i.e. index 0, and nothing has ever been returned from the back.
+> Reading the shortfall as "the entries from index 7 onward" is the same
+> constant counted from the wrong end; §1's own numbers do not distinguish the
+> two, which is why it went unnoticed until a fixture was built on the wrong
+> reading and returned zero of what it needed.
+>
+> **The dropped tail is not a constant either.** `N−7` describes these
+> fixtures, whose names are all six characters, and is wrong on real
+> directories: `Contents` with 11 entries returned 5 (six dropped), and
+> `Backends` with 10 returned 4 (six dropped), while every `t` fixture here
+> drops exactly seven. Only the direction is a law; the residual count is not
+> pinned.
+>
+> The canonical statement, with the runs that measured it, is
+> `WORKAROUND-344.md` §2 and §4. Build fixtures against that, not against
+> this section's shorthand.
+
 ### The returned bytes, which are a second finding
 
 The successes are exactly linear in the entry count, and the increment is one
