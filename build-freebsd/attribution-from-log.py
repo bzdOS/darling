@@ -263,6 +263,21 @@ def analyse(text, entry=TRIE_WALK_ENTRY, span=0x400):
             how = tag
             break
 
+    # The handler prints two different numbers and they are not
+    # interchangeable. `rip=` is where the CPU was executing; `addr=` is the
+    # address the faulting access named, and for a data fault that is the one
+    # that locates the bug. Taking rip first and then reporting "fault address
+    # not found" on a log that printed addr= in plain sight was this tool
+    # misreading its own input, so both are read and both are reported.
+    si_addr = None
+    m = re.search(r"\bat addr=(0x[0-9a-fA-F]+)", text)
+    if m:
+        si_addr = int(m.group(1), 16)
+    rip_value = None
+    m = RIP.search(text)
+    if m:
+        rip_value = int(m.group(1), 16)
+
     m = LABELLED.search(text)
     if m:
         offset, how = int(m.group(1), 16), "symbolised label"
@@ -290,6 +305,21 @@ def analyse(text, entry=TRIE_WALK_ENTRY, span=0x400):
             offset, how = runtime - entry, "static address in range"
     fault = (offset + entry) if offset is not None else None
 
+    # si_addr is the better candidate when rip could not be placed: for a data
+    # fault it is the address that actually faulted. Tried second so a log that
+    # DOES place its rip keeps the answer it had.
+    if offset is None and si_addr is not None:
+        if entry <= si_addr < entry + span:
+            offset, how, runtime = si_addr - entry, "faulting address (addr=) in range", si_addr
+        elif DYLD_BASE.search(text):
+            base = int(DYLD_BASE.search(text).group(1), 16)
+            static = si_addr - base
+            if 0 <= static < span:
+                offset, how = static, ("faulting address 0x%x - dyld base 0x%x"
+                                       % (si_addr, base))
+    if offset is None and si_addr is not None:
+        how = (how or "") + "; addr=0x%x does not fall in trieWalk either" % si_addr
+
     # The last image loaded before the complaint (or the end of the log), which
     # is the best available signal for whose exports were being searched. It is
     # a proxy, not a proof, and is reported as such.
@@ -308,6 +338,10 @@ def analyse(text, entry=TRIE_WALK_ENTRY, span=0x400):
         "fault_from": how,
         "offset": offset,
         "image": image,
+        "si_addr": si_addr,
+        "rip": rip_value,
+        "entry": entry,
+        "span": span,
         "line": anchor[1] if anchor else None,
         "meaning": anchor[2] if anchor else None,
     }
@@ -321,8 +355,17 @@ def verdict(r):
                 "dyld2 logged and returned NULL rather than faulting" %
                 (img, where, r["terminal_size"] or 0))
     if r["fault"] is None:
-        return ("%s | fault address not found in this log | need the mldr backtrace; "
-                "the absence of the loader's complaint already rules out 1848" % img)
+        # Say what the log does NOT support. The image below is only the last
+        # thing dyld announced, and leading with it reads as an accusation --
+        # which is how a crash with nothing to do with dyld2's trie walk ended
+        # up attributed to whichever dylib happened to load last.
+        return ("not a trieWalk fault: the loader printed no bounds complaint, "
+                "and neither rip (%s) nor the faulting address (%s) falls in "
+                "trieWalk's range 0x%x-0x%x. The last image the loader "
+                "announced is %s, which is NOT evidence that it owns the fault."
+                % ("0x%x" % r["rip"] if r["rip"] is not None else "absent",
+                   "0x%x" % r["si_addr"] if r["si_addr"] is not None else "absent",
+                   r["entry"], r["entry"] + r["span"], img))
     if r["line"]:
         return ("%s | ImageLoader.cpp:%s (+0x%x, %s) | no bounds complaint was printed, "
                 "so this is one of the reads dyld2 does not check: 1837, 1862 or 1876"
@@ -446,7 +489,11 @@ def main(argv):
     if r["terminal_size"] is not None:
         print("  terminalSize    : 0x%x" % r["terminal_size"])
     print("fault address     : %s" % ("0x%x (%s)" % (r["fault"], r["fault_from"])
-                                       if r["fault"] else "not found"))
+                                       if r["fault"] else "not inside trieWalk"))
+    print("  handler si_addr  : %s" % ("0x%x" % r["si_addr"] if r["si_addr"] is not None
+                                       else "not printed"))
+    print("  handler rip      : %s" % ("0x%x" % r["rip"] if r["rip"] is not None
+                                       else "not printed"))
     if r["offset"] is not None:
         print("  offset in trieWalk: +0x%x" % r["offset"])
         print("  mapped           : ImageLoader.cpp:%s -- %s" % (r["line"], r["meaning"]))
