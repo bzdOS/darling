@@ -494,6 +494,141 @@ static void probe_directory_reading(NSBundle *bundle)
 	closedir(dp);
 }
 
+/* The separator for the two hypotheses WORKAROUND-344.md §4 could not tell
+ * apart, in one run and without a seat.
+ *
+ * The hypothesis is that +[NSDisplay init] fails because CF cannot determine
+ * the framework's LAYOUT: _CFBundleCreateQueryTableAtPath opens the framework
+ * ROOT and iterates it looking for Resources / Contents / Support Files,
+ * matching DT_DIR or DT_LNK (CFBundle_Resources.c:255-266). AppKit.framework/
+ * holds three entries — AppKit, Resources, Versions — five with . and ..,
+ * which is below the eight-entry line, so foundResources is never set.
+ *
+ * The other candidate is the symlink: Resources is a symlink to
+ * Versions/Current/Resources, and the scan of Resources/Backends has to
+ * resolve it.
+ *
+ * These are two different directories and the guest answers them differently,
+ * so one readdir of each separates them:
+ *
+ *   root answers 0 entries, Backends/ answers 4  ->  the root scan is the
+ *       wall, and padding the framework root is the fix;
+ *   the root answers                              ->  the hypothesis is
+ *       wrong, and neither padding nor anything downstream of the count is
+ *       where this goes. Stop.
+ *
+ * The root is also read twice, once through the plain path and once through
+ * the AppKit.framework/Versions/C alias, because they are the same directory
+ * reached differently and a difference between them would be a finding in its
+ * own right rather than a duplicate line.
+ *
+ * Names, inodes and types are printed, exactly as probe_directory_reading does
+ * for Contents/: a d_fileno of zero would be a different fault again, and the
+ * DT_LNK of Resources is the one entry the layout detector actually accepts. */
+static void list_dir(const char *label, NSString *path)
+{
+	note("rootscan: %s -- %s", label, [path UTF8String]);
+	DIR *dp = opendir([path UTF8String]);
+	if (dp == NULL) {
+		note("rootscan:   opendir FAILED (errno %d: %s)", errno, strerror(errno));
+		note("rootscan:   ^ the guest cannot open this path at all");
+		return;
+	}
+	{
+		int entries = 0;
+		struct dirent *ent;
+		while ((ent = readdir(dp)) != NULL) {
+			entries++;
+			note("rootscan:   d_name=%-16s d_fileno=%-10ld d_namlen=%-3u d_type=%d%s",
+			     ent->d_name, (long) ent->d_fileno, (unsigned) ent->d_namlen,
+			     (int) ent->d_type,
+			     ent->d_fileno == 0 ? "   <- inode NOT filled in" : "");
+		}
+		note("rootscan:   %d entr%s returned by readdir%s",
+		     entries, entries == 1 ? "y" : "ies",
+		     entries == 0 ? "  <- EMPTY from the guest's side" : "");
+		/* The question the наряд asks, answered in the log rather than
+		 * by whoever reads it. The layout detector only ever needs three
+		 * names out of this listing; saying whether they were visible is
+		 * the whole point of the run. */
+		note("rootscan:   %s: the layout detector's scan%s see Resources, "
+		     "Contents or Support Files",
+		     entries == 0 ? "NO" : "may or may not",
+		     entries == 0 ? " CANNOT " : " ");
+	}
+	closedir(dp);
+}
+
+static void probe_framework_root(void)
+{
+	step("separating the two hypotheses: framework root vs Resources/Backends");
+
+	/* The framework root, derived from the one path this probe has already
+	 * proved it can open: the backend bundle's own path, cut at
+	 * "/AppKit.framework".
+	 *
+	 * It is derived rather than looked up because the obvious lookup is
+	 * +[NSBundle bundleWithClass:], and that is not implemented in this
+	 * tree: the first version of this function called it, got nil back,
+	 * and then sent a message to the nil bundle and took the guest down
+	 * with SIGSEGV before printing a single directory. A separator that
+	 * dies before it separates anything is worse than no separator, so
+	 * this uses only calls the rest of this probe already makes. */
+	static NSString *kFramework = @"/System/Library/Frameworks/AppKit.framework";
+	NSString *base = nil;
+	{
+		NSString *backend = [NSString stringWithUTF8String: kBackendRelativePath];
+		NSRange cut = [backend rangeOfString:@"/AppKit.framework"];
+		if (cut.location != NSNotFound)
+			base = [backend substringToIndex:cut.location + cut.length];
+	}
+	if (base == nil || [base length] == 0) {
+		base = kFramework;
+		note("rootscan: could not derive the framework root from the backend"
+		     " path; using the literal %s", [base UTF8String]);
+	} else {
+		note("rootscan: framework root, derived from the backend path: %s",
+		     [base UTF8String]);
+	}
+
+	list_dir("framework root (the directory the layout scan reads)", base);
+	list_dir("same root via Versions/C",
+	         [base stringByAppendingPathComponent:@"Versions/C"]);
+	list_dir("Resources/Backends (the directory the backend list comes from)",
+	         [base stringByAppendingPathComponent:@"Resources/Backends"]);
+	list_dir("Resources/Backends via Versions/C",
+	         [base stringByAppendingPathComponent:@"Versions/C/Resources/Backends"]);
+
+	/* And the question the wall actually asks, through the API rather than
+	 * through libc. bundleWithPath: is the same call the rest of this probe
+	 * makes and returns, so unlike bundleWithClass: it is known to work
+	 * here. If it still hands back nil, that is printed and the calls that
+	 * follow it are skipped rather than sent to nil. */
+	NSBundle *appKit = [NSBundle bundleWithPath: base];
+	if (appKit == nil) {
+		note("rootscan: bundleWithPath(%s) = nil; skipping the API half,"
+		     " the four readdirs above are the separator", [base UTF8String]);
+		return;
+	}
+	NSArray *paths = [appKit pathsForResourcesOfType: @"backend"
+	                                    inDirectory: @"Backends"];
+	note("rootscan: pathsForResourcesOfType:@\"backend\" inDirectory:@\"Backends\""
+	     " -> %lu path(s)%s",
+	     (unsigned long) [paths count], [paths count] == 0 ? "  <- the wall" : "");
+	for (NSString *p in paths)
+		note("rootscan:   %s", [p UTF8String]);
+	[paths release];
+
+	note("rootscan: reading the same thing a second time, to see whether the"
+	     " query table is cached across calls");
+	paths = [appKit pathsForResourcesOfType: @"backend" inDirectory: @"Backends"];
+	note("rootscan:   -> %lu path(s) on the second call",
+	     (unsigned long) [paths count]);
+	[paths release];
+
+	[appKit release];
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -549,6 +684,11 @@ int main(void)
 			note("principalClass (2nd call) = %s", principal2 ? class_getName(principal2) : "(nil)");
 		}
 	}
+
+	/* Last, and after principalClass, so a run that dies earlier still keeps
+	 * the answer it managed to reach: the separator for WORKAROUND-344.md
+	 * §4's two hypotheses. */
+	probe_framework_root();
 
 	step("done");
 	return 0;
