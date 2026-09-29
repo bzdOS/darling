@@ -157,16 +157,43 @@ $DARLING_OVERLAY/System/Library/Frameworks/AppKit.framework/Versions/C/Resources
 so `-[NSBundle principalClass]` returning nil for a bundle that has it is the
 next wall, and it is a Foundation/NSBundle question, not a dyld one.
 
-## 4. A bug this run found in its own new code
+## 4. Two bugs this run found in its own new code
 
 Worth recording because the first version of the probe **reported a false
-pass**. The loop treated any `mincore()` failure as "occupied", and then used
-`occupied_at == 0` to mean "clean" — but a failure on the *first* page also
-leaves `occupied_at == 0`, so `ENOMEM` on page 0 printed `is free`. The fixed
-version distinguishes the two: `ENOMEM` means unmapped means free, and the
-message says so (`no vm entry under it at all`). Run №4a — the one whose output
-above first said `is free` — therefore proved nothing, and its result is kept
-only because run №4b re-ran it with the corrected binary.
+pass**, twice, for the same reason: a value was doing two jobs.
+
+The first one: the loop treated any `mincore()` failure as "occupied", and
+then used `occupied_at == 0` to mean "clean" — but a failure on the *first*
+page also leaves `occupied_at == 0`, so `ENOMEM` on page 0 printed
+`is free`. The fixed version distinguishes the two: `ENOMEM` means unmapped
+means free, and the message says so (`no vm entry under it at all`). Run №4a
+— the one whose output above first said `is free` — therefore proved nothing,
+and its result is kept only because run №4b re-ran it with the corrected
+binary.
+
+The second one is the same mistake one level up: after the `ENOMEM` fix,
+`occupied_at` was still *both* the offset of a hit *and* the "nothing found"
+sentinel, so a resident page at **offset 0** — the first page of the range,
+the one at `stack_top - size`, which is exactly the mapping `MAP_FIXED` would
+clobber — left `occupied_at == 0` and printed `is free` while walking into
+`MAP_FIXED`. The probe now carries a separate `bool occupied`, and the
+`is free` branch is `if (!occupied)`. The FATAL line also prints the offending
+page and the `errno` that stopped the probe, because "occupied" and "the probe
+itself failed" are different events with the same fix.
+
+Driven on purpose over a range this test owns (`stack_top` is fixed by the
+commpage, so the real probe cannot be pointed at a synthetic one):
+
+```
+[PASS] never-mapped range       -> FREE
+...  old sentinel version: FREE (offset 0)
+[PASS] page-0-resident (new)    -> OCCUPIED
+[PASS] the old version reported FREE here, which is the bug
+[PASS] mid-range resident       -> OCCUPIED
+```
+
+The old copy of the loop is in the same program, so the test fails if it ever
+stops being able to tell the difference.
 
 ## 5. Not verified, not done
 
