@@ -13,9 +13,43 @@
  * freebsd_syscall_trap.c's own numbering. DEFINED: 0 read, 1 write, 3 close,
  * 39 getpid, 41 socket, 42 connect, 46 sendmsg, 47 recvmsg, 54 setsockopt,
  * 228 clock_gettime, 202 futex. NOT DEFINED and therefore unusable here:
- * 7, 20, 22, 23, 35, 48, 49, 50, 51, 53, 230, 270, 271, 437. Nothing in this
- * file names any of the second list, by call or in prose, so a grep for them
- * comes back empty.
+ * 7, 20, 22, 23, 35, 48, 49, 50, 51, 53, 230, 270, 271, 437. No CALL in this
+ * file reaches any of the second list — the recipe in §13 of WORKAROUND-344.md
+ * greps the binary for the wrappers that would, and it comes back empty. This
+ * header now NAMES 271 in prose, which is the correction below and not a
+ * violation of that rule: the rule is about which calls are made, and the
+ * correction is precisely that the call being made is not the one named here
+ * before.
+ *
+ * 2026-09-30 — THE CLAIM THAT WAS WRONG, AND WHY THE PROBE NOW CHECKS INSTEAD
+ * OF ASSUMING. This file used to say the lock legs run "sem_wait (over 202)"
+ * and to name 271 as unusable, which cannot both be true. The binary settles
+ * it, and the guest's own semaphore wait is NOT 202:
+ *
+ *   llvm-objdump --macho --disassemble \
+ *       $DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib
+ *   _sem_wait:  movl $0x10f, %eax ; callq __darling_bsd_syscall
+ *
+ * 0x10f is 271. So the leg is a 271 leg, 271 is on this file's own NOT-DEFINED
+ * list, and freebsd_syscall_trap.c defines neither a Linux 271 nor a macOS 271
+ * (its Linux set is 0 1 2 3 4 5 6 8 9 10 11 13 14 16 17 18 21 32 33 39 41 42
+ * 44 45 46 47 54 60 61 62 72 74 75 77 89 96 131 137 138 158 186 202 213 217
+ * 228 231 232 233 257 258 262 268 269 283 284 286 287 291 302 309 318; its
+ * macOS set is 1 2 3 4 5 6 20 24 30 33 39 41 42 47 48 54 73 74 81 82 90 92 93
+ * 97 98 101 102 104 106 116 120 121 133 197 199 202 339). A grep of the SOURCE
+ * can never have caught this: the number lives in an installed dylib, behind
+ * __darling_bsd_syscall, and llvm-nm of this binary shows only _sem_wait. The
+ * recipe in §13 of WORKAROUND-344.md therefore verifies the primitive at the
+ * binary level, and this file states what it verified rather than what it
+ * intended.
+ *
+ * The second defect that let this hide: every wait below used to be called as a
+ * bare statement. `sem_wait(s);` discards rc AND errno, so a call that was
+ * REFUSED came back at once and read as a thread that woke up by itself — which
+ * is exactly what the 13:1x log showed ("REACHED it, and it RETURNED without
+ * blocking") and what could not be told apart from a real wake. Every wait here
+ * now records rc, errno and the 228-measured duration, and a refused wait is
+ * reported as a refusal. It is never counted as parking, and never classified.
  *
  * Three things about the guest shape everything below.
  *
@@ -103,6 +137,60 @@ struct lane_report {
 	volatile int control_desc_returned;  /* same, for the main-thread control */
 };
 
+/* ONE WAIT'S WHOLE OUTCOME.
+ *
+ * "the call came back" and "the thread came back because it was released" are
+ * different facts, and a probe that cannot tell them reports a refusal as a
+ * wake. The three numbers below are the difference:
+ *
+ *   rc      - what the wait returned. rc < 0 is a REFUSAL, full stop: the wait
+ *             did not happen, and nothing about parking or waking can be read
+ *             off it.
+ *   err     - errno, sampled the instant the call returned, because errno is
+ *             the only thing that says WHICH refusal. ENOSYS in particular is
+ *             the difference between "this guest has no such wait" and "this
+ *             wait was contended and lost".
+ *   ms      - how long the call was out, by 228 on both sides of it. A wait
+ *             that parks and is released costs RELEASE_MS plus the post; a wait
+ *             that comes straight back costs about nothing. The duration is the
+ *             measurement, and it is taken INSIDE the calling thread because a
+ *             flag set by another thread can only ever bracket the call from
+ *             outside, which is the inference that produced the last false
+ *             finding.
+ *
+ * `parked` stays a flag rather than a derived field: it is the observation that
+ * the call was STILL out RELEASE_MS later with nobody having posted, which is
+ * the only claim about the kernel that this design can make.
+ */
+struct wait_result {
+	int rc;
+	int err;
+	long entered_ms;
+	long left_ms;
+	volatile int parked;
+};
+
+static struct wait_result wr;
+
+static void wr_reset(struct wait_result *r)
+{
+	r->rc = 0;
+	r->err = 0;
+	r->entered_ms = 0;
+	r->left_ms = 0;
+	r->parked = 0;
+}
+
+/* A refusal, a straight-back, and a park are three different words and the
+ * verdict reads all three differently. Printed by every wait site so no leg can
+ * be summarised as "came back". */
+static const char *wait_word(const struct wait_result *r)
+{
+	if (r->rc < 0) return "REFUSED";
+	if (r->parked) return "PARKED";
+	return "RETURNED-NO-PARK";
+}
+
 static struct lane_report rep;
 
 /* --- the bound. 228 is exported by the guest's libsystem_c and defined in the
@@ -113,6 +201,38 @@ static long now_ms(void)
 
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
 	return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* THE ONLY sem_wait CALL SITE IN THIS FILE.
+ *
+ * That is the point of the wrapper, not tidiness: the previous version called
+ * sem_wait as a bare statement in three places and every one of them threw away
+ * rc and errno, which is how a refused wait came to be reported as a thread
+ * that woke by itself. One call site means the outcome cannot be forgotten.
+ */
+static void timed_wait(sem_t *s, struct wait_result *r)
+{
+	wr_reset(r);
+	r->entered_ms = now_ms();
+	errno = 0;
+	r->rc = sem_wait(s);
+	r->err = errno;
+	r->left_ms = now_ms();
+}
+
+/* How long the call was out, in the caller's own words. Three different states
+ * and three different words, because "no clock" and "still out" are not the
+ * same fact and only one of them is a measurement: a call that has NOT come
+ * back has no duration yet, and printing a zero or a "no clock" for it would
+ * report a missing measurement as if it were a fast one. */
+static void wait_ms(const struct wait_result *r, char *buf, size_t n)
+{
+	if (r->left_ms != 0 && r->entered_ms != 0)
+		snprintf(buf, n, "%ldms", r->left_ms - r->entered_ms);
+	else if (r->parked)
+		snprintf(buf, n, "still out");
+	else
+		snprintf(buf, n, "no clock");
 }
 
 /* Bounded wait for a flag. Bounded, never forever, and it never sleeps: a
@@ -174,10 +294,10 @@ static void *main_poster(void *p)
  * So: reached says the thread executed up to the call. returned says the call
  * came back. Parked is reached && !returned, and that is the only one of the
  * three that means "this thread is waiting in the kernel". */
-static void do_lock(sem_t *s)
+static void do_lock(sem_t *s, struct wait_result *r)
 {
 	rep.lock_reached = 1;     /* set BEFORE the call: "reached" is the claim */
-	sem_wait(s);              /* parks here and is never released... */
+	timed_wait(s, r);          /* parks here and is never released... */
 	rep.lock_returned = 1;    /* ...so reaching THIS line is a finding */
 }
 
@@ -200,7 +320,7 @@ static void do_descriptor(int sock)
 
 static void *lock_thread(void *p)
 {
-	do_lock((sem_t *)p);
+	do_lock((sem_t *)p, &wr);
 	return NULL;
 }
 
@@ -301,6 +421,8 @@ int main(void)
 {
 	sem_t lock;
 	pthread_t tl, td;
+	struct wait_result wr_control, wr_main;
+	char msbuf_control[32], msbuf_lock[32], msbuf_main[32];
 	int peer, peer_lane, control_lock, control_desc, threads_ok = 1;
 	int peers_ok;                    /* BOTH connections, not either */
 	int m_released_ok = 0;           /* main came back from the RELEASE, not the net */
@@ -349,10 +471,17 @@ int main(void)
 	sem_init(&lock, 0, 0);
 	sem_post(&lock);                 /* this thread releases its own */
 	rep.lock_reached = 0;
-	do_lock(&lock);
+	do_lock(&lock, &wr_control);
 	control_lock = rep.lock_reached;
-	printf("  %-6s %-12s %s\n", "main", "sem_wait",
-	       control_lock ? "RETURNED" : "did not return");
+	wait_ms(&wr_control, msbuf_control, sizeof(msbuf_control));
+	/* The control now says what the wait DID, not merely that it was reached.
+	 * Its job is to answer "does this guest's semaphore wait work at all",
+	 * and a control that only records "reached" answers that question even
+	 * when the wait was refused outright. */
+	printf("  %-6s %-12s %s rc=%d errno=%s over %s\n", "main", "sem_wait",
+	       wait_word(&wr_control), wr_control.rc,
+	       wr_control.err ? strerror(wr_control.err) : "0",
+	       msbuf_control);
 
 	control_desc = 0;
 	if (peers_ok) {
@@ -389,18 +518,26 @@ int main(void)
 	if (threads_ok) {
 		/* leg 1, the lane's question: did it PARK, and did it come BACK.
 		 *
-		 * The park is claimed only if the call is still out RELEASE_MS after the
-		 * reached flag, because a sem_wait in this guest can return
-		 * success-without-sleeping and a flag alone cannot tell that from a
-		 * thread that parked. Then the post, and the return. */
+		 * The park is observed two ways now, because the previous version had
+		 * only the outside one. From outside: the call was still out RELEASE_MS
+		 * after the reached flag, with nobody having posted. From inside, in the
+		 * thread that made the call: its own rc, errno and 228-measured
+		 * duration. Either alone can lie — a refused call looks like a wake
+		 * from outside, and a duration cannot say whether a return was caused by
+		 * a post — so the leg prints both and the verdict refuses to classify if
+		 * rc is negative. */
 		long t0;
 		wait_flag(&rep.lock_reached);
 		spin_ms(RELEASE_MS);
 		rep.lock_parked = (rep.lock_reached && !rep.lock_returned);
-		printf("  %-6s %-12s %s\n", "thread", "sem_wait",
+		wr.parked = rep.lock_parked;
+		wait_ms(&wr, msbuf_lock, sizeof(msbuf_lock));
+		printf("  %-6s %-12s %s rc=%d errno=%s over %s%s\n", "thread",
+		       "sem_wait",
 		       !rep.lock_reached ? "never reached the wait"
-		       : rep.lock_returned ? "REACHED it, and it RETURNED without blocking"
-		                          : "REACHED it, and PARKED (still parked 2s in)");
+		       : wait_word(&wr), wr.rc,
+		       wr.err ? strerror(wr.err) : "0", msbuf_lock,
+		       rep.lock_parked ? " (still parked 2s in)" : "");
 
 		t0 = now_ms();
 		sem_post(&lock);              /* the release, and the only one */
@@ -408,6 +545,13 @@ int main(void)
 		if (!rep.lock_returned)
 			printf("  %-6s %-12s %s\n", "thread", "after post",
 			       "DID NOT RETURN within 3s of the release");
+		else if (wr.rc < 0)
+			/* A refused wait cannot be "released by" anything: the post went to
+			 * a semaphore this guest never entered. Saying "returned after the
+			 * release" here would be the same false finding one level up. */
+			printf("  %-6s %-12s returned REFUSED (%s) — the release was"
+			       " never waited on\n", "thread", "after post",
+			       wr.err ? strerror(wr.err) : "no errno");
 		else if (t0 == 0)
 			printf("  %-6s %-12s %s\n", "thread", "after post",
 			       "RETURNED after the release (no clock to measure it by)");
@@ -430,16 +574,25 @@ int main(void)
 				threads_ok = 0;
 			} else {
 				rep.m_reached = 1;        /* BEFORE the wait: "reached" is the claim */
-				sem_wait(&lock_m);        /* main blocks for real */
+				timed_wait(&lock_m, &wr_main);   /* main blocks for real */
 				rep.m_returned = 1;       /* reaching THIS line is the answer */
+				wr_main.parked = (rep.m_reached && !rep.m_returned);
 				pthread_detach(tp);
-				/* Three words, not one: "returned" alone cannot say WHICH post
-				 * woke main, and a probe that cannot tell its own release from
-				 * its own safety net cannot be used to judge a release. */
-				printf("  %-6s %-12s %s\n", "main", "sem_wait",
-				       rep.m_rescued ? "RETURNED, but only after the watchdog post"
+				wait_ms(&wr_main, msbuf_main, sizeof(msbuf_main));
+				/* Four words, not one. "returned" alone cannot say WHICH post woke
+				 * main; and if the wait was refused, no post woke it because no
+				 * wait was ever entered — which is a different fact again, and the
+				 * 13:1x log printed it as "the poster never fired the release",
+				 * which named the poster for a refusal that happened before it. */
+				printf("  %-6s %-12s %s rc=%d errno=%s over %s\n", "main",
+				       "sem_wait",
+				       wr_main.rc < 0 ? "REFUSED — no wait was entered"
+				       : wr_main.parked ? "PARKED"
+				       : rep.m_rescued ? "RETURNED, but only after the watchdog post"
 				       : rep.m_released ? "RETURNED from the release"
-				       : "RETURNED, but the poster never fired the release");
+				       : "RETURNED, but the poster never fired the release",
+				       wr_main.rc, wr_main.err ? strerror(wr_main.err) : "0",
+				       msbuf_main);
 			}
 		}
 
@@ -457,33 +610,60 @@ int main(void)
 	puts("");
 	/* Main's leg has TWO posts, so "main returned" and "the release worked" are
 	 * two facts. Reading only the first is how a leg would claim the main thread
-	 * came back when what actually woke it was the net under the probe. */
-	m_released_ok = (rep.m_returned && !rep.m_rescued);
+	 * came back when what actually woke it was the net under the probe. A third
+	 * fact now sits beside them: a REFUSED wait was never entered, so no post
+	 * could have woken it and m_released_ok must not be read off it. */
+	m_released_ok = (rep.m_returned && !rep.m_rescued && wr_main.rc == 0);
 	puts("VERDICT");
 	if (!threads_ok) {
 		puts("  (unknown) a thread could not be created, so nothing was measured.");
 	} else if (!control_lock) {
 		puts("  (unknown) the main-thread control failed, so the lane has no clean");
 		puts("            baseline and its result means nothing.");
+	} else if (wr_control.rc < 0) {
+		/* The control refused on a semaphore that was ALREADY POSTED, so there
+		 * was no contention, no parking and nothing to release: this guest's
+		 * semaphore wait does not exist as far as the control can tell. That
+		 * names the primitive and stops the run, because a lane measured with a
+		 * primitive that is not there measures nothing. This is a REFUSAL
+		 * status, and it is deliberately NOT a classification: the rubric's A/B
+		 * are both statements about parking and waking, and neither can be made
+		 * from a call that was refused. */
+		printf("  (refused) the main-thread control's sem_wait was REFUSED"
+		       " (rc=%d errno=%s) on an already-posted semaphore, so this guest"
+		       " has no working semaphore wait at all.\n", wr_control.rc,
+		       wr_control.err ? strerror(wr_control.err) : "0");
+		puts("            Nothing was parked and nothing was released, so neither (A)");
+		puts("            nor (B) can be claimed: the lane's legs need a wait that");
+		puts("            exists. Instrument verdict, not a lane verdict.");
+	} else if (wr_main.rc < 0) {
+		printf("  (refused) main's contended sem_wait was REFUSED (rc=%d errno=%s),"
+		       " so the release under test was never waited on and says nothing"
+		       " about the wake path.\n", wr_main.rc,
+		       wr_main.err ? strerror(wr_main.err) : "0");
+		puts("            The lane's legs need a wait that exists; they do not here.");
 	} else if (rep.lock_returned && !rep.lock_parked) {
-		/* Came straight back without ever parking: the trap's own documented
-		 * divergence, so the release measured nothing. Stands ABOVE the released
-		 * classification below, because a leg that never blocked cannot be used
-		 * to say anything about being woken. */
-		puts("  (finding) the lock leg reached sem_wait and sem_wait RETURNED");
-		puts("  without blocking. Nothing is wrong with the thread and nothing is");
-		puts("  proved about it: the trap documents success-without-sleeping for a");
-		puts("  mismatched futex value, so this leg did not test parking at all. The");
-		puts("  lane is OPEN and this is why.");
+		/* Came straight back without ever parking. The reason is now a
+		 * measurement rather than an inference: the call site printed its rc,
+		 * errno and its own duration, so this branch can say which of the two
+		 * things it is — a success that did not sleep (the trap's documented
+		 * divergence) or something else — instead of asserting the first. */
+		printf("  (finding) the lock leg reached sem_wait and it came back in %s"
+		       " with rc=%d errno=%s, having never parked.\n", msbuf_lock, wr.rc,
+		       wr.err ? strerror(wr.err) : "0");
+		puts("  The release measured nothing: there was no wait to release. The");
+		puts("  lane is OPEN and this is why. (rc==0 here is the trap's documented");
+		puts("  success-without-sleeping divergence; rc<0 would have been caught");
+		puts("  by the branch above, so this branch is that case only.)");
 	} else if (rep.lock_parked) {
 		/* The released legs need no peer, so the lane is classified HERE, before
 		 * the peer-gated rows, and the two legs together say which of two very
 		 * different things is broken. */
 		if (!rep.lock_returned && !m_released_ok) {
 			puts("  (A) NEITHER a spawned thread nor the main thread came back from a");
-			puts("  RELEASED 202 wait, though both parked. Parking works and the");
-			puts("  release does not, so this is NOT about guest threads: it is the");
-			puts("  wake path. The lane closes on the waiter side.");
+			puts("  RELEASED semaphore wait, though both parked. Parking works and");
+			puts("  the release does not, so this is NOT about guest threads: it is");
+			puts("  the wake path. The lane closes on the waiter side.");
 		} else if (!rep.lock_returned) {
 			puts("  (A) the main thread came back from a released BLOCKING wait and a");
 			puts("  SPAWNED thread did not. The wake path works and the spawned thread");
@@ -508,21 +688,22 @@ int main(void)
 		 * lock_returned says it is true. Reached + returned is NOT parked, and
 		 * saying so here is how this note would have lied. */
 		if (rep.lock_reached && rep.lock_returned) {
-			puts("  The lock leg reached sem_wait and it RETURNED without blocking, so");
-			puts("  nothing is claimed about parking: the word would be a lie here.");
+			printf("  The lock leg reached sem_wait and it came back in %s with"
+			       " rc=%d, having never parked, so nothing is claimed about"
+			       " parking: the word would be a lie here.\n", msbuf_lock,
+			       wr.rc);
 		} else if (rep.lock_reached) {
-			puts("  The lock leg alone says the thread reached a 202 wait and parked");
-			puts("  there; nothing more is claimed.");
+			puts("  The lock leg alone says the thread reached its semaphore wait");
+			puts("  and parked there; nothing more is claimed.");
 		} else {
 			puts("  The lock leg did not even reach the wait, which is a liveness");
 			puts("  result on its own.");
 		}
 	} else if (rep.lock_returned) {
-		puts("  (finding) the lock leg reached sem_wait and sem_wait RETURNED");
-		puts("  without blocking. Nothing is wrong with the thread and nothing is");
-		puts("  proved about it: the trap documents success-without-sleeping for a");
-		puts("  mismatched futex value, so this leg did not test parking at all. The");
-		puts("  lane is OPEN and this is why.");
+		printf("  (finding) the lock leg reached sem_wait and it came back in %s"
+		       " with rc=%d, having never parked, so the release measured"
+		       " nothing.\n", msbuf_lock, wr.rc);
+		puts("  The lane is OPEN and this is why.");
 	} else if (!control_desc) {
 		/* The control's descriptor leg did not come back either, so it was the
 		 * PEER that was silent, not the thread. Calling that (B) would name the
@@ -532,10 +713,10 @@ int main(void)
 		puts("            the peer was the thing that failed to answer. The lane's");
 		puts("            descriptor result measures the peer's silence, not a thread.");
 	} else if (rep.lock_reached && rep.desc_returned) {
-		puts("  (none) one thread reached a 202 wait it was never woken from, and");
-		puts("  another came back from a released descriptor wait. Guest blocking");
-		puts("  waits work on spawned threads, so the window probe's symptom is NOT");
-		puts("  about them and the shim layer stays open.");
+		puts("  (none) one thread reached a semaphore wait it was never woken");
+		puts("  from, and another came back from a released descriptor wait.");
+		puts("  Guest blocking waits work on spawned threads, so the window");
+		puts("  probe's symptom is NOT about them and the shim layer stays open.");
 	} else if (!rep.lock_reached) {
 		puts("  (A) the thread never reached its first blocking call: a GENERAL");
 		puts("  guest-thread problem under mldr — the thread is not running at");

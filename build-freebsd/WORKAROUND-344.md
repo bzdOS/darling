@@ -2036,6 +2036,24 @@ grep 'Available backends\|no NSPrincipalClass' \
 # §13's addendum: the guest thread lane. The peer is proven FIRST, without root,
 # so the one prompt below cannot be spent discovering a dead peer. Two
 # connections, not one — the probe refuses to measure a leg with half a peer.
+#
+# 2026-09-30, step 2 of the addendum — THE PRIMITIVE IS NOW CHECKED AT THE
+# BINARY LEVEL, BEFORE ANY RUN. The previous step grepped the probe's SOURCE for
+# the wrappers it must not call, which is a claim about this file and not about
+# what this file's waits turn into. The guest's semaphore wait is a syscall the
+# source cannot see: llvm-nm of the probe shows only _sem_wait, and the number
+# lives behind __darling_bsd_syscall inside an installed dylib. So the recipe
+# disassembles the library and checks that 271 is in neither of the trap's own
+# tables. This step is what makes the run's verdict mean anything, and it is
+# first because it is the step whose absence the 13:1x run exposed.
+llvm-objdump --macho --disassemble \
+    "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" \
+  | grep -A2 '^_sem_wait:$'
+# _sem_wait:  movl $0x10f, %eax ; callq __darling_bsd_syscall   <- 271, NOT 202
+grep -cE '^#define (LINUX|MACOS)_SYS_[a-z_0-9]+ +271$' \
+    src/startup/mldr/freebsd_syscall_trap.c
+# 0 — the trap defines 271 nowhere, in either of its tables
+
 nohup python3 - <<'EOF' >"$DARLING_BUILD_DIR/peer.log" 2>&1 &
 import socket, threading
 def serve(c):
@@ -2105,6 +2123,25 @@ grep -a 'note:' /tmp/lim.txt
 llvm-nm -u tests/guest-thread-wait-macho | awk '{print $NF}' | sort \
   | grep -E '^_(poll|writev|pipe|select|nanosleep|shutdown|bind|listen|getsockname|socketpair|accept)$'
                                                           # empty, and that is the point
+
+# The last two greps together are the whole correction, and they are different
+# kinds of check. The one above asks which wrappers the probe CALLS. The one
+# before it asks which syscall the wrapper it calls REACHES, which is the one
+# that failed here: the source was clean, the binary imported only _sem_wait,
+# and _sem_wait turned out to be 271 rather than the 202 this recipe assumed.
+# A discipline that only checks the first cannot see a wait that is clean at the
+# source and absent at the syscall.
+#
+# What the peerless run then reports, 2026-09-30, and the reason the rubric's A
+# and B are not assigned below: every sem_wait in this guest is REFUSED at the
+# call, with EINVAL, including the control's — which runs on an ALREADY-POSTED
+# semaphore, where there is no contention, nothing to park on and nothing to
+# release. A refusal is not a wake, so the released legs measure nothing, and a
+# verdict built on them would be the third false finding in this lane rather
+# than a result. The probe now prints REFUSED and declines to classify; read it
+# with:
+grep -aE 'sem_wait|after post|REFUSED|^VERDICT|^  \(refused|^  \(A|^  \(B' \
+    "$DARLING_BUILD_DIR/thread-lane.log"
 ```
 
 Logs stay in `$DARLING_BUILD_DIR`, outside the source tree, and are machine
