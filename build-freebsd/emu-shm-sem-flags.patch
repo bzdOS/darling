@@ -1,0 +1,123 @@
+emu-shm-sem-flags.patch — the fix for the fifth wall, as a patch.
+
+WHY THIS IS A PATCH FILE AND NOT A COMMIT
+-----------------------------------------
+The three files it touches are NOT in this repository. They live in the
+`src/external/xnu` submodule (a checkout of darling-xnu), and this repository
+only carries a gitlink to it. The on-disk checkout of that submodule is at
+fa29287aa2f0115271e091f1031f53c9e024005d while pr-arm64 records
+12132d9f9f2dc09ae0a9129a925299ce1f1a81c5, and no build script here compiles
+the emulation at all — the shim in the overlay
+(usr/lib/system/libsystem_kernel.dylib) is a prebuilt artefact. So the fix
+cannot be committed to pr-arm64, and it cannot be tested end to end from this
+machine. See WORKAROUND-344.md §13.
+
+Apply it from a checkout of darling-xnu at or near the recorded gitlink:
+
+    git apply emu-shm-sem-flags.patch
+
+or, to see it first, `git apply --stat` / `--check`.
+
+WHAT IT CHANGES
+---------------
+  1. xnu_syscall/bsd/impl/wrapped/shm_open.c
+     Drops oflags_bsd_to_linux() on the way to elfcalls()->shm_open. That
+     slot is the HOST's shm_open (src/startup/mldr/elfcalls/elfcalls.c:118),
+     so it takes BSD flags. Translating them turned the caller's O_CREAT into
+     a bit the host reads as O_ASYNC, and every call carrying O_CREAT failed
+     with EINVAL regardless of the name.
+
+  2. xnu_syscall/bsd/impl/wrapped/sem_open.c
+     The same line, in the neighbouring POSIX slot.
+
+  3. linux_premigration/ext/for-libelfloader.c
+     wd, which is the dirfd argument of openat(2), was being assigned the
+     translated open flags. It is now get_perthread_wd(), the form the
+     correct function two lines below in the same file already uses.
+
+DELIBERATELY NOT TOUCHED
+------------------------
+impl/fcntl/openat.c, impl/fcntl/fcntl.c and linux_premigration/ext/
+file_handle.c also call oflags_bsd_to_linux, and they are CORRECT: they feed
+a Linux syscall through LINUX_SYSCALL, which is a different contract. A sweep
+that removed those would break three working paths. The rule is not "stop
+translating" but "do not translate on the way to a host function filled into
+the elfcalls table".
+
+HOW TO CHECK IT WITHOUT A GUEST
+--------------------------------
+    sh build-freebsd/shm-flags-contract.sh
+
+That prints what the host's shm_open answers for each of these values, and it is
+the oracle: after the fix, the guest's shm_open must agree with it.
+
+diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/for-libelfloader.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/for-libelfloader.c
+index dcc07ea..a7bbfc0 100644
+--- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/for-libelfloader.c
++++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/for-libelfloader.c
+@@ -16,7 +16,13 @@ long _open_for_libelfloader(const char* path, int flags, unsigned int mode) {
+ 	CANCELATION_POINT();
+ 
+ 	linux_flags = oflags_bsd_to_linux(flags);
+-	wd = oflags_bsd_to_linux(flags);
++	// wd is the dirfd argument of openat(2) and has nothing to do with the
++	// open flags. This line gave it the flags, so the syscall was called
++	// with a flag bit in the dirfd slot — for O_RDWR|O_CREAT|O_EXCL that is
++	// openat(194, …), which is a descriptor nobody opened. The correct form
++	// is in _access_for_libelfloader below, and in every other openat
++	// wrapper in this tree.
++	wd = get_perthread_wd();
+ 
+ 	if (sizeof(void*) == 4) {
+ 		linux_flags |= LINUX_O_LARGEFILE;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/sem_open.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/sem_open.c
+index ba19a14..c04a2b5 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/sem_open.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/sem_open.c
+@@ -19,8 +19,13 @@ long sys_sem_open(const char* name, int oflag, int mode, int value)
+ 	int* ptr;
+ 	
+ 	// __simple_printf("sem_open %s, %d, %d, %d\n", name, oflag, mode, value);
+-	
+-	ptr = elfcalls()->sem_open(name, oflags_bsd_to_linux(oflag), mode, value);
++
++	// The flags go down as they came: elfcalls()->sem_open is the HOST's
++	// sem_open, filled from the host's symbols (elfcalls.c:118), and it
++	// takes BSD flags. Translating them here is the same defect that kept
++	// shm_open's pool from ever existing, in the neighbouring POSIX slot —
++	// see WORKAROUND-344.md §12 and the fix in wrapped/shm_open.c.
++	ptr = elfcalls()->sem_open(name, oflag, mode, value);
+ 	//__simple_printf("sem_open -> %p\n", ptr);
+ 	
+ 	if (!ptr)
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/shm_open.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/shm_open.c
+index 471c978..f334cc9 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/shm_open.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/shm_open.c
+@@ -17,7 +17,25 @@ long sys_shm_open(const char* name, int oflag, int mode)
+ #ifndef VARIANT_DYLD
+ 	int ret;
+ 
+-	ret = elfcalls()->shm_open(name, oflags_bsd_to_linux(oflag), mode);
++	/* The flags go down AS THEY CAME. Do not translate them.
++	 *
++	 * elfcalls()->shm_open is the HOST's shm_open — mldr fills that table
++	 * from the host's own symbols (src/startup/mldr/elfcalls/elfcalls.c:118,
++	 * into the slot declared at elfcalls.h:51) — so it takes BSD flags.
++	 * Translating them here converted the caller's O_CREAT into a bit the
++	 * host reads as O_ASYNC, and every call carrying O_CREAT then failed
++	 * with EINVAL no matter what the name was:
++	 *
++	 *     caller 0x202 -> host got 0x042 -> EINVAL
++	 *     caller 0xa02 -> host got 0x0c2 -> EINVAL
++	 *
++	 * which is the whole of why the window probe's shm pool never came
++	 * into being. See WORKAROUND-344.md §12 and §13.
++	 *
++	 * The translation is still needed on the path that reaches a Linux
++	 * syscall — impl/fcntl/* goes to LINUX_SYSCALL and that one is
++	 * correct. This is a different contract and only this one is wrong. */
++	ret = elfcalls()->shm_open(name, oflag, mode);
+ 	if (ret == -1)
+ 		ret = -errno_linux_to_bsd(elfcalls()->get_errno());
+ 
