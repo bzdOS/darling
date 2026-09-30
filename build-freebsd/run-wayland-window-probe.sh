@@ -68,7 +68,14 @@ INSTALLED="${OD}/System/Library/Frameworks/AppKit.framework/Versions/C/Resources
 # The hash the vendored copy is committed with (tests/vendor/wayland-backend/
 # README.md). Checked so a silent edit of the vendored artifact is noticed
 # even if the overlay is edited to match.
-EXPECT_SHA="a4797cddc449477fe65317548e58d6c18f050e838804596d470b4f9ae69eff2c"
+#
+# CHANGED 2026-09-30, deliberately, and the README says why in full: the shm
+# name the backend built was "./.bsdos-wlshm-%d-%d", and POSIX shm_open
+# rejects a name that is not one leading slash followed by non-slash
+# characters — so the name is invalid on any system, emulation or not, and
+# the window could never reach a frame. One byte at offset 0x8b3c, '.'
+# replaced by '/', same length, nothing moved.
+EXPECT_SHA="b918e22e77875289ac6a730fba27d39cddc3e36a6234916de2d2c363897e73da"
 
 CONJURE_PID=""
 
