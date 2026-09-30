@@ -1557,6 +1557,52 @@ compile and is the cheapest possible guard against a probe inventing its own
 result; the rule this adds is that a blocking-wait probe is not finished until
 it has been shown to PASS somewhere the answer is known.
 
+#### What the blocked roundtrip actually is, and why the probe may be measuring the wrong layer
+
+The lane is named "guest threads under mldr", and that name deserves a challenge
+before the probe is run against it. Disassembling the call the window probe
+makes:
+
+```
+_wl_display_roundtrip:
+  leaq  0x316b(%rip), %rdi     ## "wl_display_roundtrip"
+  callq <__lazy>               ; bind the symbol BY NAME
+  cmpq  $0x0, -0x18(%rbp)
+  jne   0x630c
+  ...  return -1
+  callq *%rax                  ; and call whatever that resolved to
+  movl  %eax, -0x4(%rbp)
+```
+
+So the backend does not contain the roundtrip. It binds the *name* and calls
+through a pointer, and the run log shows where that pointer lands:
+`dlsym_fatal('wl_display_roundtrip') => 0x83aee9fc0`. That is a high mapping,
+and it **moves between runs** (`0x835255fc0` in an earlier one) while the
+backend's own base does not — a separately mapped implementation, not the
+backend's statically linked code.
+
+**And the wait never reaches the syscall trap.** `poll (7)` appears in the log
+**zero** times as an unhandled guest syscall, and neither does `select`,
+`pselect6` or `ppoll`. A wait that went through mldr's dispatch would have
+shown up there, because this file's own table leaves all of them undefined. It
+did not. So the roundtrip blocks in the shim, calling the host's socket
+directly, and no Linux syscall is involved at all.
+
+That has a consequence for the probe, and it is the reason this is written down
+before the run rather than after. The probe's three legs are `read`, a blocking
+`write` and `sem_wait` — all of them **guest** blocking calls, all of them
+through mldr's dispatch. If the lane is really about the shim's host-side
+socket wait when it is invoked from a thread the guest created, then a probe
+made of guest blocking calls can return "(none), everything came back" and be
+**right**, and that answer would then say nothing about the roundtrip at all.
+
+So the probe is worth running — it settles whether guest blocking waits work on
+a spawned thread, which is a real question and the one the name suggests — but
+its "(none)" branch must not be read as clearing the lane. Only a positive
+result, (A) or (B), would bear on it. The layer is the open question, and it is
+open because the shim is host code reached through a lazily bound name, not
+because anyone has guessed wrong yet.
+
 ## 14. Reproduce
 
 ```sh
