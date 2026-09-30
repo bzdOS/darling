@@ -39,6 +39,7 @@
 #endif
 #include <stdarg.h>
 #include <stddef.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -722,6 +723,67 @@ static void probe_nil_messages(void)
 	     " fault, so a clean pass here means the nil check exists");
 }
 
+/* shm_open, asked directly, because the fourth wall's error is not what the
+ * name suggests.
+ *
+ * The name the backend builds was "./.bsdos-wlshm-%d-%d", which POSIX rejects
+ * and which the host rejects too (four lines of C: -1/EINVAL for the dotted
+ * name, a real fd for the same name with one leading slash). It was patched to
+ * "/.bsdos-wlshm-%d-%d" and the guest still answers EINVAL, with the patched
+ * binary definitely loaded — the staged copy's sha256 is the patched one.
+ *
+ * So the guest's shm_open is not the host's, and the POSIX rule is not what is
+ * rejecting the name here. Disassembling the kernel shim says why: sys_shm_open
+ * translates the flags through oflags_bsd_to_linux and then calls a syscall
+ * slot straight out of elfcalls — it is an open(2) on the name, with no
+ * /dev/shm and none in the overlay either.
+ *
+ * Which leaves the question this prints the answer to: does the guest's shm_open
+ * accept ANY name? A plain name, a leading-slash name, the patched name, a
+ * name in a directory that exists, and one in a directory that does not. If
+ * they all fail the same way, the wall is the call and not the name, and the
+ * errno tells us which.
+ *
+ * Every name is tried with O_RDWR|O_CREAT|O_EXCL so a success is unambiguous,
+ * and unlinked afterwards so a run leaves nothing behind.
+ */
+static void probe_shm_open(void)
+{
+	static const char *names[] = {
+		"/.probe-shm-plain",
+		"/probe-shm-no-slash",
+		"probe-shm-relative",
+		"/.bsdos-wlshm-0-1",
+		"/tmp/probe-shm-in-tmp",
+		"/no-such-dir-xyzzy/probe",
+	};
+	step("asking shm_open directly, one name at a time");
+
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		int fd = shm_open(names[i], O_RDWR | O_CREAT | O_EXCL, 0600);
+		int e = fd < 0 ? errno : 0;
+		note("shmtest: shm_open(\"%s\") = %d errno=%d (%s)",
+		     names[i], fd, e, e ? strerror(e) : "-");
+		if (fd >= 0) {
+			close(fd);
+			shm_unlink(names[i]);
+		}
+	}
+
+	/* The same call with a name that is certainly fine on any system, to
+	 * separate "the call is broken" from "these names are refused". */
+	{
+		int fd = shm_open("/.probe-shm-control", O_RDWR | O_CREAT | O_EXCL, 0600);
+		int e = fd < 0 ? errno : 0;
+		note("shmtest: control, a bare valid name -> %d errno=%d (%s)",
+		     fd, e, e ? strerror(e) : "-");
+		if (fd >= 0) { close(fd); shm_unlink("/.probe-shm-control"); }
+	}
+	note("shmtest: the names above differ in leading slash, in a directory that"
+	     " exists, and in one that does not; identical results across all of"
+	     " them would mean the call, not the name");
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -788,6 +850,11 @@ int main(void)
 	 * this process dies and the scan below never prints anything, which
 	 * would look like the scan failing rather than like this dying. */
 	probe_nil_messages();
+
+	/* And the wall the window is actually stopped at. Same reasoning as the
+	 * nil messages: it runs here, before anything that depends on it, and
+	 * its own failure is the thing it is measuring. */
+	probe_shm_open();
 
 	step("done");
 	return 0;

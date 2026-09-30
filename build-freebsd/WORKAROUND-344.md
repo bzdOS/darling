@@ -413,6 +413,11 @@ binary and will read differently next time.**
   absent from the guest's root, with the harness line that drops it named.
   **Neither is fixed** — the root by a fixture that this branch deliberately
   does not contain, the symlink not at all.
+- **§5's two walls are both closed** and §10 measured it. The order the guest
+  met them in turned out not to matter: fixing the symlink is what made the
+  discovery return a path, and the framework root's window is still short
+  enough that `Resources` is not in it — see the symlink-entry finding, which
+  is what the root scan is now actually tripping over.
 - **The mechanism is still a lead.** "Returns a prefix of the listing" is now
   measured in both directions and against a byte threshold (§9), but nothing
   in reach explains how long the prefix is.
@@ -421,10 +426,14 @@ binary and will read differently next time.**
   from the listing. Emulation omits them, or delivers them with a zero inode
   and libc drops them — not separated, because the run's budget was spent.
 - **The window itself is still not on screen.** Four walls are down and a
-  `WaylandWindow` object exists, but the shm pool fails (§10) and the fix for
-  that one is a byte in a binary whose sources are gone. Nothing here is a
-  claim that a frame is drawn.
-
+  `WaylandWindow` object exists, but the shm pool fails (§10). §11 corrects
+  §10's diagnosis of that failure and reopens it: the name was patched and the
+  failure did not move, and the guest's `shm_open` answers `EINVAL` for every
+  name including a control. Nothing here is a claim that a frame is drawn.
+- **The fifth wall is located but not diagnosed.** §11 narrows it to the
+  emulation's `open` or the flag translation in front of it, from the shim's
+  disassembly. That is a lead from reading a binary, not a measurement, and
+  the two are not separated.
 - **`SLOT-344.md` §1's "N−7" is wrong twice over**, and §9 is the correction:
   the threshold is a byte total, and the dropped tail is not seven. Only the
   *direction* is relied on by any fixture here, and the direction is measured.
@@ -505,7 +514,7 @@ better supported than before: **the records come from the head of the listing**
 — every one of these runs prints `d_name="."` as its first record — and a
 directory must be above the line in bytes to answer at all.
 
-## 10. Both walls closed, the window is built, and the fourth wall is OURS
+## 10. Both walls closed, the window is built, and the fourth wall is the shm pool
 
 Two root runs. The first checks the two fixes and the control; the second is
 the full window run.
@@ -555,12 +564,19 @@ The registry enumerates fifteen globals — `wl_shm`, `wl_compositor`,
 `xdg_wm_base`, `zwp_layer_shell_v1` among them — so the display is talking to
 sway, and `[step 04]` means a `WaylandWindow` exists. Four walls are behind us:
 `Info.plist` not found, `Backends/` empty, the framework root unscannable, and
-`Resources` unopenable. **The fourth wall is the shm pool**, and it is not the
-emulation's:
+`Resources` unopenable. **The fourth wall is the shm pool**:
 
 ```
 WaylandWindow: shm allocation failed for 640x480 buffer: Invalid argument
 ```
+
+> **§11 corrects the last paragraph of this one.** The reasoning below — the
+> name is invalid per POSIX, the host rejects it identically, therefore the
+> `EINVAL` is ours and not the emulation's — is **wrong about the guest's**, and
+> the patch it led to did not clear the wall. The name really was invalid and
+> the patch is still worth keeping; the inference from "the host rejects it" to
+> "the guest rejects it for the same reason" does not hold, because the guest's
+> `shm_open` is not the host's. Read §11 before acting on this section.
 
 with the name the backend builds being `./.bsdos-wlshm-%d-%d`, visible in the
 binary's own strings. `EINVAL`, not `ENOENT`, and a name like that is the
@@ -579,13 +595,22 @@ shm_open("/bsdos-wlshm-0-1")   =  3  errno=0
 Native FreeBSD, native libc, and the same `EINVAL` the guest produced. **This
 wall would fail identically on a machine with no emulation in it at all.** Four
 directories' worth of fixtures, a symlink transfer and a framework root bought
-a window; the last thing between here and a frame is a name our own backend
-built wrong.
+a window; the last thing between here and a frame looked like a name our own
+backend built wrong.
+
+> The bolded sentence above is where this section goes wrong, and §11 is the
+> measurement that shows it. "This wall would fail identically on a machine
+> with no emulation in it" is true of *the host's* `shm_open` and was
+> over-generalised to *the guest's*. The guest's is a different function that
+> fails for every name, so the name was never the thing being rejected. The
+> second sentence of that paragraph is wrong for the same reason: what is
+> between here and a frame is not the name.
 
 **The fix is one byte, and it is not mine to make.** The string sits at offset
 `0x8b3c` in `tests/vendor/wayland-backend/Wayland`; replacing the leading `.`
 with `/` is a same-length edit that changes exactly one byte and moves nothing,
 giving sha256 `b918e22e77875289ac6a730fba27d39cddc3e36a6234916de2d2c363897e73da`.
+
 
 It is not in this branch because the decision is not a technical one. That
 binary's sources **no longer exist anywhere** — the README in
@@ -627,8 +652,81 @@ it should have been refuted: had it been true, every idiomatic `[nil whatever]`
 in Chrome would crash, and the finding would have been worth a very different
 response.
 
-## 11. Reproduce
+## 11. The name was patched, the wall stayed — and the name was never the thing
 
+The byte was blessed, applied, and every pin updated. Window run №8, preflight
+8/8 with the new hash gate passing (`backend sha256 b918e22e… matches vendored,
+overlay and the committed hash`). The patched binary really was the one the
+guest loaded — the staged copy's sha256 is `b918e22e…` and its string reads
+`/.bsdos-wlshm-%d-%d` — and the answer was the same sentence:
+
+```
+[step 04] newWindowWithDelegate: nil -> WaylandWindow
+[step 05] _acquireBackBufferForWidth:640 height:480
+WaylandWindow: shm allocation failed for 640x480 buffer: Invalid argument
+[step 06] RESULT: no buffer (record=0x0 buffer=0x0 pixels=0x0)
+```
+
+So §10's diagnosis was wrong, and the error was in the reasoning rather than in
+the measurement it rested on. The name really is invalid per POSIX and the host
+really does reject it — both of those stand. What does not stand is the step
+from "the host rejects this name" to "the guest's `EINVAL` is this same
+rejection". **The guest's `shm_open` is not the host's function.**
+
+Asked directly, in the guest, with names chosen to differ in every way that
+could matter:
+
+```
+[probe] shmtest: shm_open("/.probe-shm-plain")         = -1 errno=22 (Invalid argument)
+[probe] shmtest: shm_open("/probe-shm-no-slash")       = -1 errno=22 (Invalid argument)
+[probe] shmtest: shm_open("probe-shm-relative")         = -1 errno=22 (Invalid argument)
+[probe] shmtest: shm_open("/.bsdos-wlshm-0-1")          = -1 errno=22 (Invalid argument)
+[probe] shmtest: shm_open("/tmp/probe-shm-in-tmp")     = -1 errno=22 (Invalid argument)
+[probe] shmtest: shm_open("/no-such-dir-xyzzy/probe")  = -1 errno=22 (Invalid argument)
+[probe] shmtest: control, a bare valid name            = -1 errno=22 (Invalid argument)
+```
+
+**Every name fails, including a control that is valid everywhere.** Leading
+slash or not, a directory that exists or not, the patched name or the original
+— identical `EINVAL`. The name is not the variable. The call is.
+
+And the disassembly says what the call is. `shm_open` is exported by
+`libsystem_kernel.dylib` (`_shm_open` at `0x44f20`), and its syscall half
+(`_sys_shm_open` at `0x66940`) is:
+
+```
+_sys_shm_open:
+        callq   _oflags_bsd_to_linux      ; translate the flags
+        movq    _elfcalls(%rip), %rax
+        movq    0x88(%rax), %rax          ; a syscall slot out of elfcalls
+        callq   *%rax                     ; …and call it with (name, flags, mode)
+```
+
+It is a thin `open(2)` on the name. There is no `/dev/shm` in the shim, and
+there is none in the overlay either — the earlier check for it in
+`/tmp/darling-local-overlay/dev/` came back *No such file or directory*. So this
+is not a POSIX shm implementation with a broken name check; it is a name handed
+to the emulation's `open`, and something on that path answers `EINVAL` for
+everything.
+
+**What this costs the byte patch.** Nothing, and it should still be kept: the
+name was genuinely invalid, a native build of these sources would have failed
+on it, and the corrected name is right. But the patch was not what unblocked
+the window, and the record must not say it was. If the sources are ever
+recovered, the fix belongs in `WaylandWindow.m` — and the vendored README now
+says so, and records the offset, both hashes and this outcome.
+
+**Where the fifth wall actually is:** the emulation's `open`, or the flag
+translation in front of it. `oflags_bsd_to_linux` is the narrower suspect,
+because `EINVAL` is a documented result of an invalid flag set and the flag
+translation is the one place the guest rewrites what it is about to pass down.
+That is a lead, not a measurement — separating them needs a run that calls
+`open` with and without each flag, which this наряд's budget did not buy, and
+`open` is not the only possibility: the `elfcalls` slot at `0x88` may be null or
+wrong for this entry, which would also surface as a bad call rather than a
+rejected name.
+
+## 12. Reproduce
 
 ```sh
 export DARLING_SRC_DIR="$PWD"                       # this checkout
