@@ -877,6 +877,34 @@ where it applies and what not to touch beside it. `git apply --reverse --check`
 confirms it describes exactly the working tree, so the forward form applies to
 the unpatched one.
 
+### The law this section arrived at, and it is the useful part
+
+**A silent failure path is a blind spot, and a speaking one buys the run.**
+
+Four failures in this file's history were found by reading, not by running:
+the name of the shm pool, the double flag conversion, the two symlink
+"vanishing" arguments, the pax deletion theory. Every one of them cost at
+least one run to disprove, because the code that hit them said nothing.
+
+Then the pass was made to talk, and the first run with counters named a gate
+no amount of reading had: `59 directories seen, 59 mkdir refusals`. The next
+iteration printed the component table for the refused path, and the component
+table named the line of code — the `mkdir -p` loop built every component of
+the destination path *except the last one*, because it only truncates at
+slashes and the final element has none after it. `Library` existed,
+`Frameworks` did not, and every `mkdir` of a child answered `ENOENT`, which
+is the correct answer to a parent that is not there.
+
+One run to name the gate, one to localise it, one to confirm the fix. Three
+guesses would have been the alternative and would have been wrong, as the
+previous three had been.
+
+So the rule, for the next thing in this tree: **when a step can fail, make
+the failure say which step, which input, and what the filesystem thinks of
+the inputs — and never let "skipped" look like "nothing there".** A count
+tells you that sixty descents were skipped. A path, a per-component `lstat`
+and the name in hex tell you why.
+
 ### The sweep, and what it left alone
 
 Every `oflags_bsd_to_linux` call site in the tree is eight. Four feed an elfcalls
