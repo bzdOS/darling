@@ -426,11 +426,11 @@ binary and will read differently next time.**
   §10's diagnosis of that failure and reopens it: the name was patched and the
   failure did not move, and the guest's `shm_open` answers `EINVAL` for every
   name including a control. Nothing here is a claim that a frame is drawn.
-- **The fifth wall is now diagnosed** (§12): `shm_open`'s flags are converted
-  BSD → Linux and handed to the host's `shm_open`, which expects BSD, so
-  `O_CREAT` never survives. Confirmed four rows for four on the host. **Not
-  fixed here** — it is emulation-layer code at three call sites and belongs in
-  the task that owns it.
+- **The fifth wall is diagnosed and the fix is written** (§12, §13), as a patch
+  against the `darling-xnu` submodule rather than a commit, because this
+  repository does not contain those files and does not build the emulation.
+  **Not built and not run** — see §13 for the four reasons, all of them about
+  where the code lives rather than about the budget.
 - **"Symlink entries vanish from listings" (§10) was a misdiagnosis**, and §12
   retracts it: the links are real and last in the listing, because this
   branch's own transfer runs after the regular-file pass. Nothing is wrong
@@ -856,7 +856,122 @@ entries, and there is something to fix about the order of the two staging
 passes. Whether to reorder them so links are created first, or to pad further,
 is a decision for the task that owns the symlink transfer, not a rider.
 
-## 13. Reproduce
+## 13. The fix, and why it is a patch file rather than a commit
+
+The three lines are small and the diagnosis is settled, so the work was writing
+them. What came out is a patch, and the reason is worth more than the patch.
+
+### The diff
+
+```
+wrapped/shm_open.c:20     -  ret = elfcalls()->shm_open(name, oflags_bsd_to_linux(oflag), mode);
+                           +  ret = elfcalls()->shm_open(name, oflag, mode);
+wrapped/sem_open.c:23     -  ptr = elfcalls()->sem_open(name, oflags_bsd_to_linux(oflag), mode, value);
+                           +  ptr = elfcalls()->sem_open(name, oflag, mode, value);
+for-libelfloader.c:19     -  wd = oflags_bsd_to_linux(flags);
+                           +  wd = get_perthread_wd();
+```
+
+Committed as `build-freebsd/emu-shm-sem-flags.patch`, with a header that says
+where it applies and what not to touch beside it. `git apply --reverse --check`
+confirms it describes exactly the working tree, so the forward form applies to
+the unpatched one.
+
+### The sweep, and what it left alone
+
+Every `oflags_bsd_to_linux` call site in the tree is eight. Four feed an elfcalls
+slot and were wrong; four feed a Linux syscall and are correct:
+
+| site | feeds | verdict |
+|---|---|---|
+| `wrapped/shm_open.c:20` | elfcalls slot | **wrong, fixed** |
+| `wrapped/sem_open.c:23` | elfcalls slot | **wrong, fixed** |
+| `for-libelfloader.c:18-19` | elfcalls slot (as `wd`) | **wrong, fixed** |
+| `impl/fcntl/openat.c:42` | `LINUX_SYSCALL` | correct, untouched |
+| `impl/fcntl/fcntl.c:88` | `LINUX_SYSCALL` | correct, untouched |
+| `linux_premigration/ext/file_handle.c:177` | `LINUX_SYSCALL` | correct, untouched |
+| `for-libelfloader.c:18` (as `linux_flags`) | `LINUX_SYSCALL` | correct, untouched |
+
+The rule is not "stop translating". It is "do not translate on the way to a
+host function filled into the elfcalls table" — the table is filled from the
+host's symbols and those functions want host flags. Removing the four correct
+ones would break three working paths to fix one broken one, and the sweep is
+only worth having because it drew that line.
+
+### The prediction, written before any run
+
+Each value the caller can pass, what the host is given now, and what it must be
+given after — all four measured on this machine, so this is arithmetic:
+
+| caller passes | reaches the host now | now | after the fix |
+|---|---|---|---|
+| `0x202` BSD O_RDWR\|O_CREAT | `0x042` | `EINVAL` | a real fd |
+| `0xa02` BSD O_RDWR\|O_CREAT\|O_EXCL | `0x0c2` | `EINVAL` | a real fd |
+| `0x002` BSD O_RDWR | `0x002` | `ENOENT` | `ENOENT`, unchanged |
+| `0x0c2` a Linux value, not BSD | `0x002` | `ENOENT` | `EINVAL` |
+
+The last row is the one to read twice. It is expected to **change**, from
+`silently mistranslated into something else` to `rejected for what it actually
+is`, and that is not a regression: nothing in the product passes a Linux value
+to that slot, and the row exists so the change is not mistaken for one.
+
+**Falsifiable in one run:** if after the fix the two `O_CREAT` rows still say
+`EINVAL`, the translation is happening somewhere else as well and this fix is
+in the wrong place. That is the outcome that would send the work back, and it
+is written down here so it cannot be reinterpreted afterwards.
+
+### The oracle, committed and runnable
+
+`build-freebsd/shm-flags-contract.sh` asserts the contract the elfcalls slots
+are filled under, by calling the host's `shm_open` with each value. No root, no
+guest, no emulation. It exits non-zero if a value carrying `O_CREAT` does not
+work:
+
+```
+O_RDWR|O_CREAT                       0x202 ->  3  errno=0
+O_CREAT|O_EXCL                       0xa00 ->  3  errno=0
+O_RDWR|O_CREAT|O_EXCL                0xa02 ->  3  errno=0
+O_RDWR, no O_CREAT (want ENOENT)     0x002 -> -1  errno=2
+translated 0x0c2 (want EINVAL)       0x0c2 -> -1  errno=22
+```
+
+Its first version had a row that failed, and the failure was mine: I wrote
+`0x8a0` for "O_CREAT|O_EXCL" when `0x8a0` is `O_FSYNC|O_EXCL` — the access mode
+is 0, so it carries no `O_CREAT` and picks up `O_FSYNC` instead, which the host
+refuses. The correct value is `0xa00`, and the corrected row passes. Worth
+recording because a test that fails for a reason the author introduced looks
+exactly like a test that found a real defect.
+
+### Why no root run, and what is not done
+
+**The fix cannot be built or tested from this machine, and the наряд's slice 2
+therefore does not happen here.** Not a shortage of budget:
+
+- The three files are in the `src/external/xnu` submodule — a checkout of
+  `darling-xnu` — and this repository carries only a gitlink to it. A fix to it
+  cannot be a commit in `pr-arm64` without a push to that other repository.
+- That submodule's on-disk checkout is at `fa29287a` while `pr-arm64` records
+  `12132d9f9`. It is not at the pinned revision, so even a commit made here
+  would not sit on the base.
+- **No build script in this repository compiles the emulation.** The only
+  reference to `external/xnu` in `build-freebsd/` is an include path for
+  CarbonCore. The shim the guest actually loads,
+  `usr/lib/system/libsystem_kernel.dylib`, is a prebuilt artefact dated 9 June.
+- `build-mldr-only.sh` compiles `startup/mldr/*` only. mldr *fills* the elfcalls
+  table; the flags translation is in the shim, so rebuilding mldr would have
+  changed nothing even if it were needed.
+
+So **window run №9 is not done, and no claim is made about it.** The patch is
+the deliverable; the oracle is the check; the prediction is falsifiable. What
+the owner of `darling-xnu` still has to do, in order: apply the patch, build
+the shim, install it into the overlay, then run the guest flag probe and the
+window probe, and compare against the table above.
+
+**Also not done, and deliberately:** nothing in `src/` of *this* repository is
+touched by the fix. `build-freebsd/` gains a patch file and a test, and that is
+all.
+
+## 14. Reproduce
 
 ```sh
 export DARLING_SRC_DIR="$PWD"                       # this checkout
@@ -883,6 +998,16 @@ sh build-freebsd/fill-bundle-contents.sh remove framework-root  # and back to 3
 
 # §10's fourth wall, proved on the host with no root and no guest. The first
 # name is what the backend builds; the second is the same name POSIX accepts.
+# §13's oracle — the contract the elfcalls slots are filled under, and the
+# table the guest must be compared against after the fix lands.
+sh build-freebsd/shm-flags-contract.sh
+
+# §13's fix, as a patch against the darling-xnu submodule.
+git -C src/external/xnu apply --stat ../../build-freebsd/emu-shm-sem-flags.patch
+
+# §10's fourth wall, proved on the host with no root and no guest. The first
+# name is what the backend used to build; the second is the same name POSIX
+# accepts.
 cat >/tmp/shmname.c <<'EOF'
 #include <stdio.h>
 #include <fcntl.h>
