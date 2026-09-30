@@ -421,19 +421,20 @@ binary and will read differently next time.**
 - **The mechanism is still a lead.** "Returns a prefix of the listing" is now
   measured in both directions and against a byte threshold (§9), but nothing
   in reach explains how long the prefix is.
-- **Symlink entries do not survive into a guest listing** (§10). The staged
-  tree has them, a symlinked path opens, and the entries themselves are absent
-  from the listing. Emulation omits them, or delivers them with a zero inode
-  and libc drops them — not separated, because the run's budget was spent.
 - **The window itself is still not on screen.** Four walls are down and a
   `WaylandWindow` object exists, but the shm pool fails (§10). §11 corrects
   §10's diagnosis of that failure and reopens it: the name was patched and the
   failure did not move, and the guest's `shm_open` answers `EINVAL` for every
   name including a control. Nothing here is a claim that a frame is drawn.
-- **The fifth wall is located but not diagnosed.** §11 narrows it to the
-  emulation's `open` or the flag translation in front of it, from the shim's
-  disassembly. That is a lead from reading a binary, not a measurement, and
-  the two are not separated.
+- **The fifth wall is now diagnosed** (§12): `shm_open`'s flags are converted
+  BSD → Linux and handed to the host's `shm_open`, which expects BSD, so
+  `O_CREAT` never survives. Confirmed four rows for four on the host. **Not
+  fixed here** — it is emulation-layer code at three call sites and belongs in
+  the task that owns it.
+- **"Symlink entries vanish from listings" (§10) was a misdiagnosis**, and §12
+  retracts it: the links are real and last in the listing, because this
+  branch's own transfer runs after the regular-file pass. Nothing is wrong
+  with symlink entries; the order of the two staging passes is.
 - **`SLOT-344.md` §1's "N−7" is wrong twice over**, and §9 is the correction:
   the threshold is a byte total, and the dropped tail is not seven. Only the
   *direction* is relied on by any fixture here, and the direction is measured.
@@ -621,7 +622,10 @@ call and the owner's if it comes to that, not a side commit in a наряд abou
 symlinks. Recorded here so the decision can be made with the offset and the new
 hash in front of it.
 
-### One more thing the run turned up, and did not need a run to notice
+### One more thing the run turned up, and did not need a run to notice.
+**§12 retracts the reading of this: the symlinks are not missing from the
+listing, they are at the end of it.** The observation below stands; the
+explanation offered with it does not.
 
 The guest's listing of the framework root came back as `.`, `..`, `Versions`,
 `pad-01`, `pad-02`, `pad-03` — **`AppKit` and `Resources` are missing from it**,
@@ -726,7 +730,133 @@ That is a lead, not a measurement — separating them needs a run that calls
 wrong for this entry, which would also surface as a bad call rather than a
 rejected name.
 
-## 12. Reproduce
+## 12. Where the `EINVAL` is born: the flags are converted twice
+
+`shm_open` is wrapped at
+`src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/wrapped/shm_open.c:20`:
+
+```c
+ret = elfcalls()->shm_open(name, oflags_bsd_to_linux(oflag), mode);
+```
+
+and `elfcalls()->shm_open` is **the host's** `shm_open` — mldr fills that table
+from the host's own symbols at
+`src/startup/mldr/elfcalls/elfcalls.c:118`, into the slot declared at
+`src/startup/mldr/elfcalls/elfcalls.h:51` (which is at `+0x88` in the struct,
+which is the offset the disassembly in §11 was reading).
+
+So the flags are translated BSD → Linux and then handed to a function that
+expects BSD. **They are converted once too many**, and the caller's `O_CREAT`
+becomes a bit the host reads as `O_ASYNC`.
+
+### The host proves it, with the guest's own numbers
+
+`oflags_bsd_to_linux` is a plain bit remap
+(`…/conversion/fcntl/open.c:7`), so what arrives at the host is arithmetic — and
+arithmetic is testable without a guest. Four rows, the value the guest passes
+and the value its wrapper produces for it:
+
+| guest passes | wrapper sends to the host | host answers | **guest answered** |
+|---|---|---|---|
+| `0x202` (BSD RDWR\|CREAT) | `0x042` | `EINVAL` | **`EINVAL`** |
+| `0xa02` (BSD RDWR\|CREAT\|EXCL) | `0x0c2` | `EINVAL` | **`EINVAL`** |
+| `0x002` (BSD RDWR) | `0x002` | `ENOENT` | **`ENOENT`** |
+| `0x0c2` (already Linux) | `0x002` | `ENOENT` | **`ENOENT`** |
+
+Four for four, on native FreeBSD with native libc and no emulation in the
+picture. The guest is not adding anything of its own to this call; it is
+passing its arguments to the host's function and the host is answering exactly
+as the host answers.
+
+**H1 survives and is now located at a line. H2 and H3 are refuted.** The slot is
+not a stub — the source names the host's real `shm_open`, and the four-row match
+is the proof that dispatch reaches it. Nothing about path semantics is
+involved: the name is irrelevant (that was §11's measurement) and the
+emulation's `open` is never entered, because the call never gets that far.
+
+**My prediction for this run was backwards, and the run is more useful for
+having been wrong.** I wrote that the BSD rows would succeed and the
+already-translated ones would fail. What happened is that **no row can
+succeed**: every value the caller can pass loses its `O_CREAT` on the way
+down, so the file is never created and the call is refused or reports it
+absent. There is no caller-side workaround, which is the part that matters for
+what happens next.
+
+### The same line of code is wrong in two more places
+
+Not one call, a pattern. `sem_open` has it verbatim
+(`…/impl/wrapped/sem_open.c`):
+
+```c
+ptr = elfcalls()->sem_open(name, oflags_bsd_to_linux(oflag), mode, value);
+```
+
+and the probe's control call — chosen precisely to prove the table was alive —
+came back `EINVAL` too, which is what a shared defect looks like. **That was a
+badly chosen control** and I should say so: `sem_open` shares the defect, so it
+proves nothing about liveness. What proves liveness is the four-row match above,
+which cannot happen unless the call is really being made.
+
+And in `_open_for_libelfloader`
+(`…/linux_premigration/ext/for-libelfloader.c:18-19`) the same expression is
+assigned to the wrong variable altogether:
+
+```c
+linux_flags = oflags_bsd_to_linux(flags);
+wd          = oflags_bsd_to_linux(flags);   /* should be get_perthread_wd() */
+ret = LINUX_SYSCALL(__NR_openat, wd, path, linux_flags, mode);
+```
+
+`wd` is the `dirfd` argument of `openat(2)`, and it is being given the open
+flags. The function two lines above it in the same file,
+`_access_for_libelfloader`, does it correctly with `get_perthread_wd()` — so
+the correct form is in the file, next to the wrong one.
+
+**Not fixed in this branch.** The наряд says the found source is its own task,
+and it is right: these are in the emulation layer, three call sites and a
+shared helper, and a fix belongs where someone can run the emulation's own
+tests. What this section hands over is the line, the arithmetic, and a
+host-side reproduction that costs four lines of C and no root.
+
+### The rider: "symlink entries vanish from listings" was a misdiagnosis
+
+§10 filed this as its own finding and it became its own task. It is wrong, and
+the same run that settled the flags settles this.
+
+The guest listed the framework root as `. .. Versions pad-01 pad-02 pad-03` —
+six entries. The host lists that same directory — the staged tree — as ten,
+and the two missing ones are at the **end**:
+
+```
+.            1043980
+..            963384
+Versions     1043982
+pad-01.txt   1043984   … pad-07.txt 1043990
+AppKit       1044051   -> Versions/Current/AppKit
+Resources    1044052   -> Versions/Current/Resources
+```
+
+Both symlinks resolve, both are on disk, and their inodes are the two highest
+in the directory. **Nothing is vanishing.** The guest returned the first six
+records of a ten-entry listing, in order, exactly as §9's head-window rule says,
+and the links are at indices 8 and 9.
+
+They are last because **this branch's own symlink transfer runs after the
+regular-file pass** (`launch-dynamic-smoke.c`: `stage_tree` then
+`stage_symlinks`, in that order), so every link is created after every
+regular file and lands at the tail of the listing — outside the window. The
+`framework-root` pads cannot help, for the same reason: they are created in the
+overlay, and the staging re-orders anyway, putting the links last regardless of
+what the overlay says.
+
+So this is the same wall as everything else in this document, with a different
+victim, and it was introduced by the fix for the previous one. The observation
+is real and the explanation was not: there is nothing wrong with symlink
+entries, and there is something to fix about the order of the two staging
+passes. Whether to reorder them so links are created first, or to pad further,
+is a decision for the task that owns the symlink transfer, not a rider.
+
+## 13. Reproduce
 
 ```sh
 export DARLING_SRC_DIR="$PWD"                       # this checkout

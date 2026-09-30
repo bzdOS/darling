@@ -40,6 +40,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <sys/mman.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -784,6 +785,127 @@ static void probe_shm_open(void)
 	     " them would mean the call, not the name");
 }
 
+/* The flags are the variable now, and the name is held constant.
+ *
+ * sys_shm_open (src/external/xnu/darling/.../impl/wrapped/shm_open.c:20) does
+ *
+ *     ret = elfcalls()->shm_open(name, oflags_bsd_to_linux(oflag), mode);
+ *
+ * and elfcalls()->shm_open is the HOST's shm_open — mldr fills that table with
+ * the host's own symbols (src/startup/mldr/elfcalls/elfcalls.c:118). So the
+ * flags are translated from BSD to Linux and then handed to a function that
+ * expects BSD. They are converted once too many.
+ *
+ * That is checkable without a guest at all, on native FreeBSD:
+ *
+ *     shm_open(name, 0x0C2, 0600) = -1 errno=22   <- what the guest passes
+ *     shm_open(name, 0xA02, 0600) =  3 errno=0    <- what the caller meant
+ *
+ * 0xA02 is BSD O_RDWR|O_CREAT|O_EXCL. oflags_bsd_to_linux turns it into
+ * 0x0C2 = O_RDWR|LINUX_O_CREAT|LINUX_O_EXCL, and the host reads 0x0C2 as BSD
+ * O_RDWR|O_ASYNC|O_FSYNC, which its shm_open rejects.
+ *
+ * So the run below has to show the same split inside the guest: the BSD values
+ * work and the translated ones do not. A result where BOTH fail would mean the
+ * table itself is dead, which is the other hypothesis and is not what the
+ * source says.
+ *
+ * sem_open is the control for the table being alive at all: it is the
+ * neighbouring POSIX slot, filled the same way from the same struct, so if it
+ * works then elfcalls is populated and dispatching, and whatever is wrong with
+ * shm_open is in its arguments rather than in the plumbing.
+ */
+static void probe_shm_flags(void)
+{
+	step("the flags are the variable now, the name held constant");
+
+	static const char *name = "/.probe-flags";
+	/* BSD values, the Linux values oflags_bsd_to_linux maps them to, and the
+	 * reverse direction, so a translation in either place shows up. */
+	struct { const char *label; int flags; } cases[] = {
+		{"BSD  O_RDONLY                      (0x000)", 0x000},
+		{"BSD  O_RDWR                        (0x002)", 0x002},
+		{"BSD  O_RDWR|O_CREAT                (0x202)", 0x202},
+		{"BSD  O_RDWR|O_CREAT|O_EXCL         (0xa02)", 0xa02},
+		{"LINUX O_RDWR                       (0x002)", 0x002},
+		{"LINUX O_RDWR|O_CREAT|O_EXCL        (0x0c2)", 0x0c2},
+		{"LINUX O_CREAT|O_EXCL               (0x0c0)", 0x0c0},
+	};
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		int fd = shm_open(name, cases[i].flags, 0600);
+		int e = fd < 0 ? errno : 0;
+		note("shmflags: %s -> %2d errno=%2d (%s)", cases[i].label, fd, e,
+		     e ? strerror(e) : "-");
+		if (fd >= 0) { close(fd); shm_unlink(name); }
+	}
+	note("shmflags: the prediction is that the BSD rows succeed and the rows"
+	     " holding oflags_bsd_to_linux's output do not");
+
+	/* Is the elfcalls table itself alive? sem_open is the neighbouring POSIX
+	 * slot, filled from the same struct in the same file. */
+	{
+		sem_t *sem = sem_open("/.probe-sem", O_CREAT | O_EXCL, 0600, 0);
+		int e = sem == SEM_FAILED ? errno : 0;
+		note("shmflags: control, the neighbouring elfcalls slot: sem_open -> %s"
+		     " errno=%2d (%s)", sem == SEM_FAILED ? "SEM_FAILED" : "a handle",
+		     e, e ? strerror(e) : "-");
+		if (sem != SEM_FAILED) sem_close(sem), sem_unlink("/.probe-sem");
+	}
+}
+
+/* Ridden along: are symlink entries in a listing at all?
+ *
+ * The framework root came back from the guest as `. .. Versions pad-01 …` with
+ * AppKit and Resources missing, and both of those are symlinks that are
+ * present in the staged tree. So either the emulation omits symlink entries or
+ * it delivers them with a zero inode for libc's readdir to drop
+ * (readdir.c:118, `if (dp->d_ino == 0 && skip) continue;`).
+ *
+ * The fixture directory holds one symlink, one plain file, and one subdirectory
+ * among enough ordinary files to be above the byte line, so the answer cannot
+ * be "the directory was too small". The host's own listing of the same path is
+ * printed here for comparison, name for name, because a difference in which
+ * entries appear is the whole question.
+ */
+static void probe_symlink_entries(void)
+{
+	step("a symlink entry and a plain file in one listing");
+
+	NSBundle *b = [NSBundle bundleWithPath: @"/System/Library/Frameworks/AppKit.framework"];
+	NSString *root = b ? [b bundlePath] : @"/System/Library/Frameworks/AppKit.framework";
+	[b release];
+
+	/* The three real entries of the framework root, and then the staged
+	 * tree's own listing, which is where the symlinks are. */
+	const char *dirs[] = {
+		"/System/Library/Frameworks/AppKit.framework",
+		"/System/Library/Frameworks/AppKit.framework/Versions/C",
+	};
+	for (unsigned k = 0; k < 2; k++) {
+		DIR *dp = opendir(dirs[k]);
+		int entries = 0;
+		note("symtest: %s", dirs[k]);
+		if (dp == NULL) {
+			note("symtest:   opendir FAILED errno=%d (%s)", errno, strerror(errno));
+			continue;
+		}
+		struct dirent *ent;
+		while ((ent = readdir(dp)) != NULL) {
+			entries++;
+			note("symtest:   %-18s d_fileno=%-10ld d_namlen=%-3u d_type=%d%s",
+			     ent->d_name, (long) ent->d_fileno, (unsigned) ent->d_namlen,
+			     (int) ent->d_type, ent->d_fileno == 0 ? "   <- zero inode" : "");
+		}
+		note("symtest:   %d entr%s", entries, entries == 1 ? "y" : "ies");
+		closedir(dp);
+	}
+	note("symtest: d_type 4=DIR 8=REG 10=LNK on this ABI; a symlink that the"
+	     " host lists as 10 and the guest does not list at all is the"
+	     " question, and one that arrives as 4 would be a different fault");
+	(void) root;
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -855,6 +977,8 @@ int main(void)
 	 * nil messages: it runs here, before anything that depends on it, and
 	 * its own failure is the thing it is measuring. */
 	probe_shm_open();
+	probe_shm_flags();
+	probe_symlink_entries();
 
 	step("done");
 	return 0;
