@@ -74,8 +74,23 @@ static void stage_tree(const char *od, const char *rel) {
         return;
     }
 
+    /* -k is load-bearing and was found the hard way.
+     *
+     * pax in copy mode removes destination entries the archive does not
+     * contain. The archive is `find . -type f`, which by construction
+     * contains no symlinks, so without -k the file pass DELETES every link
+     * the link pass created — and the staged tree comes out with zero
+     * symlinks in it, whichever order the two passes run in. With the old
+     * order that was invisible, because the links were created afterwards;
+     * with the link pass first it is total.
+     *
+     * Measured, not assumed: after a run with the link pass first, the
+     * staged tree had 0 symlinks against 54 in the overlay, and
+     * Versions/ held only C with no Current beside it. -k means "keep
+     * destination entries the archive does not mention", which is what a
+     * separate pass that owns those names needs. */
     snprintf(cmd, sizeof(cmd),
-             "mkdir -p '%s' && cd '%s' && find . -type f | pax -rw '%s'",
+             "mkdir -p '%s' && cd '%s' && find . -type f | pax -k -rw '%s'",
              dst, src, dst);
     (void)system(cmd);
     printf("cached locally: %s\n", dst);
@@ -401,24 +416,63 @@ int main(void) {
          * A tree the overlay does not have is skipped, not an error: a test
          * binary with a small closure has no PrivateFrameworks, and the probe
          * preflight is the thing that must notice a MISSING tree, not this. */
-        const char *t = trees;
-        while (*t) {
-            const char *sep = strchr(t, ':');
-            size_t len = sep ? (size_t)(sep - t) : strlen(t);
-            if (len > 0) {
-                char tree[512];
-                if (len >= sizeof(tree)) len = sizeof(tree) - 1;
-                memcpy(tree, t, len);
-                tree[len] = '\0';
-                stage_tree(od, tree);
-                /* Immediately after, and never inside stage_tree: the link
-                 * pass must be a separate, separately-disableable step, so
-                 * that reverting to regular-files-only is one variable and
-                 * not an edit. See the comment above stage_symlinks. */
-                stage_symlinks(od, tree);
+        /* TWO PASSES, LINKS FIRST, and the order is the point rather than an
+         * implementation detail.
+         *
+         * The guest's directory enumeration hands back a PREFIX of a listing
+         * and drops the tail (WORKAROUND-344.md §9, measured six ways), so
+         * where an entry sits in the listing decides whether the guest ever
+         * sees it at all. A staged entry's position is its creation order, and
+         * inode numbers are handed out in creation order too — so a link
+         * created after every regular file lands at the END of the listing,
+         * outside the window.
+         *
+         * That is what happened, and it was filed as a different bug. The
+         * framework root came back from the guest as `. .. Versions pad-01 …`
+         * with AppKit and Resources absent, both of them symlinks that were
+         * present on disk and resolved. Not missing — last. A long argument
+         * concluded the emulation was dropping symlink entries and that two
+         * causes were indistinguishable; the staging order explains it with no
+         * second hypothesis at all, and this is the change that follows.
+         *
+         * So: every link in every tree, then every regular file. The two
+         * passes write disjoint sets of names, so the order cannot lose
+         * anything, and the link pass copies no data so it is the cheap one to
+         * do first.
+         *
+         * The link pass stays a separate, separately-disableable step and
+         * never moves inside stage_tree, so reverting to regular-files-only
+         * remains one variable. See the comment above stage_symlinks. */
+        {
+            const char *t = trees;
+            while (*t) {
+                const char *sep = strchr(t, ':');
+                size_t len = sep ? (size_t)(sep - t) : strlen(t);
+                if (len > 0) {
+                    char tree[512];
+                    if (len >= sizeof(tree)) len = sizeof(tree) - 1;
+                    memcpy(tree, t, len);
+                    tree[len] = '\0';
+                    stage_symlinks(od, tree);
+                }
+                if (sep == NULL) break;
+                t = sep + 1;
             }
-            if (sep == NULL) break;
-            t = sep + 1;
+
+            t = trees;
+            while (*t) {
+                const char *sep = strchr(t, ':');
+                size_t len = sep ? (size_t)(sep - t) : strlen(t);
+                if (len > 0) {
+                    char tree[512];
+                    if (len >= sizeof(tree)) len = sizeof(tree) - 1;
+                    memcpy(tree, t, len);
+                    tree[len] = '\0';
+                    stage_tree(od, tree);
+                }
+                if (sep == NULL) break;
+                t = sep + 1;
+            }
         }
 
         /* A cached copy makes every copy above a no-op, so their exit status
