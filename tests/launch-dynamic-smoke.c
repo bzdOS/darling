@@ -153,7 +153,92 @@ struct stage_symlinks_stats {
     unsigned long dirs_seen;
     unsigned long mkdir_refused;
     unsigned long depth_capped;
+    /* The first entry whose mkdir was refused, kept so the refusal can be
+     * examined instead of only counted. A count tells you that sixty
+     * descents were skipped; the name and the path tell you why. */
+    char first_refused_name[256];
+    char first_refused_path[2048];
 };
+
+/* When a mkdir is refused, say what the filesystem thinks of every component
+ * of the path that was refused.
+ *
+ * The refusal itself is the datum, and it was a contradiction: this pass
+ * builds its destination path component by component immediately before the
+ * walk, reports no failure doing so, and then mkdir() of a CHILD of that path
+ * answers ENOENT. mkdir answers ENOENT when a component of the path is not a
+ * directory, so the question is which one, and opendir() — which had just
+ * listed the parent — is a different view of the same world.
+ *
+ * This is not a guess at the cause. It is the list of facts that turns the
+ * contradiction into something readable: for each component, whether it
+ * exists, whether it is a directory, and whether it is a symlink. A component
+ * that is a symlink is the interesting case, because mkdir() on a path that
+ * traverses one depends on resolving it, and this walk never resolves
+ * anything — it lstat()s. A component that does not exist at all is the other
+ * interesting case, because it means the build-the-path step did not do what
+ * it appears to have done.
+ *
+ * The name of the refused entry is dumped in hex as well as as text, because
+ * a name that is not what it looks like — a trailing space, a stray NUL, a
+ * non-ASCII byte that the terminal ate — produces exactly this symptom and
+ * would be invisible in a %s.
+ */
+static void report_refused_path(const char *path, const char *name) {
+    char work[2048];
+    struct stat cs;
+    unsigned i = 0;
+
+    printf("staging:   refused path, component by component:\n");
+    snprintf(work, sizeof(work), "%s", path);
+    for (char *slash = work; ; ) {
+        char *next = strchr(slash + 1, '/');
+        int last = (next == NULL);
+        if (next != NULL)
+            *next = '\0';
+
+        if (work[0] == '\0' || strcmp(work, "/") == 0) {
+            i++;
+            printf("staging:     [%u] / (root) — assumed to exist\n", i);
+        } else if (lstat(work, &cs) < 0) {
+            printf("staging:     [%u] %s — DOES NOT EXIST (%s)\n",
+                   i, work, strerror(errno));
+        } else {
+            printf("staging:     [%u] %s — exists, %s%s%s\n", i, work,
+                   S_ISDIR(cs.st_mode) ? "dir" :
+                   S_ISLNK(cs.st_mode) ? "SYMLINK, not a dir" :
+                   S_ISREG(cs.st_mode) ? "regular file, NOT a dir" : "other",
+                   S_ISLNK(cs.st_mode) ? "" : "",
+                   S_ISDIR(cs.st_mode) ? "" : "  <- mkdir would say ENOENT here");
+        }
+
+        if (last)
+            break;
+        *next = '/';
+        slash = next;
+        i++;
+    }
+
+    if (name != NULL && name[0] != '\0') {
+        printf("staging:   entry name as text: \"%s\" (%zu bytes)\n",
+               name, strlen(name));
+        printf("staging:   entry name in hex:  ");
+        for (const unsigned char *p = (const unsigned char *) name; *p; p++)
+            printf("%02x ", *p);
+        printf("\n");
+        /* Anything outside printable ASCII is called out by name, because a
+         * name that differs only in a byte the terminal swallows is the same
+         * symptom as a name that differs in its spelling. */
+        for (const unsigned char *p = (const unsigned char *) name; *p; p++) {
+            if (*p < 0x20 || *p >= 0x7f) {
+                printf("staging:   ^ non-printable byte %02x at offset %zu —"
+                       " the name is not what it looks like\n", *p,
+                       (size_t) (p - (const unsigned char *) name));
+                break;
+            }
+        }
+    }
+}
 
 static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
                                struct stage_symlinks_stats *st) {
@@ -244,9 +329,24 @@ static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
              * symlinks, and the two gates above were indistinguishable from
              * each other and from this one. */
             if (mkdir(dp, 0755) < 0 && errno != EEXIST) {
+                int saved = errno;
+                int first = (st->first_refused_name[0] == '\0');
                 st->mkdir_refused++;
+                if (first) {
+                    snprintf(st->first_refused_name,
+                             sizeof(st->first_refused_name), "%s", de->d_name);
+                    snprintf(st->first_refused_path,
+                             sizeof(st->first_refused_path), "%s", dp);
+                }
                 printf("staging:   mkdir(%s) failed: %s — not descending\n",
-                       dp, strerror(errno));
+                       dp, strerror(saved));
+                /* On the first one only: sixty copies of the same component
+                 * table would bury the one that differs. `first` is captured
+                 * BEFORE the name is stored — testing the field afterwards
+                 * finds it non-empty and the report never runs, which is
+                 * what the first version of this did. */
+                if (first)
+                    report_refused_path(dp, de->d_name);
                 continue;
             }
             stage_symlinks_walk(sp, dp, depth + 1, st);
@@ -303,6 +403,18 @@ static void stage_symlinks(const char *od, const char *rel) {
                 return;
             }
             *slash = '/';
+        }
+        /* And the LAST component, which the loop above never reaches: it only
+         * truncates at slashes, and the final element of the path has none
+         * after it. For .../System/Library/Frameworks that means Library was
+         * created and Frameworks was not, so every mkdir of a child then
+         * failed ENOENT — the pass reported no failure of its own, the tree
+         * looked empty of links, and the reading went to pax and then to the
+         * guest. The component table printed on the first refusal is what
+         * named it: the parent of the refused child was "DOES NOT EXIST". */
+        if (mkdir(path, 0755) < 0 && errno != EEXIST) {
+            printf("staging: %s: mkdir failed: %s\n", path, strerror(errno));
+            return;
         }
     }
 
