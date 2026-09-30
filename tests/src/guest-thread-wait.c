@@ -170,7 +170,13 @@ static int connect_peer(void)
 	struct sockaddr_in sa;
 	int fd;
 
-	if (!port || !*port) return -1;
+	if (!port || !*port) {
+		/* Not "connection failed" — nothing was attempted. Leaving errno
+		 * alone here made the caller report "no connected sockets (No error:
+		 * 0)", which is a diagnostic that says something false about why. */
+		errno = ENXIO;
+		return -1;
+	}
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) return -1;
 	memset(&sa, 0, sizeof(sa));
@@ -207,6 +213,7 @@ int main(void)
 	sem_t lock;
 	pthread_t tl, td;
 	int peer, peer_lane, control_lock, control_desc, threads_ok = 1;
+	int peers_ok;                    /* BOTH connections, not either */
 	const char *port = getenv(PEER_PORT_ENV);
 
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -223,10 +230,21 @@ int main(void)
 	 * the resource they both draw on. */
 	peer = connect_peer();
 	peer_lane = connect_peer();
-	if (peer < 0 || peer_lane < 0)
-		printf("  note: no connected sockets (%s). The descriptor leg is NOT"
-		       " exercised, and that is not a result about threads.\n",
-		       strerror(errno));
+	/* BOTH, not either. If the first connect succeeds and the second does
+	 * not, the lane's descriptor leg never runs — and a verdict that only
+	 * asked "is there a peer" would go on to classify a leg that was never
+	 * exercised. Half a peer is not a peer. */
+	peers_ok = (peer >= 0 && peer_lane >= 0);
+	if (!peers_ok) {
+		if (errno == ENXIO)
+			printf("  note: no peer configured, so no socket was attempted. The"
+			       " descriptor leg is NOT exercised, and that is not a result"
+			       " about threads.\n");
+		else
+			printf("  note: no connected sockets (%s). The descriptor leg is NOT"
+			       " exercised, and that is not a result about threads.\n",
+			       strerror(errno));
+	}
 
 	/* ---------- control: the main thread, both legs ---------- */
 	puts("[control] main thread:");
@@ -239,7 +257,7 @@ int main(void)
 	       control_lock ? "RETURNED" : "did not return");
 
 	control_desc = 0;
-	if (peer >= 0) {
+	if (peers_ok) {
 		pthread_t tc;
 		send_to_peer(peer);
 		rep.control_desc_returned = 0;
@@ -251,7 +269,7 @@ int main(void)
 			puts("  FATAL: the control's descriptor thread could not be created");
 		}
 	}
-	printf("  %-6s %-12s %s\n", "main", "recvmsg", peer < 0 ? "not exercised"
+	printf("  %-6s %-12s %s\n", "main", "recvmsg", !peers_ok ? "not exercised"
 	       : (control_desc ? "RETURNED" : "did not return"));
 	puts("");
 
@@ -264,8 +282,8 @@ int main(void)
 		puts("  FATAL: the lock thread could not be created");
 		threads_ok = 0;
 	}
-	if (peer_lane >= 0 && pthread_create(&td, NULL, desc_thread,
-	                                    (void *)(long)peer_lane) != 0) {
+	if (peers_ok && pthread_create(&td, NULL, desc_thread,
+	                               (void *)(long)peer_lane) != 0) {
 		puts("  FATAL: the descriptor thread could not be created");
 		threads_ok = 0;
 	}
@@ -276,7 +294,7 @@ int main(void)
 		       wait_flag(&rep.lock_reached) ? "REACHED the wait"
 		                                   : "never reached the wait");
 		/* leg 2: release it, then see whether it comes back */
-		if (peer_lane >= 0) {
+		if (peers_ok) {
 			send_to_peer(peer_lane);
 			printf("  %-6s %-12s %s\n", "thread", "recvmsg",
 			       wait_flag(&rep.desc_returned) ? "RETURNED"
@@ -293,8 +311,9 @@ int main(void)
 	} else if (!control_lock) {
 		puts("  (unknown) the main-thread control failed, so the lane has no clean");
 		puts("            baseline and its result means nothing.");
-	} else if (peer < 0) {
-		puts("  (not exercised) without a connected socket there is no descriptor leg.");
+	} else if (!peers_ok) {
+		puts("  (not exercised) without BOTH connected sockets there is no descriptor");
+		puts("  leg; one peer is not half of a measurement, it is no measurement.");
 		if (rep.lock_reached) {
 			puts("  The lock leg alone says the thread reached a 202 wait and parked");
 			puts("  there; nothing more is claimed.");
