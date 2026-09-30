@@ -1762,6 +1762,91 @@ verdict `(none)` — with a real peer listening, and the same `(not exercised)`
 verdict with none. That is the self-test: a probe that cannot pass where the
 answer is known is not finished.
 
+**Addendum — root #3, one authorization: the lock leg parks, the descriptor leg
+cannot be created, and the lane's own question is still unasked.**
+
+Artifact first: `sha256 tests/guest-thread-wait-macho` =
+`be0625f2…ddbc53a`, the value in `$DARLING_BUILD_DIR/guest-thread-wait.provenance`,
+and the source blob equals `HEAD:tests/src/guest-thread-wait.c`. Peer up on
+loopback and answering **two concurrent connections without root** first, so the
+single `sudo` line could not be spent discovering a dead peer. Then one prompt,
+root #2's recipe (`f7476d791`): `timeout --foreground -k 60 120` around
+`sudo … DARLING_TEST_BINARY=guest-thread-wait-macho DARLING_THREAD_PEER_PORT=$PORT
+launch-dynamic > $DARLING_BUILD_DIR/thread-lane.log 2>&1`. RC=0, 156 log lines.
+
+| leg | control (main) | lane (spawned) | log |
+|---|---|---|---|
+| `sem_wait` (202) | RETURNED | **REACHED it and parked (never returned)** | 107 / 149 |
+| `recvmsg` (47) | not exercised | not exercised | 108 / 150 |
+
+**The peer is not why the descriptor leg is missing.** Log:105 reads
+`no connected sockets (Address family not supported by protocol family)`, and
+that `errno` comes from `socket(AF_INET, SOCK_STREAM, 0)` at
+`guest-thread-wait.c:193` — *before* `connect` is ever called. The peer was
+never contacted; it was answering two concurrent connections seconds earlier.
+
+**The control's RETURNED is not the counterpart of the lane's PARKED.** The
+control posts before it waits (`guest-thread-wait.c:264-265`: `sem_init(0,0)`
+then `sem_post`), so it takes a token and was never meant to block. It measures
+"an uncontended `sem_wait` on main returns", not "a blocking wait on main comes
+back", and its word is one step stronger than the flag behind it
+(`control_lock = rep.lock_reached`, `guest-thread-wait.c:268`). That is sound
+here only because the `printf` comes *after* the call — a control that parked
+would hang the probe rather than misreport it. A **contended** main-thread leg
+is still missing, and it is the only thing that would make "main returns /
+thread parks" a statement about threads instead of about contention.
+
+**Settled:** a spawned guest thread reaches futex 202 and parks in the kernel —
+the liveness fact, and correct POSIX behaviour for a semaphore nobody posts.
+**Not settled:** whether a spawned thread comes **back** from a wait it was
+released from, which is the lane's actual question. The lock leg parks by
+construction (`guest-thread-wait.c:292`, "nobody will post this one"), so it
+measures parking only. The release half lives entirely on the descriptor leg —
+and that is the leg `AF_INET` refuses.
+
+**Classification: not obtained.** Not (A): the thread reached its first blocking
+call. Not (B): nothing was ever released, so nothing failed to return. Not the
+probe's `(none)` either — that verdict (`guest-thread-wait.c:353`) needs
+`lock_reached && desc_returned`, and `desc_returned` is false because the leg
+was never created. The probe's own word is `(not exercised)` (log:152-156).
+**The lane stays OPEN and the shim layer stays.**
+
+Self-test, same source, same peer, no root: `cc -Wall -pthread` clean, both legs
+measured, verdict `(none)`, RC=0. So neither the probe nor the peer is the thing
+that is broken, and the *only* difference between that run and the guest run is
+the socket.
+
+**Why the guest has no socket — and the next root.** `darlingserver.cpp:271`
+boots the container by execl'ing mldr on
+`LIBEXEC_PATH "/usr/libexec/darling/vchroot"`, and on this host that path is
+**not there**: `/usr/local/libexec/darling/usr/libexec/darling/` holds `mldr`
+and nothing else, while the overlay's tree has `vchroot` (13260 bytes). mldr's
+`load()` fails on it and prints precisely the line in the log
+(`mldr.c:357-361`):
+
+```
+Cannot open /usr/local/libexec/darling/usr/libexec/darling/vchroot: No such file or directory
+```
+
+A missing `vchroot` is a missing network stack, and `EAFNOSUPPORT` is what a
+`socket()` gets when there is none. So the leading explanation for the missing
+descriptor leg is a **host provisioning gap — an incomplete install of the
+overlay's darling tree — not a thread defect and not a probe defect.** Stated as
+a hypothesis, because that is what it is: one run showed both facts. The check
+that settles it is one prompt plus a host install that is not this lane's to
+make, and if `socket()` starts handing back a descriptor once that path is
+populated, the descriptor leg is unblocked with **no change to the probe**.
+
+Also new, recorded and not interpreted: 38 × `unhandled Linux syscall 99 —
+ENOSYS` between the lane header and the lock leg's result (log:111-148). The
+trap prints numbers only, so this is "call 99" — `times` in the x86-64 Linux
+numbering — from the lane's runtime.
+
+**Next root, when one is granted:** (a) a contended main-thread leg — post
+*after* the reached flag, so the wait is real and the probe still cannot hang —
+which is probe-only and needs no root; and (b) a transport the guest's `socket()`
+will actually give, which is the `vchroot` path above.
+
 ## 14. Reproduce
 
 ```sh
@@ -1829,6 +1914,43 @@ DRY_RUN=1 sh build-freebsd/run-wayland-window-probe.sh     # RC=0, 8 checks, nee
 sh build-freebsd/run-wayland-window-probe.sh               # root run, a seat
 grep 'Available backends\|no NSPrincipalClass' \
     "$DARLING_BUILD_DIR/wayland-window-probe.log"
+
+# §13's addendum: the guest thread lane. The peer is proven FIRST, without root,
+# so the one prompt below cannot be spent discovering a dead peer. Two
+# connections, not one — the probe refuses to measure a leg with half a peer.
+nohup python3 - <<'EOF' >"$DARLING_BUILD_DIR/peer.log" 2>&1 &
+import socket, threading
+def serve(c):
+    while True:
+        d = c.recv(64)
+        if not d: break
+        c.send(d)
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(16)
+open("/tmp/peer.port", "w").write(str(s.getsockname()[1]))
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+EOF
+sleep 1; PEER=$(cat /tmp/peer.port)
+
+# ONE authorization for the whole run, output to a FILE (a pipe whose reader goes
+# away is what used to leave darlingserver blocked in select), under a timeout —
+# parking the legs is the expected result and the timeout is what measures it.
+timeout --foreground -k 60 120 sudo env \
+    DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
+    DARLING_BUILD_DIR="$DARLING_BUILD_DIR" \
+    DARLING_TEST_BINARY=guest-thread-wait-macho DARLING_THREAD_PEER_PORT="$PEER" \
+    "$DARLING_BUILD_DIR/launch-dynamic" > "$DARLING_BUILD_DIR/thread-lane.log" 2>&1
+
+grep -aE 'sem_wait|recvmsg|^VERDICT|^  \(|Cannot open' \
+    "$DARLING_BUILD_DIR/thread-lane.log" | grep -av patch_linux_raw
+
+# The same probe natively, no root: this is where the answer is known, and it
+# must be (none) with both legs measured. A probe that cannot pass where the
+# answer is known is not finished.
+cc -Wall -pthread -o /tmp/gtw-native tests/src/guest-thread-wait.c
+DARLING_THREAD_PEER_PORT="$PEER" timeout -k 5 90 /tmp/gtw-native
 ```
 
 Logs stay in `$DARLING_BUILD_DIR`, outside the source tree, and are machine
