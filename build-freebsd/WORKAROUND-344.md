@@ -1323,6 +1323,71 @@ are both defined, and both are what x86_64 says they are. So `267` is
 than a park, because this milestone is about symlinks and `dyld` resolves them;
 that is noted, not acted on.
 
+#### Window run №9-3: asking for a receipt, and what the answer was
+
+The previous run stopped at `wl_surface_commit`, which proves the request was
+marshalled and flushed and proves nothing about whether sway took it. So the
+probe now asks, and the interesting part is that the answer is not the one the
+question was aimed at.
+
+**There is no frame callback to wait for.** The backend never calls
+`wl_surface_frame` — it is absent from the whole call list — so it never asks
+the compositor for one and there is nothing to receive. That is a measurement of
+the backend, not an assumption, and it removes half the plan before it starts.
+The receipt has to be `wl_display_get_error`, reached through a roundtrip.
+
+Getting the `wl_display*` took a wrong turn first, and the harness caught it.
+The two `_wl_display_*` symbols are statically linked **C functions**, not
+selectors of `WaylandDisplay`, so declaring them as methods is declaring a
+selector the backend does not implement — and `build-wayland-window-test.sh`
+refuses to emit a binary whose probe and backend disagree. The route that works
+is a real selector, `-[WaylandDisplay waylandDisplay]`, which the gate reports
+as `^{wl_display=}`; the two C functions are then resolved with `dlsym`, and a
+NULL from either is reported rather than treated as a receipt.
+
+**The result: no receipt, and the reason is not the compositor.**
+
+```
+waylandDisplay = 0x11eddec35000
+dlsym wl_display_roundtrip = 0x11ede0c6f2e0, wl_display_get_error = 0x11ede0c6f330
+NO REPLY within 5s: the roundtrip is still blocked
+```
+
+Three facts from the same log, and only the third is a wall:
+
+1. **A roundtrip on the main thread succeeded earlier in this very run** —
+   `roundtrip1 returned 57`, with the compositor, shm, wmBase, output and seat
+   all bound. The connection, the sync callback and the reply path all work.
+2. **The hang is in the wait, not in the request.** The commit was sent; the
+   roundtrip blocked.
+3. **The roundtrip that blocked is the one on a spawned thread.** The probe
+   starts a thread so that "blocks forever" is a printed result rather than a
+   stuck run, and that thread is where it stops.
+
+So the honest reading is that this run **did not establish a seventh wall**. It
+established that a roundtrip issued from a spawned thread does not come back,
+while the same call on the main thread does — which is a fact about waiting from
+a thread, and the thread is this probe's own instrumentation. Reporting it as
+"sway refused the commit" would be the wrong claim in both directions: the
+commit's own receipt is still unknown.
+
+**The unhandled syscalls are not on this path, and that is now measured rather
+than assumed.** All four land *before* the flush — three before the successful
+main-thread roundtrip, one just before it — and none after. `263 = unlinkat` and
+`267 = readlinkat` did not block the commit, which is the negative answer to
+the question that was parked, and neither is touched.
+
+**The control that would settle it** is one line: issue the post-commit
+roundtrip on the main thread. The thread exists only to bound the wait, so
+without it a hang costs the run; the trade is a timeout that cannot be trusted
+against a hang that is itself the finding. That is the next run, and it is not
+taken here — this run's root prompt was the one that was authorised.
+
+**No screenshot was taken, and none can be.** The seat has a real 1280x720
+output, but this machine has no capture tool — no `grim`, `xwd`, `scrot`,
+`import` or `maim` — and installing one is not a thing this session may do. The
+log route is what there is, which is why the receipt is a printed number.
+
 ## 14. Reproduce
 
 ```sh
