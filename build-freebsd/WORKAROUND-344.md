@@ -1721,10 +1721,30 @@ worth more as a stated gap than as a silent substitute.
 **The other shape the table forced: two threads, not one.** The law's lock leg is
 a wait on an address nobody will wake, so a thread that takes it parks there
 forever and never reaches a second leg. One thread cannot carry both. The lock
-leg and the descriptor leg therefore run on separate spawned threads, and the
-lock leg's result is **REACHED** rather than RETURNED — not because returning is
-ambiguous but because returning is impossible by construction, and "the thread
-executed and parked in a kernel wait" is the liveness fact being asked for.
+leg and the descriptor leg therefore run on separate spawned threads.
+
+**REACHED is not PARKED, and the difference is the trap's own doing.** The leg
+was originally described as returning REACHED, and this file claimed that meant
+"the thread executed and parked in a kernel wait". That was a stronger claim than
+the probe could support, and the reason is written down in
+`freebsd_syscall_trap.c`: *"a mismatched value makes FreeBSD return
+success-**without-sleeping** where Linux returns EAGAIN"*. A `sem_wait` in this
+guest can therefore come straight back without ever parking, and a flag set
+before the call cannot tell that from a thread that parked as intended.
+
+So the leg reports two facts and the reader combines them:
+
+| reported | means |
+|---|---|
+| never reached the wait | the thread did not execute up to the call |
+| REACHED it and **parked** (never returned) | the thread is in the kernel wait — the liveness fact |
+| REACHED it, and it **RETURNED** without blocking | a finding, not a pass: the leg tested nothing |
+
+Only the middle row is a pass, and the third row leaves the lane **open** and
+says so. A leg that cannot distinguish "blocked" from "came straight back" is a
+leg whose success is unearned, which is the same defect as the unbounded control
+and the shared connection, one level deeper: those two could hang or lie about
+the peer, and this one could lie about the thread.
 
 **And the peer.** 49 `bind`, 50 `listen` and 51 `getsockname` are all ENOSYS, so
 the guest cannot create a listening endpoint and a connected socket has to come
