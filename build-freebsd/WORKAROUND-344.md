@@ -1692,6 +1692,56 @@ rather than from a sleep. Rebuilding the two pipe legs onto a socket pair's
 biggest available cousin is a contained change; it needs one more root prompt,
 and none is taken here.
 
+#### Lane law №2 applied, and one clause of it is unreachable
+
+The law is right in principle — design the probe from the trap's table, not from
+POSIX — and applying it produced a result the law did not predict: **one of its
+own clauses cannot be carried out.**
+
+> deadline of any leg — ONLY from the timeout of `epoll_wait` (232)
+
+`epoll_wait` is in the trap's table, and that is true, but **no guest binary can
+call it.** The three 232-family calls are in the table for guest code that
+issues *raw* Linux syscalls; they are not callable functions. Checked against the
+shim rather than assumed:
+
+| symbol | `libsystem_kernel` | `libSystem.B` |
+|---|---|---|
+| `_epoll_create` | not exported | — |
+| `_epoll_ctl` | not exported | — |
+| `_epoll_wait` | not exported | not exported |
+
+There is nothing to link and nothing to `dlsym`, and the macOS SDK has no header
+for them. So the deadline is taken from **228 (`clock_gettime`)**, which is both
+exported by the guest's `libsystem_c` *and* defined in the trap — as a bounded
+spin, since there is no timer to sleep on. **This is a deviation from the law and
+it is recorded as one, not slipped in.** A deadline that cannot be built is
+worth more as a stated gap than as a silent substitute.
+
+**The other shape the table forced: two threads, not one.** The law's lock leg is
+a wait on an address nobody will wake, so a thread that takes it parks there
+forever and never reaches a second leg. One thread cannot carry both. The lock
+leg and the descriptor leg therefore run on separate spawned threads, and the
+lock leg's result is **REACHED** rather than RETURNED — not because returning is
+ambiguous but because returning is impossible by construction, and "the thread
+executed and parked in a kernel wait" is the liveness fact being asked for.
+
+**And the peer.** 49 `bind`, 50 `listen` and 51 `getsockname` are all ENOSYS, so
+the guest cannot create a listening endpoint and a connected socket has to come
+from a peer already listening elsewhere. The probe takes it from
+`$DARLING_THREAD_PEER_PORT` and, when there is none, prints that the descriptor
+leg is **not exercised** — which is deliberately not the same sentence as a
+failed leg, because "no peer" and "the thread is broken" are different worlds
+and a probe that cannot tell them apart will eventually report the second while
+meaning the first.
+
+**The probe now reaches a verdict on every path**, which the acceptance asked
+for: a refused leg is a result line, never an exit. Natively it compiles clean
+under `-Wall` and produces the answer a real FreeBSD must give — both legs pass,
+verdict `(none)` — with a real peer listening, and the same `(not exercised)`
+verdict with none. That is the self-test: a probe that cannot pass where the
+answer is known is not finished.
+
 ## 14. Reproduce
 
 ```sh
