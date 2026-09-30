@@ -1603,6 +1603,45 @@ result, (A) or (B), would bear on it. The layer is the open question, and it is
 open because the shim is host code reached through a lazily bound name, not
 because anyone has guessed wrong yet.
 
+#### The authorized guest run happened, and its output was lost — plus a harness hang
+
+The one root prompt authorised for the guest leg of `guest-thread-wait` was
+spent, and it did run: `mldr` executed and exited. What is missing is the
+measurement, and the reason is worth recording because it is not the guest's
+fault.
+
+**What the process table showed afterwards:**
+
+| | |
+|---|---|
+| `mldr` | state **Z** (zombie) — it ran and exited |
+| `darlingserver` | state **I**, wchan **select**, 4m14s elapsed |
+| `guest-thread-wait` | no such process |
+
+So the guest side finished. The probe's three waits are bounded at 3 s each, so
+the guest could not have been the thing blocking; the harness was. Once `mldr`
+was gone, `darlingserver` sat in `select` indefinitely instead of returning, and
+`launch-dynamic` never came back — which is why the run produced no output at
+all: the caller was still waiting on a process that was not going to report.
+
+**The measurement is therefore NOT taken, and nothing here guesses at it.** The
+classification stays open. Asking for a second root prompt is the only way to get
+the numbers, and the fix for the harness is not mine to make here.
+
+**What I could and could not confirm about the hang.** That `darlingserver` does
+not notice its child has exited is measured; *why* is not. Grepping its source
+for `waitpid`/`SIGCHLD`/`WNOHANG` returns only vendored `duct-tape/xnu` headers
+and no `darlingserver` code of its own — the submodule's on-disk store is one
+of the broken ones, so the question cannot be settled from this checkout. Stated
+as what it is: a run whose output is not consumed promptly leaves the server
+blocked, and that is a cost every future run pays for.
+
+**The recovery, for whoever runs it next:** capture the output to a file rather
+than a pipe. `launch-dynamic` writes the guest's stdout to its own stdout and
+nothing else, so a pipe whose reader goes away takes the measurement with it.
+Redirecting into the build directory would have turned this run from lost into
+a log.
+
 ## 14. Reproduce
 
 ```sh
