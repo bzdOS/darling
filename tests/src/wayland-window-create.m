@@ -45,10 +45,15 @@
 #import <Foundation/Foundation.h>
 #include <CoreGraphics/CGGeometry.h>
 #include <dirent.h>
+#include <errno.h>
 #include <objc/runtime.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* The AppKit headers cannot be included from this tree at all:
@@ -93,6 +98,69 @@ static const char *kBackendRelativePath =
 - (void *) compositor;
 - (void *) wmBase;
 @end
+
+/* Did the compositor answer?
+ *
+ * The previous run reached wl_surface_commit and stopped, which proves the
+ * request was MARSHALLED and flushed and proves nothing about whether sway
+ * took it. Sending a request is not receiving a reply.
+ *
+ * The obvious receipt is a frame callback, and it is not available: the
+ * backend never calls wl_surface_frame, so it never asks for one and there is
+ * nothing to wait for. That is a measurement of the backend, not an assumption
+ * -- the whole call list has no wl_surface_frame in it. So the receipt is
+ * wl_display_get_error, and a roundtrip is how the display gets a chance to
+ * deliver it.
+ *
+ * Getting at those two needs the wl_display*, and the route to it is a
+ * selector, not an ivar offset: -[WaylandDisplay waylandDisplay]. Guessing an
+ * offset inside the object's layout would read as a crash rather than as a
+ * wrong answer, and the build gate refuses a selector the backend does not
+ * implement -- which is how the first attempt at this was caught, having
+ * wrongly declared the statically linked _wl_display_roundtrip as if it were a
+ * method of WaylandDisplay. It is a C function, not a selector.
+ *
+ * The two C functions are resolved with dlsym, because the wayland shim has
+ * already resolved them in this process and they are not exported by the
+ * backend. A NULL from dlsym is reported, not treated as success. */
+@protocol WLDisplayRoundtripProbe <NSObject>
+- (void *) waylandDisplay;
+@end
+
+typedef int (*wl_roundtrip_fn)(void *);
+typedef int (*wl_get_error_fn)(void *);
+
+/* The roundtrip runs on its own thread because it blocks until the compositor
+ * answers, and "blocks forever" has to be a printed result rather than a stuck
+ * run. At file scope, not nested in main: this compiler rejects a function
+ * definition inside a block, and a nested one would also be a GNU extension
+ * nothing else here relies on.
+ *
+ * No block literal and no NSThread either. The guest stack was measured to be
+ * at its limit at this depth -- one extra libc call here faults on the guard
+ * page -- so the thread starts with a two-pointer argument on a stack slot and
+ * nothing else is asked for. */
+struct rt_arg {
+	void *wl;
+	sem_t *done;
+	wl_roundtrip_fn roundtrip;
+};
+
+static int rt_result;   /* -12345 until the thread reports */
+static int rt_errno;
+
+static void *roundtrip_thread(void *p)
+{
+	struct rt_arg *a = p;
+	int r;
+
+	errno = 0;
+	r = a->roundtrip(a->wl);
+	rt_errno = errno;
+	rt_result = r;
+	sem_post(a->done);
+	return NULL;
+}
 
 /* The buffer record, recovered from the method's own type encoding AND
  * cross-checked against its disassembly:
@@ -320,6 +388,80 @@ int main(void) {
 		step("flushBuffer (commit the acquired buffer to the compositor)");
 		[(id<WLWindowProbe>)window flushBuffer];
 		note("flushBuffer returned");
+
+		/* Does the compositor answer? A roundtrip blocks until it does, so
+		 * it runs on its own thread and is waited on with a deadline: a
+		 * compositor that never replies is a result worth printing, not a
+		 * reason to sit in a syscall until the harness gives up. */
+		step("roundtrip, 5s deadline: did the compositor answer the commit?");
+		{
+			id<WLDisplayRoundtripProbe> dpy =
+				(id<WLDisplayRoundtripProbe>)[NSDisplay currentDisplay];
+			void *wl = [dpy waylandDisplay];
+			wl_roundtrip_fn roundtrip;
+			wl_get_error_fn get_error;
+
+			note("waylandDisplay = %p", wl);
+			roundtrip = (wl_roundtrip_fn)dlsym(RTLD_DEFAULT, "wl_display_roundtrip");
+			get_error = (wl_get_error_fn)dlsym(RTLD_DEFAULT, "wl_display_get_error");
+			note("dlsym wl_display_roundtrip = %p, wl_display_get_error = %p",
+			     (void *)roundtrip, (void *)get_error);
+			if (wl == NULL || roundtrip == NULL || get_error == NULL) {
+				note("cannot ask: the display or one of the two functions is"
+				     " missing, so no receipt is claimed");
+				step("RESULT: commit NOT acknowledged -- receipt unavailable, not"
+				     " a failure of the commit");
+			} else {
+				sem_t done;
+				struct rt_arg arg;
+				pthread_t th;
+				time_t started;
+				int answered = 0;
+
+				sem_init(&done, 0, 0);
+				rt_result = -12345;   /* the thread has not reported yet */
+				rt_errno = 0;
+				arg.wl = wl;
+				arg.done = &done;
+				arg.roundtrip = roundtrip;
+
+				if (pthread_create(&th, NULL, roundtrip_thread, &arg) != 0) {
+					note("could not start the roundtrip thread; no receipt asked for");
+					step("RESULT: commit NOT acknowledged -- could not start the wait");
+				} else {
+					/* A poll loop rather than sem_timedwait: the flattened SDK
+					 * declares sem_trywait and not sem_timedwait, and waiting
+					 * on a function whose prototype this tree cannot see is
+					 * not worth an implicit declaration. */
+					started = time(NULL);
+					while (!answered) {
+						struct timespec nap;
+						if (sem_trywait(&done) == 0) { answered = 1; break; }
+						if (time(NULL) - started >= 5) break;
+						nap.tv_sec = 0;
+						nap.tv_nsec = 50000000L;   /* 50ms */
+						nanosleep(&nap, NULL);
+					}
+					if (answered) {
+						int err = get_error(wl);
+						note("roundtrip returned %d (errno %d), wl_display_get_error=%d",
+						     rt_result, rt_errno, err);
+						note("a roundtrip returning -1, or a non-zero get_error, is the"
+						     " compositor refusing the commit; 0 and 0 is it taking"
+						     " the commit and having nothing wrong to say");
+						step("RESULT: commit acknowledged -- roundtrip returned,"
+						     " display error is 0");
+					} else {
+						note("NO REPLY within 5s: the roundtrip is still blocked, so"
+						     " the commit was sent and nothing came back");
+						step("RESULT: commit NOT acknowledged -- roundtrip blocked"
+						     " past the 5s deadline");
+					}
+					pthread_detach(th);
+				}
+				sem_destroy(&done);
+			}
+		}
 
 		step("RESULT: window created, shm buffer acquired + written + flushed");
 	}
