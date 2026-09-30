@@ -1388,6 +1388,64 @@ output, but this machine has no capture tool — no `grim`, `xwd`, `scrot`,
 `import` or `maim` — and installing one is not a thing this session may do. The
 log route is what there is, which is why the receipt is a printed number.
 
+#### Window run №9-4: the commit is confirmed, and a second lane is a finding
+
+The control from the previous subsection, one line, on the main thread:
+
+```
+main-lane:   entering wl_display_roundtrip on the MAIN thread
+main-lane:   roundtrip returned 3 (errno 0), wl_display_get_error=0
+thread-lane: answered=0 (still blocked)
+RESULT: COMMIT CONFIRMED -- main-thread roundtrip returned 3 and get_error=0
+LANE FINDING: the main thread got its reply and the spawned thread did not
+```
+
+**The commit is confirmed.** The roundtrip after the commit returned — sway
+answered the sync — and `wl_display_get_error` is 0, so the compositor took the
+commit and had nothing wrong to say about it. That is the receipt the previous
+run could not get, and it took moving the call off the spawned thread and onto
+the main one. `roundtrip1 returned 57` earlier in the same run is the same
+thread behaving the same way, so the main thread was never the problem.
+
+**The seventh wall did not fire.** Outcome (B) — blocked on the main thread —
+did not happen, and it is worth being precise about why that is a result rather
+than an absence of one: the main lane has no timeout at all. A deadline around
+a main-thread roundtrip is either a second thread, which is the thing being
+tested, or a non-blocking call that is not a roundtrip. So the check is
+deliberately unbounded, and the evidence of success is a line that is *there* —
+`returned 3` — rather than a line that is absent.
+
+**Outcome (C) fired instead, and it is a real finding, recorded not fixed.** The
+same display, the same call, two threads, two answers: the main thread's
+roundtrip returned 3 and the spawned thread's is still blocked, indefinitely,
+with no error. That is a new lane — **guest threads under mldr** — and it sits
+next to the parked `get_perthread_wd` question, which reads its per-thread
+working directory from `%gs:(,0xc9*8)`. Two facts about `%gs` in one run: a
+thread-local read that looks like a placeholder, and a thread that never gets
+its reply. They are not yet shown to be the same defect and are not merged here;
+what is established is that a spawned guest thread does not complete a blocking
+Wayland roundtrip while the main thread does, on the same connection.
+
+**The unhandled syscalls are off the critical path, now twice measured.** All
+four land before the flush and none after — the same answer as the previous
+run, now with the flush and the main-lane entry placed by line number on either
+side of them. `263 = unlinkat` and `267 = readlinkat` are not what stands
+between this milestone and a confirmed commit, and neither is touched.
+
+**Rider, 288, on this run:** the bundle is reached through the symlink and
+loaded — `AppKit.framework/Resources/Backends/Wayland.backend/Contents/MacOS/
+Wayland` — with 106 links staged and 0 failed.
+
+**No screenshot, and the enumeration is now complete.** Not a shrug at the
+question: this machine has no `grim`, no `wlr-screencopy`, no `swaygrab`, no
+`wayshot`, no `wofi`, no `grimshot`, no X11 capture (`xwd`, `scrot`, `import`,
+`maim`), no screencopy library, and no Python Wayland binding; `ffmpeg` is
+present but needs an X11 display, and there is none. `swaymsg` has no
+screenshot verb. The seat does have a real 1280x720 output, so the absence is
+the tooling and not the compositor — and installing a tool is not a thing this
+session may do. So the frame is evidenced by the compositor's own answer rather
+than by a picture, which is a weaker thing than a picture and is labelled so.
+
 ## 14. Reproduce
 
 ```sh

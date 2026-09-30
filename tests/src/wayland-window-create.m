@@ -389,11 +389,23 @@ int main(void) {
 		[(id<WLWindowProbe>)window flushBuffer];
 		note("flushBuffer returned");
 
-		/* Does the compositor answer? A roundtrip blocks until it does, so
-		 * it runs on its own thread and is waited on with a deadline: a
-		 * compositor that never replies is a result worth printing, not a
-		 * reason to sit in a syscall until the harness gives up. */
-		step("roundtrip, 5s deadline: did the compositor answer the commit?");
+		/* Does the compositor answer the commit?
+		 *
+		 * Two lanes, and the order matters. The previous run established that
+		 * roundtrip1 on the MAIN thread returned 57 while a roundtrip issued
+		 * from a spawned thread never came back, so the main thread is the
+		 * lane that decides the question and the thread is kept only as a
+		 * second reading of the same display. The thread is started FIRST so
+		 * that it is already waiting when the main lane runs, and it is
+		 * labelled separately so a reader can tell which line is which.
+		 *
+		 * The main lane has no deadline and that is deliberate: a deadline
+		 * around a main-thread roundtrip is either a second thread or a
+		 * non-blocking call that is not a roundtrip. So if the main lane
+		 * blocks, this log ends on the "entering" line with no RESULT after
+		 * it -- and the absence is the answer, which is the one thing a
+		 * timeout cannot distinguish from a hang that is itself the finding. */
+		step("receipt: main-thread roundtrip after the commit (thread lane in parallel)");
 		{
 			id<WLDisplayRoundtripProbe> dpy =
 				(id<WLDisplayRoundtripProbe>)[NSDisplay currentDisplay];
@@ -415,50 +427,49 @@ int main(void) {
 				sem_t done;
 				struct rt_arg arg;
 				pthread_t th;
-				time_t started;
-				int answered = 0;
+				int thread_started = 0;
+				int thread_answered;
+				int main_rc, main_err;
 
 				sem_init(&done, 0, 0);
-				rt_result = -12345;   /* the thread has not reported yet */
+				rt_result = -12345;
 				rt_errno = 0;
 				arg.wl = wl;
 				arg.done = &done;
 				arg.roundtrip = roundtrip;
-
-				if (pthread_create(&th, NULL, roundtrip_thread, &arg) != 0) {
-					note("could not start the roundtrip thread; no receipt asked for");
-					step("RESULT: commit NOT acknowledged -- could not start the wait");
+				if (pthread_create(&th, NULL, roundtrip_thread, &arg) == 0) {
+					thread_started = 1;
+					note("thread-lane: started, a roundtrip is already waiting there");
 				} else {
-					/* A poll loop rather than sem_timedwait: the flattened SDK
-					 * declares sem_trywait and not sem_timedwait, and waiting
-					 * on a function whose prototype this tree cannot see is
-					 * not worth an implicit declaration. */
-					started = time(NULL);
-					while (!answered) {
-						struct timespec nap;
-						if (sem_trywait(&done) == 0) { answered = 1; break; }
-						if (time(NULL) - started >= 5) break;
-						nap.tv_sec = 0;
-						nap.tv_nsec = 50000000L;   /* 50ms */
-						nanosleep(&nap, NULL);
-					}
-					if (answered) {
-						int err = get_error(wl);
-						note("roundtrip returned %d (errno %d), wl_display_get_error=%d",
-						     rt_result, rt_errno, err);
-						note("a roundtrip returning -1, or a non-zero get_error, is the"
-						     " compositor refusing the commit; 0 and 0 is it taking"
-						     " the commit and having nothing wrong to say");
-						step("RESULT: commit acknowledged -- roundtrip returned,"
-						     " display error is 0");
-					} else {
-						note("NO REPLY within 5s: the roundtrip is still blocked, so"
-						     " the commit was sent and nothing came back");
-						step("RESULT: commit NOT acknowledged -- roundtrip blocked"
-						     " past the 5s deadline");
-					}
-					pthread_detach(th);
+					note("thread-lane: could not start; only the main lane will report");
 				}
+
+				note("main-lane: entering wl_display_roundtrip on the MAIN thread");
+				errno = 0;
+				main_rc = roundtrip(wl);
+				main_err = get_error(wl);
+				note("main-lane: roundtrip returned %d (errno %d), "
+				     "wl_display_get_error=%d", main_rc, errno, main_err);
+
+				thread_answered = (thread_started && sem_trywait(&done) == 0);
+				note("thread-lane: answered=%d%s", thread_answered,
+				     thread_answered ? "" : " (still blocked, or never started)");
+
+				if (main_rc >= 0 && main_err == 0)
+					step("RESULT: COMMIT CONFIRMED -- main-thread roundtrip returned %d"
+					     " and wl_display_get_error=0", main_rc);
+				else
+					step("RESULT: commit NOT confirmed on the main lane -- "
+					     "roundtrip=%d get_error=%d; the compositor refused it, or"
+					     " the reply did not come back", main_rc, main_err);
+
+				if (main_rc >= 0 && main_err == 0 && !thread_answered
+				    && thread_started)
+					step("LANE FINDING: the main thread got its reply and the spawned"
+					     " thread did not -- guest threads under mldr, recorded not"
+					     " fixed");
+
+				if (thread_started) pthread_detach(th);
 				sem_destroy(&done);
 			}
 		}
