@@ -75,7 +75,8 @@
 #define PEER_PORT_ENV "DARLING_THREAD_PEER_PORT"
 
 struct lane_report {
-	volatile int lock_reached;      /* the lock thread got to sem_wait */
+	volatile int lock_reached;      /* the lock thread got to the sem_wait CALL */
+	volatile int lock_returned;     /* ... and sem_wait came back. See do_lock. */
 	volatile int desc_returned;     /* the descriptor thread came back */
 	volatile int control_desc_returned;  /* same, for the main-thread control */
 };
@@ -105,10 +106,22 @@ static int wait_flag(volatile int *flag)
 	return *flag ? 1 : 0;
 }
 
+/* REACHED and RETURNED are two different facts and the difference is the whole
+ * point of this leg.
+ *
+ * The trap documents a deliberate divergence: "a mismatched value makes FreeBSD
+ * return success-WITHOUT-sleeping where Linux returns EAGAIN". So a sem_wait in
+ * this guest can come straight back without ever parking — and a flag set
+ * before the call cannot tell that from a thread that parked as intended.
+ *
+ * So: reached says the thread executed up to the call. returned says the call
+ * came back. Parked is reached && !returned, and that is the only one of the
+ * three that means "this thread is waiting in the kernel". */
 static void do_lock(sem_t *s)
 {
-	rep.lock_reached = 1;     /* set BEFORE the wait: "reached" is the claim */
-	sem_wait(s);              /* parks here and is never released */
+	rep.lock_reached = 1;     /* set BEFORE the call: "reached" is the claim */
+	sem_wait(s);              /* parks here and is never released... */
+	rep.lock_returned = 1;    /* ...so reaching THIS line is a finding */
 }
 
 static void do_descriptor(int sock)
@@ -290,9 +303,11 @@ int main(void)
 
 	if (threads_ok) {
 		/* leg 1: nobody wakes it, so the question is whether it got there */
+		wait_flag(&rep.lock_reached);
 		printf("  %-6s %-12s %s\n", "thread", "sem_wait",
-		       wait_flag(&rep.lock_reached) ? "REACHED the wait"
-		                                   : "never reached the wait");
+		       !rep.lock_reached ? "never reached the wait"
+		       : rep.lock_returned ? "REACHED it, and it RETURNED without blocking"
+		                          : "REACHED it and parked (never returned)");
 		/* leg 2: release it, then see whether it comes back */
 		if (peers_ok) {
 			send_to_peer(peer_lane);
@@ -321,6 +336,12 @@ int main(void)
 			puts("  The lock leg did not even reach the wait, which is a liveness");
 			puts("  result on its own.");
 		}
+	} else if (rep.lock_returned) {
+		puts("  (finding) the lock leg reached sem_wait and sem_wait RETURNED");
+		puts("  without blocking. Nothing is wrong with the thread and nothing is");
+		puts("  proved about it: the trap documents success-without-sleeping for a");
+		puts("  mismatched futex value, so this leg did not test parking at all. The");
+		puts("  lane is OPEN and this is why.");
 	} else if (!control_desc) {
 		/* The control's descriptor leg did not come back either, so it was the
 		 * PEER that was silent, not the thread. Calling that (B) would name the
