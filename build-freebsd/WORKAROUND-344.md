@@ -1184,6 +1184,74 @@ purpose: the script patches three, and a fourth kind of change — a new call
 where there was none — is a different edit with a different risk, which is why
 the `wd` swap is listed separately and separately verified.
 
+### Window run №9: the fourth wall fell, and the sixth wall is one line wide
+
+Run against the patched shim, one root run, the seat live (capabilities=3),
+all eight preflight checks passed, closure walk clean over 59 images.
+
+**The flags defect is gone on the full window, not only in the flag probe.** The
+error the backend reports moved:
+
+| | before | after |
+|---|---|---|
+| `WaylandWindow: shm allocation failed` | `Invalid argument` (EINVAL) | `No such file or directory` (ENOENT) |
+
+EINVAL was the fingerprint of the double translation. It is not what the run
+reports now. A different wall is in front, and the log names it in one line:
+
+```
+[darling-mldr] unhandled Linux syscall 77 — ENOSYS
+```
+
+**77 is `ftruncate` on x86_64, and the emulator never defines it.** Its own
+numbering in `src/startup/mldr/freebsd_syscall_trap.c` runs `fsync 74`,
+`fdatasync 75`, and then stops — there is no `#define ... 77`, so the dispatch
+falls through to the ENOSYS arm at line 2442. The Wayland backend sizes its
+shm segment with `ftruncate` before mapping it, so the shm pool cannot be
+created at any window size, and no frame is committed. `267` (`openat2`) is
+also undefined and also appears in the log, three times, but it is not on this
+path.
+
+So the verdict on №9 is **the sixth wall, and it is a gap in a list rather than
+a wrong value**: one missing `#define` and one `case`, in a file this repository
+does build. Nothing here is a guess about what the code means; the log printed
+the number and the number is absent from the table.
+
+#### The fix's own assumption, which is a boundary and not a measurement
+
+The `sem_close` edit reclaims one byte with `movl %esp,%ebp` instead of
+`movq %rsp,%rbp`. That instruction **zeroes the upper half of `rbp`**, so the
+edit is valid while the guest's stack lives below 4 GiB.
+
+This is an assumption of the fix, not something the run measured. It holds for
+every run so far, and it will hold until `mldr` hands out a stack above 4 GiB —
+at which point the truncation is silent: the function still works, the upper
+half of `rbp` is simply wrong. Anyone changing the frame size of that function
+should reach for a different byte.
+
+#### The residue the flag probe leaves, and who removes it
+
+The `sem_open` control asks for `O_CREAT|O_EXCL` on `/.probe-sem`, and a run
+that dies before the unlink leaves the object in place. It is removed by the
+guest in a root run. On the host `rm` is refused — the object is root-owned and
+the build user cannot delete it — so a run that ends in a crash leaves a
+`EEXIST` behind that the next run must be told about rather than be confused
+by. The probe names it for exactly that reason.
+
+#### `-k` is not needed, and the comment in the source said to drop it if not
+
+The symlink pass runs first and `pax` is then handed `find . -type f`, which
+mentions no link, so `-k` ("keep destination entries the archive does not
+mention") looked necessary. **Measured without it:** 106 links created, 0
+failed; the guest lists `AppKit` and `Resources` as `d_type=10`; the window
+lists six entries; `pathsForResourcesOfType:@"backend"` returns one path. Every
+one of those is the same number as with `-k`.
+
+The pax-deletion theory was never true — nothing was ever created, so nothing
+was ever deleted — and the source comment already said to drop the flag if a
+run showed the links surviving without it. That run has now happened, so the
+flag goes in the next commit rather than this one.
+
 ## 14. Reproduce
 
 ```sh
