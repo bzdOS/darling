@@ -1446,6 +1446,59 @@ the tooling and not the compositor — and installing a tool is not a thing this
 session may do. So the frame is evidenced by the compositor's own answer rather
 than by a picture, which is a weaker thing than a picture and is labelled so.
 
+#### The guest-thread lane: a probe to classify it, and a bug the probe had
+
+The LANE FINDING above is one symptom with two very different explanations, and
+they cost very different amounts of work:
+
+- **every** blocking wait fails on a spawned guest thread → a general problem
+  with guest threads under mldr: scheduling, signal delivery, TLS, stack. The
+  Wayland roundtrip is then just the first thing that noticed.
+- only the reply wait fails, while a timer and a lock come back → the failure is
+  in the descriptor/event path, and thread resumption is fine.
+
+So the lane needs a probe, not a fix, and the fix is not authorised here anyway.
+`tests/src/guest-thread-wait.c` runs three kinds of blocking wait, each twice —
+once on the main thread as a control, once on a spawned thread — chosen to
+separate the *mechanisms* rather than to repeat the same test three times:
+
+| wait | what it isolates |
+|---|---|
+| `nanosleep` | a timer: no descriptor, no lock, nothing to wake it. If this fails the thread is not being resumed at all. |
+| `read(pipe)` | a descriptor wait released by another thread's `write` |
+| `sem_wait` | a lock released by another thread's `sem_post` |
+
+Every wait is bounded by a deadline, and the program prints a verdict and exits
+rather than sitting in a syscall — a probe that hangs cannot report that it
+hung. No window, no compositor, no Wayland, so no seat is involved.
+
+**The probe had a bug, and running it natively is what found it.** Compiled for
+this host rather than for the guest, the three lane lines all said "did not
+return" while the summary said every wait had come back — a report contradicting
+itself, in the direction of looking like a defect. The bounded wait recomputed
+an absolute deadline inside its own loop, so the elapsed comparison was zero on
+the first pass and it gave up after one 20 ms poll; the thread then finished a
+moment later and set the very flags it had given up on. Fixed to a fixed start
+time and an elapsed comparison, it is self-consistent, and natively all three
+waits return — as they must on a real FreeBSD.
+
+That run is worth exactly what it is: **the probe is sound, and it says nothing
+about guest behaviour.** A native pass is not a guest result and is not offered
+as one. It is also the reason the probe can be trusted once it does run, and the
+reason a control whose own results are printed rather than assumed is in there
+at all — an earlier draft printed a hardcoded "all passed" for the baseline,
+which would have reported a baseline nobody observed.
+
+**Not measured yet.** `launch-dynamic` refuses to run without root, and a root
+prompt is not something to take unasked, so the guest leg of this is requested
+rather than assumed. Until that run exists the lane is classified as *open*, and
+this section deliberately does not guess which of the two it is.
+
+**Kept adjacent to the parked question, not merged with it.** `get_perthread_wd`
+reads its per-thread working directory from `%gs:(,0xc9*8)`, and this lane is
+about a thread that never comes back. Two facts about threads in one run are
+two facts; a shared `%gs` is a hypothesis, and nothing here tests it.
+
 ## 14. Reproduce
 
 ```sh
