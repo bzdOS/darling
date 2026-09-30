@@ -1642,6 +1642,56 @@ nothing else, so a pipe whose reader goes away takes the measurement with it.
 Redirecting into the build directory would have turned this run from lost into
 a log.
 
+#### The guest run, and why the probe could not run: the guest has no pipe
+
+The redirect recipe works, and that part is settled: with the guest's stdout
+going to a file and the whole command under `timeout --foreground -k 60`,
+`launch-dynamic` **returned** instead of leaving `darlingserver` blocked in
+`select`. The hang is a function of the output going to a pipe whose reader goes
+away, and a file does not do that.
+
+The probe then failed at its first line of work, and the reason is the most
+useful thing this run produced:
+
+```
+[darling-mldr] unhandled Linux syscall 22 — ENOSYS
+[darling-mldr] unhandled Linux syscall 20 — ENOSYS
+```
+
+**22 is `pipe`.** The probe's control opens two pipes before anything else, so it
+exited at once, having measured nothing. The same list read against the trap's
+own numbering:
+
+| syscall | | | syscall | | |
+|---|---|---|---|---|---|
+| `read` | 0 | defined | `pipe` | 22 | **ENOSYS** |
+| `write` | 1 | defined | `select` | 23 | **ENOSYS** |
+| `writev` | 20 | **ENOSYS** | `poll` | 7 | **ENOSYS** |
+| `socket` | 41 | defined | `socketpair` | 53 | **ENOSYS** |
+| `connect` | 42 | defined | `accept` | 43 | **ENOSYS** |
+| `sendmsg` | 46 | defined | `futex` | 202 | defined |
+| `recvmsg` | 47 | defined | `epoll_wait` | 232 | defined |
+
+So this is the **second** time the syscall table has removed a mechanism from
+this probe — the first was the timer, now it is the pipes. Both were chosen from
+what a POSIX blocking wait normally looks like, and neither exists here. A probe
+written against the C library's idea of the world rather than against the
+emulator's table will keep doing this, and each time the failure looks like a
+guest thread that cannot be woken.
+
+**The classification is NOT obtained.** Nothing here says whether a spawned guest
+thread returns from a blocking wait; the probe never got far enough to ask.
+
+**But it is obtainable, and the table says with what.** The guest has `futex`
+(202) for a lock, and `socket` (41) + `connect` (42) + `recvmsg` (47) for a
+descriptor wait: a `recvmsg` on a connected socket with nothing to read blocks
+in the kernel, which is exactly the shape the pipe was standing in for. It even
+has `epoll_wait` (232), so a genuinely timed wait is available — though
+`nanosleep` is not, so a deadline would have to come from `epoll_wait`'s timeout
+rather than from a sleep. Rebuilding the two pipe legs onto a socket pair's
+biggest available cousin is a contained change; it needs one more root prompt,
+and none is taken here.
+
 ## 14. Reproduce
 
 ```sh
