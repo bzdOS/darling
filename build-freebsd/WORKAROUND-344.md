@@ -1499,6 +1499,64 @@ reads its per-thread working directory from `%gs:(,0xc9*8)`, and this lane is
 about a thread that never comes back. Two facts about threads in one run are
 two facts; a shared `%gs` is a hypothesis, and nothing here tests it.
 
+#### Two things the table settled, and a correction to the lane finding above
+
+**The guest has no timer, and no poll.** Reading `freebsd_syscall_trap.c`'s own
+numbering rather than assuming it:
+
+| syscall | | in the table |
+|---|---|---|
+| `read` | 0 | defined |
+| `write` | 1 | defined |
+| `futex` | 202 | defined |
+| `poll` | 7 | **not defined** |
+| `select` | 23 | **not defined** |
+| `nanosleep` | 35 | **not defined** |
+| `pselect6` | 270 | **not defined** |
+| `ppoll` | 271 | **not defined** |
+| `clock_nanosleep` | 230 | **not defined** |
+
+All of the right-hand column falls through to the ENOSYS arm. This is why the
+probe has no timer leg: a guest `nanosleep` would fail on the **main** thread
+too, so it would have measured a missing syscall rather than a thread that
+cannot be resumed — and the main-thread control would have caught it, which is
+what the control is for. The three legs the probe does have are the three the
+guest can actually perform: `read`, a blocking `write`, and `sem_wait`.
+
+**A correction to the LANE FINDING in §9-4, because that line is not a
+measurement.** It reported `thread-lane: answered=0` and read as "the spawned
+thread never got its reply". The semaphore was checked **immediately** after the
+main lane returned — and the main lane returned in milliseconds, having just
+confirmed the commit — so the thread had been given almost no time. It is a
+race, and the log says so: `_sem_post` appears in that run, and the thread calls
+`sem_post` only *after* its roundtrip returns, so the thread did come back.
+
+So the honest state of the finding is narrower than §9-4 states it. The §9-3
+run waited the full five seconds and saw no reply, and *that* is sound; it says
+"not within 5s", not "never". The window probe's thread lane was too fast to
+mean anything. Nothing here establishes that a spawned guest thread cannot get
+a Wayland reply, and the classification below is still open.
+
+**And the probe had three bugs, all three found by compiling it for the host and
+running it there**, which is the only reason it is worth trusting now:
+
+1. The bounded wait recomputed an absolute deadline inside its own loop, so the
+   elapsed comparison was zero on the first pass; it gave up after one 20 ms
+   poll and the thread then set the flags it had abandoned. Per-line verdicts
+   and the summary disagreed.
+2. It waited for the read flag *before* writing the byte the read was blocked
+   on. A deadlock, which reported all three legs as dead on a machine where all
+   three return — in the direction of blaming the guest.
+3. It passed one descriptor for both directions, so the thread's write hit the
+   pipe's read end (EBADF) while the main thread sat in a drain with an empty
+   pipe. A hang, in a probe whose entire job is to report rather than stall.
+
+Every one of them reported a defect that was not there, and every one of them
+would have been read as a finding about the guest. A native self-test costs one
+compile and is the cheapest possible guard against a probe inventing its own
+result; the rule this adds is that a blocking-wait probe is not finished until
+it has been shown to PASS somewhere the answer is known.
+
 ## 14. Reproduce
 
 ```sh
