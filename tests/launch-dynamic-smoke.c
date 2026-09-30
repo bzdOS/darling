@@ -74,21 +74,23 @@ static void stage_tree(const char *od, const char *rel) {
         return;
     }
 
-    /* -k is load-bearing and was found the hard way.
+    /* -k: correct semantics for a separate pass, NOT a proven fix.
      *
-     * pax in copy mode removes destination entries the archive does not
-     * contain. The archive is `find . -type f`, which by construction
-     * contains no symlinks, so without -k the file pass DELETES every link
-     * the link pass created — and the staged tree comes out with zero
-     * symlinks in it, whichever order the two passes run in. With the old
-     * order that was invisible, because the links were created afterwards;
-     * with the link pass first it is total.
+     * The links are created by a SEPARATE pass that owns those names, and
+     * the archive here is `find . -type f`, which by construction mentions
+     * no symlink. "Keep destination entries the archive does not mention" is
+     * what a pass like that needs, so -k is the correct flag for the
+     * arrangement and stays on that basis.
      *
-     * Measured, not assumed: after a run with the link pass first, the
-     * staged tree had 0 symlinks against 54 in the overlay, and
-     * Versions/ held only C with no Current beside it. -k means "keep
-     * destination entries the archive does not mention", which is what a
-     * separate pass that owns those names needs. */
+     * The pax-deletion theory — that pax in copy mode deletes destination
+     * entries the archive does not contain, and therefore that the file pass
+     * erased every link the link pass had created — was never tested. The
+     * measured cause of the missing links was mkdir ENOENT in stage_symlinks
+     * (see that function), fixed in this commit. Nothing was ever created,
+     * so nothing was ever deleted, and the staged tree held no links with or
+     * without this flag.
+     *
+     * If a run ever shows the links surviving without it, drop it. */
     snprintf(cmd, sizeof(cmd),
              "mkdir -p '%s' && cd '%s' && find . -type f | pax -k -rw '%s'",
              dst, src, dst);
@@ -142,6 +144,12 @@ struct stage_symlinks_stats {
     unsigned long created;
     unsigned long failed;
     unsigned long mkdirs;
+    /* The three outcomes a walk can have, kept apart because they used to be
+     * one: directories that would not open, directories that opened, and
+     * entries read. "0 found" is only meaningful next to the first two. */
+    unsigned long open_failed;
+    unsigned long dirs_opened;
+    unsigned long entries_seen;
 };
 
 static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
@@ -152,9 +160,22 @@ static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
     if (d == NULL) {
         /* A directory that will not open here is not worth aborting for: the
          * regular-file pass has already copied what it could, and a link we
-         * cannot reach is a link we would not have copied correctly either. */
+         * cannot reach is a link we would not have copied correctly either.
+         *
+         * It IS worth counting, though. This path used to be silent, and
+         * silence made it indistinguishable from the two other things a walk
+         * can legitimately report — a directory that opened and held no
+         * links, and a directory whose entries were all read and classified
+         * as non-links. A run in which one whole tree reported "0 found"
+         * while the source plainly held a hundred symlinks looked exactly
+         * like a tree with no symlinks in it, and sent the reading somewhere
+         * else entirely. The count below is what tells the three apart. */
+        st->open_failed++;
+        printf("staging:   opendir(%s) failed: %s\n", src, strerror(errno));
         return 0;
     }
+
+    st->dirs_opened++;
 
     while ((de = readdir(d)) != NULL) {
         char sp[2048], dp[2048], target[1024];
@@ -162,6 +183,8 @@ static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
 
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
             continue;
+
+        st->entries_seen++;
 
         snprintf(sp, sizeof(sp), "%s/%s", src, de->d_name);
         snprintf(dp, sizeof(dp), "%s/%s", dst, de->d_name);
@@ -222,7 +245,7 @@ static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
 static void stage_symlinks(const char *od, const char *rel) {
     char src[1024], dst[1024];
     struct stat st;
-    struct stage_symlinks_stats stats = {0, 0, 0, 0};
+    struct stage_symlinks_stats stats = {0};
     const char *flag = getenv("DARLING_STAGE_SYMLINKS");
     int enabled = (flag == NULL || strcmp(flag, "0") != 0);
 
@@ -238,14 +261,51 @@ static void stage_symlinks(const char *od, const char *rel) {
     if (stat(src, &st) < 0)
         return; /* same "not in the overlay" case stage_tree already reports */
 
-    if (mkdir(dst, 0755) < 0 && errno != EEXIST) {
-        printf("staging: %s: mkdir failed: %s\n", dst, strerror(errno));
-        return;
+    /* mkdir -p, by hand, because this pass now runs FIRST.
+     *
+     * A single mkdir() on the tree root was enough while stage_tree ran
+     * first: it does `mkdir -p` and had already built the path. With the
+     * passes reordered this one is called before anything has created
+     * LOCAL_OVERLAY/System/Library, so mkdir() on .../Frameworks fails
+     * ENOENT, the pass returns, and NOT ONE symlink is created.
+     *
+     * That failure is quiet in the worst way: the pass prints one line and
+     * the run carries on, so the staged tree comes out with no links and
+     * everything downstream looks like a different bug. The guest then
+     * reported the framework root with four entries and neither link in it,
+     * which is what sent this looking at pax.
+     *
+     * Walking the path ourselves is safe here: the string is ours, built
+     * from LOCAL_OVERLAY and the tree name, and it is bounded by the same
+     * 2048-byte buffer everything else here uses. */
+    {
+        char path[2048];
+        snprintf(path, sizeof(path), "%s", dst);
+        for (char *slash = path; (slash = strchr(slash + 1, '/')) != NULL; ) {
+            *slash = '\0';
+            if (mkdir(path, 0755) < 0 && errno != EEXIST) {
+                printf("staging: %s: mkdir failed: %s\n", path, strerror(errno));
+                return;
+            }
+            *slash = '/';
+        }
     }
 
     stage_symlinks_walk(src, dst, 0, &stats);
     printf("staging: symlinks under %s: %lu found, %lu created, %lu failed\n",
            rel, stats.found, stats.created, stats.failed);
+    /* The three outcomes, so "0 found" is readable. A tree that opened and
+     * read thousands of entries and found no links is a fact about the tree; a
+     * tree whose directories would not open is a fact about this pass; the
+     * two were the same line of output before. */
+    printf("staging:   %s: %lu director%s opened, %lu entr%s read, "
+           "%lu open failure%s\n",
+           rel, stats.dirs_opened, stats.dirs_opened == 1 ? "y" : "ies",
+           stats.entries_seen, stats.entries_seen == 1 ? "y" : "ies",
+           stats.open_failed, stats.open_failed == 1 ? "" : "s");
+    if (stats.open_failed > 0 && stats.found == 0)
+        printf("staging:   ^ nothing was found because nothing could be opened;"
+               " this is a failure of this pass, not an absence of symlinks\n");
 }
 
 static const char *build_dir(void) {
