@@ -820,16 +820,21 @@ static void probe_shm_flags(void)
 	step("the flags are the variable now, the name held constant");
 
 	static const char *name = "/.probe-flags";
-	/* BSD values, the Linux values oflags_bsd_to_linux maps them to, and the
-	 * reverse direction, so a translation in either place shows up. */
+	/* These five values are the ORACLE's five rows, one for one:
+	 * build-freebsd/shm-flags-contract.sh, run on the host, feeding the
+	 * host's own shm_open each value exactly as given. The guest must now
+	 * agree with that table row for row, because the shim no longer
+	 * translates: the caller's value reaches the elfcalls slot unchanged.
+	 * That is the whole claim of the fix, and it is falsifiable — if the
+	 * shim still translated, every row here would differ from its oracle
+	 * row (0x202 would arrive as 0x0c2 and be refused).
+	 */
 	struct { const char *label; int flags; } cases[] = {
-		{"BSD  O_RDONLY                      (0x000)", 0x000},
-		{"BSD  O_RDWR                        (0x002)", 0x002},
-		{"BSD  O_RDWR|O_CREAT                (0x202)", 0x202},
-		{"BSD  O_RDWR|O_CREAT|O_EXCL         (0xa02)", 0xa02},
-		{"LINUX O_RDWR                       (0x002)", 0x002},
-		{"LINUX O_RDWR|O_CREAT|O_EXCL        (0x0c2)", 0x0c2},
-		{"LINUX O_CREAT|O_EXCL               (0x0c0)", 0x0c0},
+		{"O_RDWR|O_CREAT           (0x202)", 0x202},
+		{"O_CREAT|O_EXCL            (0xa00)", 0xa00},
+		{"O_RDWR|O_CREAT|O_EXCL    (0xa02)", 0xa02},
+		{"O_RDWR, no O_CREAT        (0x002)", 0x002},
+		{"the old double-translated (0x0c2)", 0x0c2},
 	};
 
 	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -839,17 +844,39 @@ static void probe_shm_flags(void)
 		     e ? strerror(e) : "-");
 		if (fd >= 0) { close(fd); shm_unlink(name); }
 	}
-	note("shmflags: the prediction is that the BSD rows succeed and the rows"
-	     " holding oflags_bsd_to_linux's output do not");
+	note("shmflags: the prediction is that all five rows equal the host's"
+	     " oracle for the same value — first three succeed, 0x002 gives"
+	     " ENOENT, 0x0c2 still gives EINVAL because a caller passing it"
+	     " means it and nothing now reinterprets it");
 
 	/* Is the elfcalls table itself alive? sem_open is the neighbouring POSIX
-	 * slot, filled from the same struct in the same file. */
+	 * slot, filled from the same struct in the same file.
+	 *
+	 * This control asks for O_CREAT|O_EXCL on a FIXED name, so a run that dies
+	 * between the open and the unlink — which is exactly what the sem_close
+	 * crash did — leaves the object behind. The next run then gets EEXIST and
+	 * the control would report the elfcalls table as broken when the table is
+	 * fine and the filesystem is dirty. Only the guest can clear it: the object
+	 * is root-owned on the host and `rm` as the build user is refused.
+	 *
+	 * It would be tempting to sem_unlink the name here first and be done. That
+	 * was tried, and it is one libc call too many: the guest stack is at its
+	 * limit at this depth, and the extra call faults on the guard page
+	 * (addr == rsp). Measured both ways on the same patched shim — with the
+	 * unlink, one SIGSEGV; without it, none. So the probe does not clear the
+	 * residue; it NAMES it, because a probe that changes the stack it is
+	 * measuring is worse than a probe that reports a dirty filesystem. */
 	{
 		sem_t *sem = sem_open("/.probe-sem", O_CREAT | O_EXCL, 0600, 0);
 		int e = sem == SEM_FAILED ? errno : 0;
 		note("shmflags: control, the neighbouring elfcalls slot: sem_open -> %s"
 		     " errno=%2d (%s)", sem == SEM_FAILED ? "SEM_FAILED" : "a handle",
 		     e, e ? strerror(e) : "-");
+		if (e == EEXIST)
+			note("shmflags: control, EEXIST is RESIDUE, not a broken table:"
+			     " a previous run crashed between sem_open and sem_unlink"
+			     " and left /.probe-sem behind. Remove it from inside the"
+			     " guest; as the build user on the host, rm is refused.");
 		if (sem != SEM_FAILED) sem_close(sem), sem_unlink("/.probe-sem");
 	}
 }

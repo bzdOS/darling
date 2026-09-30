@@ -999,6 +999,191 @@ window probe, and compare against the table above.
 touched by the fix. `build-freebsd/` gains a patch file and a test, and that is
 all.
 
+### The same fix, applied to the prebuilt shim, and measured
+
+**This supersedes the paragraph above.** "The fix cannot be built or tested from
+this machine" was true of the *source* fix and is still true of it: the three
+files live in the `xnu` submodule, no script here compiles the emulation, and
+the shim is a prebuilt artefact. But the shim is a **file**, and the change
+above is three instructions long. It can be written into that file directly, and
+then the oracle above can be run against a guest. So slice 2 was done after
+all, by patching the artefact instead of rebuilding it, and the claim about
+window run №9 below is now narrower — see the end of this subsection.
+
+The shim is a **fat** binary: `magic 0xcafebabe`, two slices, the x86_64 one at
+offset **4096**. `objdump` reports slice-relative addresses, so the address in
+the file is `4096 + vaddr`, and reading without that base reads the wrong bytes.
+Its `__TEXT` is `vmaddr 0x0 / fileoff 0x0`, so `file_off == vaddr` and the
+identity that §5.2's `libsystem_c` patch relied on holds here too. Both
+facts are needed; the first is the one that bites.
+
+The verified table. `abs` is the offset in the file:
+
+| vaddr | abs | before | after | what |
+|---|---|---|---|---|
+| `0x6696d` | `0x6796d` | `e8 1e 21 fe ff` | `89 f8 0f 1f 00` | `_sys_shm_open`, flags as-is |
+| `0x6674d` | `0x6774d` | `e8 3e 23 fe ff` | `89 f8 0f 1f 00` | `_sys_sem_open`, flags as-is |
+| `0x4b8ee` | `0x4c8ee` | `e8 9d d1 ff ff` | `e8 bd 00 00 00` | `__open_for_libelfloader`, **wd** |
+| `0x666d1`+`0x666e4` | `0x676d1` | `48 89 e5 48 83 ec 10 89 7d fc` / `48 63 7d fc` | `89 e5 48 83 ec 10 48 89 7d f0` / `48 8b 7d f0` | `_sys_sem_close`, handle width |
+
+Four of the seven `oflags_bsd_to_linux` call sites are left alone: they are the
+`LINUX_SYSCALL` path (`_sys_open_by_handle`, `_sys_fcntl_nocancel`,
+`_sys_openat_nocancel`) and `__open_for_libelfloader`'s own `linux_flags`, and
+that path's contract genuinely is Linux flags. The sweep boundary is
+`_sys_shm_open`, `_sys_sem_open` and the `wd` call.
+
+**The `wd` site is not a flags site and must not be given the flags treatment.**
+It reads `wd = oflags_bsd_to_linux(flags)`, and the right answer there is
+`wd = get_perthread_wd()`. Replacing that call with `mov %edi,%eax` leaves
+`wd = flags` — the very bug being fixed — and the mechanical gate
+(*`edi` is set before, `eax` is read after*) cannot see it, because it is
+satisfied by a site that is wrong in a different way. So the third site is a
+**call-target swap**: `rel32 = 0x4b9b0 − 0x4b8f3 = 0xbd`, five bytes, same
+length, and `_get_perthread_wd` reads only immediates and TLS, never `edi`, so
+the stale `flags` in `edi` is harmless.
+
+**`_sys_sem_close` took a pointer as an `int`, and that is a second defect,
+not a third site.** `sem_open` returns a 64-bit pointer; the wrapper stored it
+with `movl %edi,-0x4(%rbp)` and read it back with `movslq -0x4(%rbp),%rdi`, so
+`0x174F99EA9888` went in as `0x99EA9888` and came out as
+`0xFFFFFFFF99EA9888`. The gate that let it be written is the same shape as every
+other one here: `sem_open` always failed first, so `_sys_sem_close` was never
+reached and never crashed. Fix the flags and the crash appears.
+
+Two wrong things had to be avoided, and both are load-bearing:
+
+- **The length must not change.** `89 7d fc` is three bytes and `48 89 7d fc`
+  is four, so the obvious replacement shifts every following instruction and
+  silently breaks their `rel32` fields. There is no slack to spend: the five
+  bytes at `0x666db` are `callq _elfcalls`, not padding, and a near call is
+  never shorter than five bytes. The one byte comes from `movq %rsp,%rbp`
+  (`48 89 e5`, three) becoming `movl %esp,%ebp` (`89 e5`, two) — legal because
+  `rbp` is only a frame base in this function and `popq %rbp` restores the
+  caller's copy from the stack, so the zero-extended upper half never escapes.
+- **The slot must not straddle the frame.** Writing eight bytes at
+  `-0x4(%rbp)` covers `rbp−4 … rbp+3` and takes the low half of the saved
+  `rbp`. The frame is `subq $0x10`, and `-0x8` is **not** free — `0x666ea`
+  stores the slot's return value there — so the store goes to `-0x10`, which
+  nothing in the function touches.
+
+Result: the file's length is unchanged, ten bytes differ in the `sem_close`
+window, every `rel32`-bearing instruction in the function keeps both its address
+and its target, and `callq _elfcalls` does not move.
+
+**Measured, against the oracle at the top of this section.** Guest and host, same
+value, same call:
+
+| value | oracle (host) | guest | |
+|---|---|---|---|
+| `0x202` | fd, errno 0 | fd 8, errno 0 | match |
+| `0xa00` | fd, errno 0 | fd 8, errno 0 | match |
+| `0xa02` | fd, errno 0 | fd 8, errno 0 | match |
+| `0x002` | errno 2 | errno 2 | match |
+| `0x0c2` | errno 22 | errno 22 | match |
+
+**Five of five, and the control is what makes it mean anything.** The same probe
+on the *unpatched* shim: `0x202`, `0xa00` and `0xa02` all give errno 22,
+`0x0c2` gives errno 2, and `sem_open` gives `SEM_FAILED` errno 22. Three of the
+five rows and the control are broken before the patch.
+
+One thing the probe had to stop doing. Its `sem_open` control asks for
+`O_CREAT|O_EXCL` on a fixed name, so a run that died before the unlink left the
+object behind — and `rm` of it on the host is refused, it is root-owned. The
+obvious repair, an unlink first, is **one libc call too many**: the guest stack
+is at its limit at that depth and the extra call faults on the guard page
+(`addr == rsp`). Measured both ways on the same patched shim, with the unlink
+one `SIGSEGV`, without it none. So the probe does not clear the residue, it
+names it: `EEXIST` from that control means last run crashed, not that the
+elfcalls table is broken. A probe that changes the stack it is measuring is worse
+than one that reports a dirty filesystem.
+
+**Still not done: window run №9.** These measurements are the flag probe, which
+is the check this section predicted would pass. The window probe has not been
+run against the patched shim, so no claim is made about it. What is measured is
+that `O_CREAT` now reaches the host and is honoured, and that the four walls
+before the shm pool are down.
+
+#### The patch as a script, because the shim is not in git
+
+The shim is an artefact of the overlay and is not in this repository, so a
+description of the change is not enough to reproduce it — the next person would
+have to re-derive the addresses. That is the §6 trap with a new face. This
+refuses to write anything whose bytes are not exactly what is expected, and
+re-verifies by decoding rather than by trusting its own write:
+
+```sh
+python3 - <<'EOF'
+import struct
+K = "overlay/usr/lib/system/libsystem_kernel.dylib"   # the shim, in the overlay
+d = bytearray(open(K, "rb").read())
+
+# The x86_64 slice's base in the fat header, found rather than assumed.
+nfat = struct.unpack_from(">I", d, 4)[0]
+base = None
+for i in range(nfat):
+    ct, cs, off, size, align = struct.unpack_from(">iiIII", d, 8 + i * 20)
+    if (ct & 0xffffffff) == 0x01000007:
+        base = off
+assert struct.unpack_from("<I", d, base)[0] == 0xfeedfacf, "not a 64-bit Mach-O slice"
+
+# __TEXT must be the identity, or file_off != vaddr and every offset below is wrong.
+ncmds = struct.unpack_from("<I", d, base + 16)[0]
+p, segs = base + 32, []
+for _ in range(ncmds):
+    cmd, cmdsize = struct.unpack_from("<II", d, p)
+    if cmd == 0x19:                                     # LC_SEGMENT_64
+        name = d[p+8:p+24].split(b"\0")[0].decode(errors="replace")
+        vmaddr, vmsize, fileoff, filesize = struct.unpack_from("<4Q", d, p+24)
+        segs.append((name, vmaddr, vmsize, fileoff, filesize))
+    p += cmdsize
+text = [s for s in segs if s[0] == "__TEXT"][0]
+assert text[1] == 0 and text[3] == 0, "__TEXT is not the identity; recompute the offsets"
+
+MOVNOP = b"\x89\xf8\x0f\x1f\x00"                        # mov %edi,%eax ; nopl (%rax)
+
+# (vaddr, expected-before, replacement). The before-bytes are the gate.
+EDITS = [
+    (0x6696d, b"\xe8\x1e\x21\xfe\xff", MOVNOP),                  # _sys_shm_open
+    (0x6674d, b"\xe8\x3e\x23\xfe\xff", MOVNOP),                  # _sys_sem_open
+    (0x4b8ee, b"\xe8\x9d\xd1\xff\xff",
+            b"\xe8" + struct.pack("<i", 0x4b9b0 - (0x4b8ee + 5))),  # wd -> get_perthread_wd
+]
+# The sem_close window: ten bytes rewritten, length preserved, the call at 0x666db untouched.
+EDITS.append((0x666d1, b"\x48\x89\xe5\x48\x83\xec\x10\x89\x7d\xfc",
+                       b"\x89\xe5\x48\x83\xec\x10\x48\x89\x7d\xf0"))
+EDITS.append((0x666e4, b"\x48\x63\x7d\xfc", b"\x48\x8b\x7d\xf0"))
+
+for vaddr, before, after in EDITS:
+    off = base + vaddr
+    assert len(before) == len(after), "length changes: everything after it shifts"
+    if bytes(d[off:off+len(after)]) == after:
+        continue                                          # already applied
+    if bytes(d[off:off+len(before)]) != before:
+        raise SystemExit("refusing 0x%x: got %s, expected %s"
+                         % (vaddr, bytes(d[off:off+len(before)]).hex(" "), before.hex(" ")))
+    d[off:off+len(after)] = after
+
+open(K, "wb").write(d)
+
+# Re-verify from the bytes, not by trusting the write. Two sites must now BE the
+# mov/nop, and only the third is still a call -- checking that all three are
+# calls is a bug this script had before it was run.
+for vaddr in (0x6696d, 0x6674d):
+    assert bytes(d[base + vaddr:base + vaddr + 5]) == MOVNOP, "0x%x is not the mov/nop" % vaddr
+off = base + 0x4b8ee
+assert d[off] == 0xe8, "0x4b8ee is not a call any more"
+got = 0x4b8ee + 5 + struct.unpack_from("<i", d, off + 1)[0]
+assert got == 0x4b9b0, "0x4b8ee calls 0x%x, wanted 0x4b9b0" % got
+assert bytes(d[base + 0x666db:base + 0x666e0]) == b"\xe8\x40\x75\xfe\xff", "the elfcalls call moved"
+print("patched and verified")
+EOF
+```
+
+The five `_oflags_bsd_to_linux` sites this leaves alone are named above on
+purpose: the script patches three, and a fourth kind of change — a new call
+where there was none — is a different edit with a different risk, which is why
+the `wd` swap is listed separately and separately verified.
+
 ## 14. Reproduce
 
 ```sh
