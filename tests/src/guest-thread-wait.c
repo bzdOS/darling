@@ -234,6 +234,20 @@ static void *control_desc_thread(void *p)
 	return NULL;
 }
 
+/* WHICH call refused, not just that something did.
+ *
+ * A single errno covers two very different worlds: socket() refusing to make a
+ * descriptor at all, and connect() refusing to reach a peer that is not there.
+ * The note used to report the second while meaning it could be the first, which
+ * is the same unearned-verdict defect as a leg that cannot tell "blocked" from
+ * "came straight back" — a diagnostic that says something false about why. So
+ * the stage is recorded where it happens and the note names it. */
+#define PEER_STAGE_NONE    0   /* nothing was attempted: no peer configured */
+#define PEER_STAGE_SOCKET  1   /* socket() would not make a descriptor */
+#define PEER_STAGE_CONNECT 2   /* a descriptor, and connect() refused it */
+
+static int peer_stage = PEER_STAGE_NONE;
+
 static int connect_peer(void)
 {
 	const char *port = getenv(PEER_PORT_ENV);
@@ -244,17 +258,22 @@ static int connect_peer(void)
 		/* Not "connection failed" — nothing was attempted. Leaving errno
 		 * alone here made the caller report "no connected sockets (No error:
 		 * 0)", which is a diagnostic that says something false about why. */
+		peer_stage = PEER_STAGE_NONE;
 		errno = ENXIO;
 		return -1;
 	}
 	fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0) return -1;
+	if (fd < 0) {
+		peer_stage = PEER_STAGE_SOCKET;
+		return -1;
+	}
 	memset(&sa, 0, sizeof(sa));
 	sa.sin_family = AF_INET;
 	sa.sin_port = htons((unsigned short)atoi(port));
 	sa.sin_addr.s_addr = htonl(0x7f000001);   /* 127.0.0.1 */
 	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
 		int e = errno;
+		peer_stage = PEER_STAGE_CONNECT;
 		close(fd);
 		errno = e;
 		return -1;
@@ -307,12 +326,20 @@ int main(void)
 	 * exercised. Half a peer is not a peer. */
 	peers_ok = (peer >= 0 && peer_lane >= 0);
 	if (!peers_ok) {
-		if (errno == ENXIO)
+		if (peer_stage == PEER_STAGE_NONE)
 			printf("  note: no peer configured, so no socket was attempted. The"
 			       " descriptor leg is NOT exercised, and that is not a result"
 			       " about threads.\n");
+		else if (peer_stage == PEER_STAGE_SOCKET)
+			printf("  note: no connected sockets — socket() would not make a"
+			       " descriptor at all (%s), so no address was ever reached and"
+			       " the peer was never touched. The descriptor leg is NOT"
+			       " exercised, and that is not a result about threads.\n",
+			       strerror(errno));
 		else
-			printf("  note: no connected sockets (%s). The descriptor leg is NOT"
+			printf("  note: no connected sockets — socket() worked and connect()"
+			       " refused it (%s), so the descriptor was fine and it is the"
+			       " address that was refused. The descriptor leg is NOT"
 			       " exercised, and that is not a result about threads.\n",
 			       strerror(errno));
 	}

@@ -1922,6 +1922,49 @@ timeout --foreground -k 60 120 sudo env \
     "$DARLING_BUILD_DIR/launch-dynamic" > "$DARLING_BUILD_DIR/thread-lane.log" 2>&1
 ```
 
+**Addendum 3 — a correction to Addendum 1, and the probe now says which call
+refused.** Addendum 1 ended with a cause for the missing descriptor leg. Two of
+its claims do not survive being checked, and one of them was mine to check.
+
+**The `vchroot` story is refuted by `vchroot.c`.** Addendum 1 said a missing
+`vchroot` is a missing network stack and `EAFNOSUPPORT` is what `socket()` gets
+without one, which is why the descriptor leg is absent. `src/vchroot/vchroot.c` is
+45 lines: it checks its arguments, `open`s the directory, `fchdir`s into it, calls
+`__darling_vchroot(dfd)` and `exec`s what it was pointed at. There is no socket,
+no interface, no network code in it at all — it builds the *vchroot context*, which
+is a directory, not a stack. So installing it would not hand the guest a socket,
+and the next person must not spend a root prompt on that. What the missing file
+does explain is the `Cannot open …/vchroot` line and the failed container
+bootstrap — which is a real defect, just not this one.
+
+**"The errno comes from `socket()`, before `connect`" was not supported by the
+code.** `connect_peer()` returned `-1` from either failure and preserved whichever
+`errno` it had, so `EAFNOSUPPORT` was equally consistent with a `connect()` that
+was refused — a different world with a different owner. Addendum 1 asserted the
+first because reading the code made it look like the only path, and that is
+exactly the mistake this file keeps warning about. So the stage is now recorded
+where it happens (`PEER_STAGE_*`, and the note prints it):
+
+| stage | what the note says | what it means |
+|---|---|---|
+| none | no socket was attempted | no peer configured — not a failure at all |
+| socket | `socket()` would not make a descriptor at all | the guest has no descriptor; the address was never reached |
+| connect | `socket()` worked and `connect()` refused it | the descriptor is fine; it is the address that was refused |
+
+All four states, natively, no root: no peer → *none*; a closed port → *connect*
+(`Connection refused`); `ulimit -n 4` so the second `socket()` cannot get a
+descriptor → *socket* (`Too many open files`); a live echo-and-hold peer → both
+`recvmsg` legs `RETURNED` and verdict (Б). The old note said "no connected
+sockets (…)" for the last two, and the two are not the same finding.
+
+**What the guest run will now settle that the last one could not:** the
+`EAFNOSUPPORT` of the 10:55 run is, by the code, from either call, and this probe
+cannot tell you which. The rebuilt binary can. If it says *socket*, then the guest
+cannot make a descriptor at all and the next root is in the socket path itself; if
+it says *connect*, then descriptors work and the refusal is about reaching the
+address — a different layer, and the descriptor leg is one `connect` away from
+working rather than one `socket` away.
+
 ## 14. Reproduce
 
 ```sh
@@ -2045,6 +2088,17 @@ timeout --foreground -k 60 120 sudo env \
     "$DARLING_BUILD_DIR/launch-dynamic" > "$DARLING_BUILD_DIR/thread-lane.log" 2>&1
 grep -aE 'after post|sem_wait|^VERDICT|^  \(A|^  \(B|^  \(none|^  \(not' \
     "$DARLING_BUILD_DIR/thread-lane.log"
+
+# Which call refused is now a reported fact, and all three stages are reachable
+# without a guest. A closed port refuses connect(); the socket() stage needs the
+# FIRST connection to SUCCEED and take the last descriptor — against a dead port
+# both connects fail fast, each closing its own descriptor, and the limit is never
+# reached, so the recipe looks right and does not reproduce. Output goes to a FILE,
+# because the limit starves a pipeline before the probe can report anything.
+CLOSED=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));p=s.getsockname()[1];s.close();print(p)")
+DARLING_THREAD_PEER_PORT=$CLOSED timeout -k 5 60 /tmp/gtw-native 2>&1 | grep -a 'note:'
+sh -c "ulimit -n 4; DARLING_THREAD_PEER_PORT=$PEER exec /tmp/gtw-native" >/tmp/lim.txt 2>&1
+grep -a 'note:' /tmp/lim.txt
 
 # And the syscall discipline, at the BINARY rather than in the source: a grep of
 # the source cannot see what a macro or an inline pulled in.
