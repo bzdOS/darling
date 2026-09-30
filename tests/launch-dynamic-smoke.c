@@ -74,25 +74,35 @@ static void stage_tree(const char *od, const char *rel) {
         return;
     }
 
-    /* -k: correct semantics for a separate pass, NOT a proven fix.
+    /* -k is GONE, and a run is why.
      *
-     * The links are created by a SEPARATE pass that owns those names, and
-     * the archive here is `find . -type f`, which by construction mentions
-     * no symlink. "Keep destination entries the archive does not mention" is
-     * what a pass like that needs, so -k is the correct flag for the
-     * arrangement and stays on that basis.
+     * It was here on an argument, not a measurement. The links are created by
+     * a separate pass that owns those names, the archive below is
+     * `find . -type f` and so mentions no symlink by construction, and "keep
+     * destination entries the archive does not mention" is what a pass like
+     * that seems to need. The competing theory was that pax in copy mode
+     * deletes destination entries the archive does not contain, so the file
+     * pass erased every link the link pass had made.
      *
-     * The pax-deletion theory — that pax in copy mode deletes destination
-     * entries the archive does not contain, and therefore that the file pass
-     * erased every link the link pass had created — was never tested. The
-     * measured cause of the missing links was mkdir ENOENT in stage_symlinks
-     * (see that function), fixed in this commit. Nothing was ever created,
-     * so nothing was ever deleted, and the staged tree held no links with or
-     * without this flag.
+     * Neither had been tested, and the comment above used to say so. Now one
+     * has: launch-dynamic rebuilt without -k, same overlay, same probe.
      *
-     * If a run ever shows the links surviving without it, drop it. */
+     *   symlinks under System/Library/Frameworks: 106 found, 106 created, 0 failed
+     *   symtest: AppKit     d_type=10        symtest: Resources  d_type=10
+     *   rootscan: 6 entries returned by readdir
+     *   rootscan: pathsForResourcesOfType:@"backend" -> 1 path(s)
+     *
+     * Every number is the one -k produced. The deletion theory was wrong, and
+     * it was wrong for a reason no amount of reading would have produced: the
+     * link pass had never created anything to delete. It failed on mkdir ENOENT
+     * (see stage_symlinks), which is why the staged tree held no links either
+     * way — the flag was a plausible explanation for an empty result that the
+     * flag had no part in.
+     *
+     * A flag kept on a theory outlives the theory, and outliving it is the
+     * dangerous part: it reads as load-bearing to the next reader. */
     snprintf(cmd, sizeof(cmd),
-             "mkdir -p '%s' && cd '%s' && find . -type f | pax -k -rw '%s'",
+             "mkdir -p '%s' && cd '%s' && find . -type f | pax -rw '%s'",
              dst, src, dst);
     (void)system(cmd);
     printf("cached locally: %s\n", dst);
