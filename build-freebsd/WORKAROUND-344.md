@@ -413,14 +413,18 @@ binary and will read differently next time.**
   absent from the guest's root, with the harness line that drops it named.
   **Neither is fixed** — the root by a fixture that this branch deliberately
   does not contain, the symlink not at all.
-- **Which of §5's walls the window would meet first is not measured.** The
-  order in §5's list is the order the code walks them, not the order a run
-  confirmed, because no run was spent past the separator. Fixing wall 1 might
-  reveal wall 2, or wall 2 might be what the next exception reports; either
-  way both have to go.
-- **The mechanism is still a lead.** "Returns the first few records and drops
-  the last few" is now measured in both directions, which is more than
-  `EMU-344.md` §5 had, but nothing in reach explains the seven.
+- **The mechanism is still a lead.** "Returns a prefix of the listing" is now
+  measured in both directions and against a byte threshold (§9), but nothing
+  in reach explains how long the prefix is.
+- **Symlink entries do not survive into a guest listing** (§10). The staged
+  tree has them, a symlinked path opens, and the entries themselves are absent
+  from the listing. Emulation omits them, or delivers them with a zero inode
+  and libc drops them — not separated, because the run's budget was spent.
+- **The window itself is still not on screen.** Four walls are down and a
+  `WaylandWindow` object exists, but the shm pool fails (§10) and the fix for
+  that one is a byte in a binary whose sources are gone. Nothing here is a
+  claim that a frame is drawn.
+
 - **`SLOT-344.md` §1's "N−7" is wrong twice over**, and §9 is the correction:
   the threshold is a byte total, and the dropped tail is not seven. Only the
   *direction* is relied on by any fixture here, and the direction is measured.
@@ -501,7 +505,130 @@ better supported than before: **the records come from the head of the listing**
 — every one of these runs prints `d_name="."` as its first record — and a
 directory must be above the line in bytes to answer at all.
 
-## 10. Reproduce
+## 10. Both walls closed, the window is built, and the fourth wall is OURS
+
+Two root runs. The first checks the two fixes and the control; the second is
+the full window run.
+
+### The fixes
+
+**The symlinks.** `launch-dynamic-smoke.c` now carries them across: each link is
+found with `lstat`, read with a single `readlink` into a buffer we own, and
+recreated with a single `symlink`. Not handed to a recursive copier — the
+reason the old form was abandoned is recorded three functions above, and
+calling `readlink` exactly 54 times is not that failure.
+`DARLING_STAGE_SYMLINKS=0` reverts the whole thing to regular files only.
+
+**The framework root.** Seven pads after the existing entries, nothing moved,
+so `AppKit`, `Resources` and `Versions` keep their places at the front.
+
+### Root 1 — both walls gone, control intact
+
+```
+[probe] rootscan: framework root ... d_name=. / .. / Versions / pad-01.txt /
+                pad-02.txt / pad-03.txt        6 entries returned by readdir
+[probe] rootscan: Resources/Backends ... d_name=. / .. / Wayland.backend /
+                pad-01.txt                     4 entries returned by readdir
+[probe] rootscan: pathsForResourcesOfType:@"backend" inDirectory:@"Backends"
+                -> 1 path(s)
+[probe] rootscan:   /System/…/AppKit.framework/Resources/Backends/Wayland.backend
+[probe] before-load: infoDictionary count = 12
+[probe] principalClass = WaylandDisplay
+```
+
+`ENOENT` is gone, the root answers where it answered nothing, the discovery
+returns the backend it wants, and `Contents/` still works.
+
+### Root 2 — window run №7: the exception is gone
+
+```
+[step 02] bundle path = /System/…/Backends/Wayland.backend
+[step 03] NSDisplay currentDisplay (discovers + inits the backend itself)
+[step 04] newWindowWithDelegate: nil -> WaylandWindow
+[step 05] _acquireBackBufferForWidth:640 height:480 (reaches
+         _wayland_window_create_shm_fd)
+[step 06] RESULT: no buffer (record=0x0 buffer=0x0 pixels=0x0)
+         -- shm allocation did NOT succeed.
+```
+
+The registry enumerates fifteen globals — `wl_shm`, `wl_compositor`,
+`xdg_wm_base`, `zwp_layer_shell_v1` among them — so the display is talking to
+sway, and `[step 04]` means a `WaylandWindow` exists. Four walls are behind us:
+`Info.plist` not found, `Backends/` empty, the framework root unscannable, and
+`Resources` unopenable. **The fourth wall is the shm pool**, and it is not the
+emulation's:
+
+```
+WaylandWindow: shm allocation failed for 640x480 buffer: Invalid argument
+```
+
+with the name the backend builds being `./.bsdos-wlshm-%d-%d`, visible in the
+binary's own strings. `EINVAL`, not `ENOENT`, and a name like that is the
+classic POSIX-shm violation: the name must be one leading slash followed by
+non-slash characters, and `./.bsdos-wlshm-0-1` has two.
+
+Proved on the host, no root and no guest, in four lines of C:
+
+```
+shm_open("./.bsdos-wlshm-0-1") = -1  errno=22 (Invalid argument)
+shm_open("/.bsdos-wlshm-0-1")  =  3  errno=0
+shm_open("bsdos-wlshm-0-1")    = -1  errno=22 (Invalid argument)
+shm_open("/bsdos-wlshm-0-1")   =  3  errno=0
+```
+
+Native FreeBSD, native libc, and the same `EINVAL` the guest produced. **This
+wall would fail identically on a machine with no emulation in it at all.** Four
+directories' worth of fixtures, a symlink transfer and a framework root bought
+a window; the last thing between here and a frame is a name our own backend
+built wrong.
+
+**The fix is one byte, and it is not mine to make.** The string sits at offset
+`0x8b3c` in `tests/vendor/wayland-backend/Wayland`; replacing the leading `.`
+with `/` is a same-length edit that changes exactly one byte and moves nothing,
+giving sha256 `b918e22e77875289ac6a730fba27d39cddc3e36a6234916de2d2c363897e73da`.
+
+It is not in this branch because the decision is not a technical one. That
+binary's sources **no longer exist anywhere** — the README in
+`tests/vendor/wayland-backend/` records the search, and it is the only copy of
+the artifact. Re-blessing its hash is re-blessing something we cannot rebuild,
+and three scripts pin `a4797cdd…` as the committed value. That is the head's
+call and the owner's if it comes to that, not a side commit in a наряд about
+symlinks. Recorded here so the decision can be made with the offset and the new
+hash in front of it.
+
+### One more thing the run turned up, and did not need a run to notice
+
+The guest's listing of the framework root came back as `.`, `..`, `Versions`,
+`pad-01`, `pad-02`, `pad-03` — **`AppKit` and `Resources` are missing from it**,
+and both are symlinks that are present in the staged tree (`ls -la` on the
+staged root shows them). So symlink *entries* do not survive into the listing,
+even though a symlinked *path* now opens. The two indistinguishable causes are
+that the emulation omits them, and that it delivers them with a zero inode for
+libc's `readdir` to drop (`if (dp->d_ino == 0 && skip) continue;`,
+readdir.c:118) — the same two candidates `PRINCIPAL-CLASS.md` §5 named, one
+level up. The raw `__getdirentries64` probe would separate them in any future
+run; it is not run here because the run's own budget was spent.
+
+Discovery worked anyway, so this is not currently blocking, and that is luck
+rather than design: the layout scan saw `Versions` and no `Resources`,
+determined some layout, and the fallback in `_CFBundleCopyFindResources`
+("Assume no resources directory", CFBundle_Resources.c) found the path anyway.
+**That fallback is load-bearing on a coincidence and should not be leaned on.**
+
+### Is a message to nil safe here? Answered in the same run
+
+Four messages to a nil receiver, varying the return type — `id`, `NSInteger`,
+a real `NSRange` struct return, and `+alloc` through a nil `Class` — all
+returned nil/0 and none faulted. **The nil check exists.** The `SIGSEGV` at
+`0xff0a0000` in §5 was a bug in the separator, which sent a message to the nil
+bundle `+[NSBundle bundleWithClass:]` had returned, and not a property of this
+runtime. The wall-sized claim is refuted by measurement, which is the only way
+it should have been refuted: had it been true, every idiomatic `[nil whatever]`
+in Chrome would crash, and the finding would have been worth a very different
+response.
+
+## 11. Reproduce
+
 
 ```sh
 export DARLING_SRC_DIR="$PWD"                       # this checkout
@@ -521,8 +648,26 @@ done
 
 sh build-freebsd/fill-bundle-contents.sh            # Contents/ layout + both hashes
 sh build-freebsd/fill-bundle-contents.sh backends   # Backends/ layout, §4
+sh build-freebsd/fill-bundle-contents.sh framework-root  # framework root, §10
 sh build-freebsd/fill-bundle-contents.sh remove contents   # and back to 4 entries
 sh build-freebsd/fill-bundle-contents.sh remove backends   # and back to 3
+sh build-freebsd/fill-bundle-contents.sh remove framework-root  # and back to 3
+
+# §10's fourth wall, proved on the host with no root and no guest. The first
+# name is what the backend builds; the second is the same name POSIX accepts.
+cat >/tmp/shmname.c <<'EOF'
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <string.h>
+#include <errno.h>
+int main(void){const char*n[]={"./.bsdos-wlshm-0-1","/.bsdos-wlshm-0-1"};
+for(unsigned i=0;i<2;i++){int fd=shm_open(n[i],O_RDWR|O_CREAT|O_EXCL,0600);
+printf("shm_open(\"%s\") = %d errno=%d (%s)\n",n[i],fd,fd<0?errno:0,fd<0?strerror(errno):"-");
+if(fd>=0){close(fd);shm_unlink(n[i]);}}return 0;}
+EOF
+cc -o /tmp/shmname /tmp/shmname.c && /tmp/shmname
 
 sh build-freebsd/build-bundle-principal-class-test.sh
 DRY_RUN=1 sh build-freebsd/run-bundle-principal-class.sh   # RC=0, 7 checks, no root
