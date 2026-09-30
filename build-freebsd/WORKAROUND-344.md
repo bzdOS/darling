@@ -2041,18 +2041,40 @@ grep 'Available backends\|no NSPrincipalClass' \
 # BINARY LEVEL, BEFORE ANY RUN. The previous step grepped the probe's SOURCE for
 # the wrappers it must not call, which is a claim about this file and not about
 # what this file's waits turn into. The guest's semaphore wait is a syscall the
-# source cannot see: llvm-nm of the probe shows only _sem_wait, and the number
-# lives behind __darling_bsd_syscall inside an installed dylib. So the recipe
-# disassembles the library and checks that 271 is in neither of the trap's own
-# tables. This step is what makes the run's verdict mean anything, and it is
-# first because it is the step whose absence the 13:1x run exposed.
+# source cannot see: llvm-nm of the probe shows only _sem_init/_sem_wait, and
+# the number lives behind __darling_bsd_syscall inside an installed dylib.
+#
+# CORRECTED 23:2x, after the run: this step as first written checked the wrong
+# table and would have sent the next reader to edit a file whose table entry
+# changes nothing. Two greps that were the whole of it:
+#
+#   llvm-objdump … | grep -A2 '^_sem_wait:$'      # -> 271
+#   grep -cE '^#define (LINUX|MACOS)_SYS_… +271$' freebsd_syscall_trap.c   # -> 0
+#
+# Both are true and the conclusion drawn from them ("the trap defines 271
+# nowhere, therefore the wait is unprovided") was wrong. 271 never reaches that
+# trap: __darling_bsd_syscall is a function-pointer table inside the overlay's
+# own libsystem_kernel.dylib, not SIGSYS interception, and the guest's table
+# ALREADY carries [271] = sys_sem_wait (bsd_syscall_table.c:377) wired to
+# elfcalls()->sem_wait, which mldr fills with the host's sem_wait
+# (elfcalls.c:112). A run confirms it from the other side: the log's only
+# unhandled Linux syscall is 99 (brk); 271 never appears.
+#
+# What is actually missing is EARLIER, and this is the step that finds it:
+# _sem_init is a stub that returns -1/ENOSYS without touching the object. Every
+# sem_wait in the probe was therefore reading an uninitialised int, and the
+# EINVAL it draws belongs to the initialisation. Check it, and check it BEFORE
+# the wait's number is allowed to mean anything:
 llvm-objdump --macho --disassemble \
     "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" \
-  | grep -A2 '^_sem_wait:$'
-# _sem_wait:  movl $0x10f, %eax ; callq __darling_bsd_syscall   <- 271, NOT 202
-grep -cE '^#define (LINUX|MACOS)_SYS_[a-z_0-9]+ +271$' \
-    src/startup/mldr/freebsd_syscall_trap.c
-# 0 — the trap defines 271 nowhere, in either of its tables
+  | grep -A9 '^_sem_init:$'
+# _sem_init:  … callq ___error ; movl $0x4e, (%rax) ; movl $0xffffffff, %eax
+# 0x4e = 78 = ENOSYS, and NO store to the semaphore: it is never initialised.
+# _sem_destroy is the same shape; _sem_wait (271) and _sem_post (273) are real.
+#
+# The lesson is the one this addendum keeps re-learning: a grep that returns a
+# confident 0 is evidence about the file it was pointed at, not about the
+# subsystem. Point the next one at the table the call actually reaches.
 
 nohup python3 - <<'EOF' >"$DARLING_BUILD_DIR/peer.log" 2>&1 &
 import socket, threading
@@ -2124,24 +2146,38 @@ llvm-nm -u tests/guest-thread-wait-macho | awk '{print $NF}' | sort \
   | grep -E '^_(poll|writev|pipe|select|nanosleep|shutdown|bind|listen|getsockname|socketpair|accept)$'
                                                           # empty, and that is the point
 
-# The last two greps together are the whole correction, and they are different
-# kinds of check. The one above asks which wrappers the probe CALLS. The one
-# before it asks which syscall the wrapper it calls REACHES, which is the one
-# that failed here: the source was clean, the binary imported only _sem_wait,
-# and _sem_wait turned out to be 271 rather than the 202 this recipe assumed.
-# A discipline that only checks the first cannot see a wait that is clean at the
-# source and absent at the syscall.
+# The last three greps together are the whole correction, and they are three
+# different kinds of check. The one above asks which wrappers the probe CALLS.
+# The one before it asks which syscall the wrapper it calls REACHES: the source
+# was clean, the binary imported only _sem_init/_sem_wait, and _sem_wait turned
+# out to be 271 rather than the 202 this recipe assumed. A discipline that only
+# checks the first cannot see a wait that is clean at the source and absent at
+# the syscall. The third asks whether the syscall the wrapper reaches is
+# actually PROVIDED — and that is the one that finds the real gap, because 271
+# is provided (the guest's own table has it) while _sem_init, which runs BEFORE
+# it, is not.
 #
-# What the peerless run then reports, 2026-09-30, and the reason the rubric's A
-# and B are not assigned below: every sem_wait in this guest is REFUSED at the
-# call, with EINVAL, including the control's — which runs on an ALREADY-POSTED
-# semaphore, where there is no contention, nothing to park on and nothing to
-# release. A refusal is not a wake, so the released legs measure nothing, and a
-# verdict built on them would be the third false finding in this lane rather
-# than a result. The probe now prints REFUSED and declines to classify; read it
-# with:
-grep -aE 'sem_wait|after post|REFUSED|^VERDICT|^  \(refused|^  \(A|^  \(B' \
+# What the peerless run reports, 2026-09-30 23:1x, and the reason the rubric's A
+# and B are not assigned: every sem_wait is REFUSED with EINVAL, and now the
+# probe prints WHY, which is the point of the last change. sem_init itself
+# returns -1/ENOSYS, so the semaphore was never initialised and the wait read an
+# uninitialised int; the EINVAL belongs to that, not to the wait. Earlier runs
+# of this lane attributed it to the wait and would have sent a fix to a syscall
+# table that was never the problem.
+#
+# The probe therefore prints every sem_init's rc/errno beside every sem_wait's,
+# and the verdict has a branch that says the wait's errno is inherited. Read it
+# with BOTH rows, or the number without its row above it is unreadable:
+grep -aE 'sem_init|sem_wait|after post|REFUSED|^VERDICT|^  \(refused|^  \(A|^  \(B' \
     "$DARLING_BUILD_DIR/thread-lane.log"
+#   main   sem_wait     REFUSED rc=-1 errno=Invalid argument over 0ms
+#   main   sem_init     rc=-1 errno=Function not implemented
+#
+# A risk recorded and NOT measured, for whoever fixes sem_init: the guest's
+# sem_t is `typedef int` (sys/semaphore.h — 4 bytes) while the host's is a
+# 16-byte struct, so handing one to the other's sem_wait is a type substitution
+# that may draw the same EINVAL even once initialisation works. Prove it with a
+# run; do not assume the fix lands.
 ```
 
 Logs stay in `$DARLING_BUILD_DIR`, outside the source tree, and are machine
