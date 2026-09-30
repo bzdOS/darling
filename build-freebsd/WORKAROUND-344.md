@@ -1847,6 +1847,81 @@ numbering — from the lane's runtime.
 which is probe-only and needs no root; and (b) a transport the guest's `socket()`
 will actually give, which is the `vchroot` path above.
 
+**Addendum 2 — the release half, and the two legs that need no peer.** The addendum
+above ends with the lane's question unasked: the lock leg parked, and whether a
+thread comes **back** was only ever measured on the descriptor leg, which `AF_INET`
+refuses. So the question was moved onto a mechanism the trap does implement.
+
+**A parked wait and a released wait are different measurements, so the release had
+to be part of the same leg.** `RELEASE_MS` (`:90`) is how long a wait is given to
+be *really* parked: main waits for the reached flag, spins two seconds on 228
+(`spin_ms`, `:135` — a spin, not a sleep, because 35 is undefined), and only then
+posts. The flag `lock_parked` (`:97`, set at `:372`) is the whole point of those two
+seconds: a `sem_wait` here can return success-without-sleeping, so **parked** is
+claimed only where the call is still out two seconds later. Then the post, and one
+fact (`:382-389`): did the thread come back.
+
+**The contended main leg is what makes the asymmetry mean something** (`:398-415`).
+The old control posts *before* it waits, so it never blocked and could never stand
+in for a blocking wait. This one blocks for real: `sem_init(0,0)`, a poster thread
+(`main_poster`, `:152`), then main's own `sem_wait`. The poster waits for main's
+reached flag (`:156`), waits out `RELEASE_MS` so main has really parked (`:157`),
+posts (`:159`) — and then posts **again** (`:161`) as a net, because a leg that can
+park `main()` forever is a leg with no bound. Which of the two woke main is a
+result, and the probe says so in words: `RETURNED from the release`,
+`RETURNED, but only after the watchdog post`, or `RETURNED, but the poster never
+fired the release` (`:412-415`). The verdict reads the same fact, as
+`m_released_ok` (`:434`) — `m_returned` alone would have claimed the main thread
+came back when what woke it was the net.
+
+**Both new legs need only 202 and 228, and the binary proves it.** The rebuilt
+binary's undefined symbols are exactly `_sem_init _sem_post _sem_wait _sem_destroy
+_clock_gettime _socket _connect _sendmsg _recvmsg` plus libc basics — 24 in all,
+and **none** of `_poll _writev _pipe _select _nanosleep _shutdown _bind _listen
+_getsockname _socketpair _accept`. No new call was introduced, so nothing new can
+fail as "the thread will not wake up".
+
+**The classification moved ahead of the peer, and 2×2, because the released legs
+decide it** (`:451-476`). With the park earned, the lane is classified before any
+peer row is consulted:
+
+| released lock leg | contended main leg | verdict | what it names |
+|---|---|---|---|
+| returned | returned | **(Б)** | generic blocking is alive → the lane narrows to the event path |
+| returned | only the net woke main | **(Б)** + separate finding | as above, and main's own release failed |
+| did not return | returned | **(А)** | the wake path works and a *spawned* thread is not resumed |
+| did not return | only the net woke main | **(А)** | the wake path itself — not a thread problem at all |
+
+**The parked-word edge is closed, and the word is the fix.** In the `!peers_ok`
+note the word "parked" is now claimed only where `lock_returned` says it is true (`:477-491`):
+reached **and** returned prints that it returned without blocking and claims
+nothing about parking. A note that says "parked" where the call came straight back
+is the same unearned-verdict defect one level up.
+
+**Native self-test, all four states, no root** — the probe earns the right to
+classify before it is trusted with a guest run:
+
+| run | released lock leg | contended main leg | verdict |
+|---|---|---|---|
+| as written | `RETURNED 0ms after the release` | `RETURNED from the release` | **(Б)** |
+| lane release removed | `DID NOT RETURN within 3s` | `RETURNED from the release` | **(А)** spawned thread |
+| main's release post removed | `RETURNED 0ms after the release` | `only after the watchdog post` | **(Б)** + finding |
+
+The sabotaged runs are copies in `/tmp` with one `sem_post` replaced by `(void)0`;
+the tracked file carries none of them. As written, `-Wall` clean, RC=0, 4.0s.
+
+**The guest run is REQUESTED, not taken.** Binary rebuilt from this source
+(22064 B, mtime 11:18, sha256 `aa753fd5…b31614c`, replacing `be0625f2…`), provenance
+rewritten. One authorization will do it, no peer needed at all now:
+
+```sh
+timeout --foreground -k 60 120 sudo env \
+    DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
+    DARLING_BUILD_DIR="$DARLING_BUILD_DIR" \
+    DARLING_TEST_BINARY=guest-thread-wait-macho \
+    "$DARLING_BUILD_DIR/launch-dynamic" > "$DARLING_BUILD_DIR/thread-lane.log" 2>&1
+```
+
 ## 14. Reproduce
 
 ```sh
@@ -1948,9 +2023,34 @@ grep -aE 'sem_wait|recvmsg|^VERDICT|^  \(|Cannot open' \
 
 # The same probe natively, no root: this is where the answer is known, and it
 # must be (none) with both legs measured. A probe that cannot pass where the
-# answer is known is not finished.
+# answer is known is not finished. The released legs need no peer, so neither
+# does this self-test.
 cc -Wall -pthread -o /tmp/gtw-native tests/src/guest-thread-wait.c
-DARLING_THREAD_PEER_PORT="$PEER" timeout -k 5 90 /tmp/gtw-native
+timeout -k 5 90 /tmp/gtw-native                       # RC=0, verdict (B)
+
+# ... and the negative controls, which is what makes (B) mean something: a
+# verdict that cannot fail is a constant. One sem_post replaced by (void)0, in a
+# COPY — the tracked file carries neither sabotage.
+sed 's|sem_post(&lock);              /\* the release, and the only one \*/|(void)0;|' \
+    tests/src/guest-thread-wait.c > /tmp/gtw-sabotage.c
+cc -pthread -o /tmp/gtw-sabotage /tmp/gtw-sabotage.c
+timeout -k 5 90 /tmp/gtw-sabotage                     # (A): the spawned thread
+
+# The guest run, one authorization, no peer: the released legs decide the lane
+# on 202 and 228 alone, and the descriptor leg prints "not exercised" honestly.
+timeout --foreground -k 60 120 sudo env \
+    DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
+    DARLING_BUILD_DIR="$DARLING_BUILD_DIR" \
+    DARLING_TEST_BINARY=guest-thread-wait-macho \
+    "$DARLING_BUILD_DIR/launch-dynamic" > "$DARLING_BUILD_DIR/thread-lane.log" 2>&1
+grep -aE 'after post|sem_wait|^VERDICT|^  \(A|^  \(B|^  \(none|^  \(not' \
+    "$DARLING_BUILD_DIR/thread-lane.log"
+
+# And the syscall discipline, at the BINARY rather than in the source: a grep of
+# the source cannot see what a macro or an inline pulled in.
+llvm-nm -u tests/guest-thread-wait-macho | awk '{print $NF}' | sort \
+  | grep -E '^_(poll|writev|pipe|select|nanosleep|shutdown|bind|listen|getsockname|socketpair|accept)$'
+                                                          # empty, and that is the point
 ```
 
 Logs stay in `$DARLING_BUILD_DIR`, outside the source tree, and are machine
