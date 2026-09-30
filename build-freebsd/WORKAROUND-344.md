@@ -1252,6 +1252,77 @@ was ever deleted — and the source comment already said to drop the flag if a
 run showed the links surviving without it. That run has now happened, so the
 flag goes in the next commit rather than this one.
 
+#### Window run №9-2: the sixth wall was one line, and the path completes
+
+`ftruncate` was the whole wall. It is now `77` in the numbering and a case in
+the dispatch, and the next run gets further than any run before it:
+
+```
+[step 06] write through pixels[0] (proves the shm fd is mapped, not just created)
+[step 07] buffer acquired: shm fd created, mapped and written
+[step 08] flushBuffer (commit the acquired buffer to the compositor)
+[step 09] RESULT: window created, shm buffer acquired + written + flushed
+```
+
+The buffer is a real buffer, not a handle: the backend stores what it was given
+(`field_24=0 width=640 height=480 field_36=2560`, stride 2560 = 640 × 4 for
+ARGB8888) where the previous run stored `width=-1 height=-1` and
+`record=0x0`. Step 06 writes *through* the mapping, so `mmap` is proven rather
+than inferred. And `unhandled Linux syscall 77` is gone from the log.
+
+**The stale-binary trap, and how it was ruled out before spending the run.**
+A binary that did not pick the change up produces the *same* ENOSYS and reads
+as "the fix does not work", so the freshness was checked first, not after:
+
+| | before | after |
+|---|---|---|
+| size | 683312 | 683808 (+496) |
+| sha256 | `749027117052c346…` | `1bd57d6a7eab4726…` |
+| mtime | 2026-09-29 21:42 | 2026-09-30 03:51:17 |
+
+and the binary is 18 seconds newer than the edited source. The build script
+installs to the path the guest runs from, so there is no second copy to fall
+out of step. Had any of those three checks been skipped, the run would have
+been spent proving nothing.
+
+#### A fix that lived on disk and was lost, which is the argument for branches
+
+`PLAN.md` §8.3 has described this fix as done since September, and §8.4 lists it
+as **ГОТОВО ✅**. `git log -S LINUX_SYS_ftruncate --all` finds it in the two
+commits that added `PLAN.md` — and nowhere in the C source. The fix had been
+written to a working tree, never committed, and lost to a reset. Nine months of
+a plan that says a thing is done, over code that does not contain it, is worse
+than a plan that says nothing: the next reader skips the work, and the wall
+comes back wearing the same number.
+
+That is the argument, and it is not about tidiness. A fix in a branch survives a
+reset; a fix in a tree does not; and a document that records a fix as complete
+is only as good as the commit behind it. When §8.3 said the same thing last
+time, it was right by accident — the code was on the disk it was describing,
+and the disk was not a promise.
+
+**Rider, 288 again on this run:** the bundle was reached through the symlink —
+`dlopen_internal(/System/Library/Frameworks/AppKit.framework/Resources/Backends/
+Wayland.backend/Contents/MacOS/Wayland)` — and loaded. The explicit readdir
+listing is the flag probe's rider and is unchanged: six entries, `AppKit` and
+`Resources` as `d_type=10`, one backend path.
+
+**What this run does not show.** The commit is *sent*; the probe exits on step
+09 without a roundtrip, so no frame callback and no `wl_display_get_error` were
+waited for, and no screenshot was taken — the single authorised root run was
+spent on the run itself, and the surface is gone by the time the process exits.
+So the log proves the path through to the commit call and nothing claims that
+the compositor painted it.
+
+**Two unhandled numbers remain, both untouched.** `263` once and `267` three
+times, neither defined. The numbering convention in this file is x86_64 Linux
+and is anchored by its own neighbours: `268 = fchmodat` and `269 = faccessat`
+are both defined, and both are what x86_64 says they are. So `267` is
+`readlinkat` — not `openat2`, which is `437` and also undefined — and `263` is
+`unlinkat`. `readlinkat` appearing three times is worth a second look rather
+than a park, because this milestone is about symlinks and `dyld` resolves them;
+that is noted, not acted on.
+
 ## 14. Reproduce
 
 ```sh

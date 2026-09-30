@@ -235,6 +235,7 @@
 #define LINUX_SYS_epoll_ctl     233
 #define LINUX_SYS_fsync          74
 #define LINUX_SYS_fdatasync      75
+#define LINUX_SYS_ftruncate      77
 #define LINUX_SYS_mkdirat       258
 #define LINUX_SYS_fchmodat      268
 #define LINUX_SYS_statfs        137
@@ -1784,6 +1785,14 @@ dispatch_linux_syscall(unsigned int linux_nr,
         /* FreeBSD has fdatasync(2) proper, so this is not the usual
          * "fall back to fsync" approximation. */
         return freebsd_raw_syscall(SYS_fdatasync, a1, 0, 0, 0, 0, 0);
+    case LINUX_SYS_ftruncate:
+        /* ftruncate(fd, length) — same call, same order, same width on both
+         * OSes. Without this case a guest's ftruncate fell through to the
+         * ENOSYS arm, which a window probe reads as "shm pool allocation
+         * failed: Invalid argument" — a shm problem that is really a missing
+         * line in this list. 76 is unused on x86_64, so 75 and 77 are
+         * neighbours here. */
+        return freebsd_raw_syscall(SYS_ftruncate, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_mkdirat:
         /* Same call on both, same argument order, and the mode bits for the
          * permission half coincide — `defaults` needs this to create its
