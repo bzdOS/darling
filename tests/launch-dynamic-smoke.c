@@ -150,6 +150,9 @@ struct stage_symlinks_stats {
     unsigned long open_failed;
     unsigned long dirs_opened;
     unsigned long entries_seen;
+    unsigned long dirs_seen;
+    unsigned long mkdir_refused;
+    unsigned long depth_capped;
 };
 
 static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
@@ -230,10 +233,22 @@ static int stage_symlinks_walk(const char *src, const char *dst, unsigned depth,
             /* Depth cap: the source trees are shallow (a framework is a
              * handful of levels), and a cap costs one comparison and makes
              * the walk impossible to hang on a cyclic bind mount. */
-            if (depth >= 12)
+            if (depth >= 12) {
+                st->depth_capped++;
                 continue;
-            if (mkdir(dp, 0755) < 0 && errno != EEXIST)
+            }
+            st->dirs_seen++;
+            /* Was silent, and is the only remaining way a directory can be
+             * read and then not descended into. A run reported "1 directory
+             * opened, 60 entries read" for a tree that plainly holds 106
+             * symlinks, and the two gates above were indistinguishable from
+             * each other and from this one. */
+            if (mkdir(dp, 0755) < 0 && errno != EEXIST) {
+                st->mkdir_refused++;
+                printf("staging:   mkdir(%s) failed: %s — not descending\n",
+                       dp, strerror(errno));
                 continue;
+            }
             stage_symlinks_walk(sp, dp, depth + 1, st);
         }
     }
@@ -303,6 +318,11 @@ static void stage_symlinks(const char *od, const char *rel) {
            rel, stats.dirs_opened, stats.dirs_opened == 1 ? "y" : "ies",
            stats.entries_seen, stats.entries_seen == 1 ? "y" : "ies",
            stats.open_failed, stats.open_failed == 1 ? "" : "s");
+    printf("staging:   %s: %lu director%s seen, %lu mkdir refusal%s, "
+           "%lu depth-capped\n",
+           rel, stats.dirs_seen, stats.dirs_seen == 1 ? "y" : "ies",
+           stats.mkdir_refused, stats.mkdir_refused == 1 ? "" : "s",
+           stats.depth_capped);
     if (stats.open_failed > 0 && stats.found == 0)
         printf("staging:   ^ nothing was found because nothing could be opened;"
                " this is a failure of this pass, not an absence of symlinks\n");
