@@ -77,6 +77,7 @@
 struct lane_report {
 	volatile int lock_reached;      /* the lock thread got to sem_wait */
 	volatile int desc_returned;     /* the descriptor thread came back */
+	volatile int control_desc_returned;  /* same, for the main-thread control */
 };
 
 static struct lane_report rep;
@@ -139,6 +140,30 @@ static void *desc_thread(void *p)
 	return NULL;
 }
 
+/* The control's descriptor leg runs on a thread for the same reason the lane's
+ * does, and for a sharper one. Done inline it is a bare blocking 47 with
+ * nothing to bound it: a peer that accepts, stays silent and holds the
+ * connection open parks main() before it ever prints its own result, and the
+ * probe hangs rather than reporting. A leg that can hang the probe is a leg
+ * with no bound, whatever the header promises. */
+static void *control_desc_thread(void *p)
+{
+	char buf[64];
+	struct msghdr msg;
+	struct iovec iov;
+
+	memset(&msg, 0, sizeof(msg));
+	memset(&iov, 0, sizeof(iov));
+	iov.iov_base = buf;
+	iov.iov_len = sizeof(buf);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	if (recvmsg((int)(long)p, &msg, 0) >= 0)
+		rep.control_desc_returned = 1;
+	return NULL;
+}
+
 static int connect_peer(void)
 {
 	const char *port = getenv(PEER_PORT_ENV);
@@ -181,7 +206,7 @@ int main(void)
 {
 	sem_t lock;
 	pthread_t tl, td;
-	int peer, control_lock, control_desc, threads_ok = 1;
+	int peer, peer_lane, control_lock, control_desc, threads_ok = 1;
 	const char *port = getenv(PEER_PORT_ENV);
 
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -190,9 +215,16 @@ int main(void)
 	printf("  peer: %s\n", (port && *port) ? port : "<none: no descriptor leg>");
 	puts("");
 
+	/* TWO connections, not one, and the reason is the same class as the
+	 * unbounded control: on a single connection the control's 47 CONSUMES the
+	 * byte the lane is waiting for, so the lane's leg blocks on an empty
+	 * buffer and reports "did not return" for a reason that has nothing to do
+	 * with threads. The control and the thing being measured must not share
+	 * the resource they both draw on. */
 	peer = connect_peer();
-	if (peer < 0)
-		printf("  note: no connected socket (%s). The descriptor leg is NOT"
+	peer_lane = connect_peer();
+	if (peer < 0 || peer_lane < 0)
+		printf("  note: no connected sockets (%s). The descriptor leg is NOT"
 		       " exercised, and that is not a result about threads.\n",
 		       strerror(errno));
 
@@ -208,10 +240,16 @@ int main(void)
 
 	control_desc = 0;
 	if (peer >= 0) {
+		pthread_t tc;
 		send_to_peer(peer);
-		rep.desc_returned = 0;
-		do_descriptor(peer);
-		control_desc = rep.desc_returned;
+		rep.control_desc_returned = 0;
+		if (pthread_create(&tc, NULL, control_desc_thread,
+		                   (void *)(long)peer) == 0) {
+			control_desc = wait_flag(&rep.control_desc_returned);
+			pthread_detach(tc);
+		} else {
+			puts("  FATAL: the control's descriptor thread could not be created");
+		}
 	}
 	printf("  %-6s %-12s %s\n", "main", "recvmsg", peer < 0 ? "not exercised"
 	       : (control_desc ? "RETURNED" : "did not return"));
@@ -226,8 +264,8 @@ int main(void)
 		puts("  FATAL: the lock thread could not be created");
 		threads_ok = 0;
 	}
-	if (peer >= 0 && pthread_create(&td, NULL, desc_thread,
-	                                (void *)(long)peer) != 0) {
+	if (peer_lane >= 0 && pthread_create(&td, NULL, desc_thread,
+	                                    (void *)(long)peer_lane) != 0) {
 		puts("  FATAL: the descriptor thread could not be created");
 		threads_ok = 0;
 	}
@@ -238,8 +276,8 @@ int main(void)
 		       wait_flag(&rep.lock_reached) ? "REACHED the wait"
 		                                   : "never reached the wait");
 		/* leg 2: release it, then see whether it comes back */
-		if (peer >= 0) {
-			send_to_peer(peer);
+		if (peer_lane >= 0) {
+			send_to_peer(peer_lane);
 			printf("  %-6s %-12s %s\n", "thread", "recvmsg",
 			       wait_flag(&rep.desc_returned) ? "RETURNED"
 			                                     : "did not return");
@@ -264,6 +302,14 @@ int main(void)
 			puts("  The lock leg did not even reach the wait, which is a liveness");
 			puts("  result on its own.");
 		}
+	} else if (!control_desc) {
+		/* The control's descriptor leg did not come back either, so it was the
+		 * PEER that was silent, not the thread. Calling that (B) would name the
+		 * thread for a result the peer decided — the unearned-verdict trap from
+		 * the other direction, and the reason the control exists. */
+		puts("  (unknown) the control's descriptor leg did not come back either, so");
+		puts("            the peer was the thing that failed to answer. The lane's");
+		puts("            descriptor result measures the peer's silence, not a thread.");
 	} else if (rep.lock_reached && rep.desc_returned) {
 		puts("  (none) one thread reached a 202 wait it was never woken from, and");
 		puts("  another came back from a released descriptor wait. Guest blocking");
@@ -280,6 +326,7 @@ int main(void)
 	}
 
 	if (peer >= 0) close(peer);
+	if (peer_lane >= 0) close(peer_lane);
 	sem_destroy(&lock);
 	return 0;
 }
