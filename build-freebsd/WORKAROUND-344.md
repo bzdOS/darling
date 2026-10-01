@@ -2381,9 +2381,77 @@ artefacts full of addresses; they are quoted here, not committed.
 # scales with the socketpair probe's path, not with wl traffic; its caller
 # is still unnamed.
 #
-# FOLLOWS: (1) the stateful-backend stage probe above — the one that can
-# put a name on the park; (2) kern_bind's EAFNOSUPPORT with clean bytes at
-# the trap (§13 step 4) — host-side bisection, outside this slice;
-# (3) the sysinfo loop's caller (a1 print in the trap's default case).
+# §13 addendum, step 6 — THE PARK IS NATIVE, NOT STATEFUL: NAMED BY THE
+# ONE STAGE THE DECOMPOSITION COULD NOT REACH. 2026-10-01, on
+# task/wl-session-roundtrip. Step 5 excluded the primitives on a fresh
+# display; this step builds the backend's stateful session (run №9-4's
+# setup) and adds the variant that decides the task's own premise.
+#
+# THE PROBE: tests/src/guest-wl-session-roundtrip.c (new; ObjC + Foundation
+# + AppKit link, backend dlopen'd by its guest path like run №9-3). Session
+# stages with markers: bundle-load, display-init (the backend's registry
+# roundtrip + binds — compositor/shm/wmBase all bound, printed), window-
+# create, shm-pool (_acquireBackBuffer + pixel write proving the mmap),
+# commit (flushBuffer), xdg-configure receipt via a main-thread roundtrip.
+# Negative control after the backend loads. Staging:
+#   STAGING_LIST="$(paste -sd: $DARLING_BUILD_DIR/staging-trees.txt)"
+#   sudo env ... DARLING_STAGING_TREES="$STAGING_LIST" ...
+# (the closure-derived list — Frameworks + PrivateFrameworks + usr/lib; the
+# built-in list misses Onyx2D, step 5's lesson, and dyld refuses the load.)
+#
+# MEASURED, guest run (sway headless; wl-session3.log, RC=0):
+#   session built: compositor=0x…9560 shm=0x…94a0 wmBase=0x…95c0; window,
+#   shm buffer, pixel write, commit and the xdg receipt all succeeded.
+#   negative control: connect(gsw-dead-nope-0000) returned NULL — refusal
+#   observed; errno came back 0 in this run and ENOENT in step 5's run on
+#   the same kind of call, so NULL is the refusal signal here and errno is
+#   NOT trustworthy at this seam (recorded, not smoothed over).
+#   (b) main dispatches (roundtrip), spawned lane DECOMPOSES on the
+#       stateful display: marshal+flush RETURNED rc=12 over 6ms; poll
+#       RETURNED rc=1 over 1ms; dispatch RETURNED rc=2; sync callback
+#       FIRED. The decomposed roundtrip COMPLETES from a guest thread even
+#       while main concurrently roundtrips the same display.
+#   (a) main at rest, spawned runs the OPAQUE wl_display_roundtrip:
+#       DID-NOT-RETURN within 8000ms — parked.
+#   (d) FRESH display (no session), spawned runs the opaque roundtrip:
+#       DID-NOT-RETURN within 8000ms — PARKED ON A FRESH DISPLAY TOO.
+#   (c) FULL №9-4 reproduction, the window probe's own tail: thread lane
+#       started first; main-lane roundtrip returned 2, get_error=0;
+#       thread-lane answered=0. LANE FINDING REPRODUCED.
+#
+# ATTRIBUTION: the task's premise — that the park lives in the stateful
+# layer — is REFUTED by variant (d): the same opaque call parks on a
+# display with no registry, no shm, no xdg. What the disassembly then
+# names: the vendored dylib's wl_display_roundtrip (0x62e0) is a LAZY
+# TRAMPOLINE — lea "wl_display_roundtrip" → __lazy → cmp NULL → callq *%rax
+# — a jump into the NATIVE libwayland-client resolved via _elfcalls, not a
+# reimplementation. So the park is inside native libwayland's roundtrip
+# machinery as it runs on a guest-created thread, and the measured
+# difference between the lanes pins WHICH sub-stage: the decomposed lane
+# always entered dispatch with the reply ALREADY BUFFERED (its own guest
+# poll did the waiting, 1ms), so it exercised the buffered-processing path
+# — and completed. The roundtrip's first dispatch finds the buffer EMPTY
+# and descends into the blocking READ path — wl_display's prepare_read/
+# poll/read sequence with the display's own mutexes — and THAT sub-stage
+# parks on guest threads while the identical call returns on main. One
+# sub-stage the decomposition structurally could not reach, and it is the
+# one that parks.
+#
+# NOT CLAIMED: the mechanism INSIDE the native read path (native-pthread
+# bookkeeping around a thread the host layer did not create is the leading
+# candidate — libwayland's read path serialises on the display's mutexes
+# and condition variables — but no run here opens native libwayland's
+# internals). mldr/trap were not touched: the trap's poll/socketpair were
+# measured alive in steps 4-5 and are not on this path's way to failing.
+#
+# FOLLOWS: (1) the call-level confirmation — a guest thread calling
+# wl_display_dispatch on a display whose buffer is EMPTY and stays empty
+# (nothing in flight) should park in the same read path, and that probe is
+# two dozen lines on the existing dlsym surface; (2) the fix direction
+# lives in native-libwayland/thread integration on the host side, outside
+# this slice's boundaries; (3) the backend's own init calls the same
+# roundtrip on main (disassembly refs at 0x1079/0x129f) and works — the
+# asymmetry is the thread, exactly as run №9-4 recorded.
+
 
 
