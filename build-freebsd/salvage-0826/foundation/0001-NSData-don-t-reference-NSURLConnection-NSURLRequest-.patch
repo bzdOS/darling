@@ -1,0 +1,155 @@
+From 85ed2f7e8a4e7032f68c42fe094c6f6728a30dd7 Mon Sep 17 00:00:00 2001
+From: Andrey Bodrov <ap.bodrov@gmail.com>
+Date: Thu, 1 Oct 2026 13:46:59 +0000
+Subject: [PATCH 1/2] NSData: don't reference
+ NSURLConnection/NSURLRequest/NSHTTPURLResponse
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+None of these three classes have an implementation anywhere in this
+submodule (no NSURLConnection.m et al.) — the real HTTP networking stack
+is CFNetwork's job, per this repo's own Foundation/CMakeLists.txt
+DEPENDENCIES list (CFNetwork_firstpass), which doesn't exist in a build
+that only links against libSystem/CoreFoundation/libobjc.
+
+This mattered at *load* time, not just link time: `-undefined
+dynamic_lookup` at the linker gets past building Foundation.dylib itself,
+but dyld resolves Objective-C class references eagerly (they're data
+pointers, not lazily-bound function stubs), so the whole dylib refused to
+load the moment anything tried to use it — even though this exact
+codepath (loading NSData from a non-file:// URL) was never reached by
+that program. `-undefined suppress -flat_namespace` at link time doesn't
+change that dyld-side behavior either.
+
+Fails honestly (nil + a real NSError) for a non-file URL instead of
+either of the two bad options: crashing the whole framework at load, or
+silently returning nothing without saying why.
+
+NSPlatform_posix.m rides along in this commit: _checkAndGetPWEnt sets
+errno = 0 before getpwuid(uid) and reports a lookup failure to stderr
+with strerror(errno) before raising, instead of raising blind. That raise
+is the first thing a guest process hits when anything asks for
+NSHomeDirectory()/NSUserName(), and under mldr an uncaught exception
+there surfaces only as dyld's generic "dyld std::__terminate()".
+---
+ src/NSData.m           | 47 +++++++++++++++++-------------------------
+ src/NSPlatform_posix.m | 33 +++++++++++++++++++++++++++--
+ 2 files changed, 50 insertions(+), 30 deletions(-)
+
+diff --git a/src/NSData.m b/src/NSData.m
+index c45cd4df0..d6defc54e 100644
+--- a/src/NSData.m
++++ b/src/NSData.m
+@@ -885,36 +885,27 @@ OBJC_PROTOCOL_IMPL_POP
+     }
+     else
+     {
+-        NSURLRequest *request = [[NSURLRequest alloc] initWithURL:url];
+-        NSHTTPURLResponse *response = nil;
+-        NSData *data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:errorPtr];
+-        [request release];
+-        NSInteger statusCode = [response statusCode];
+-        BOOL isError = [NSHTTPURLResponse isErrorStatusCode:statusCode];
+-        // 404 and whatnot should return nil bytes, not the error page
+-        if (data && !isError)
++        /* HTTP(S)/non-file URL loading needs NSURLConnection/NSURLRequest/
++         * NSHTTPURLResponse, none of which have an implementation anywhere
++         * in this submodule (no NSURLConnection.m et al. — the real
++         * networking stack is CFNetwork's job, per this repo's own
++         * Foundation/CMakeLists.txt DEPENDENCIES list: CFNetwork_firstpass,
++         * which doesn't exist in this build at all yet). Referencing those
++         * classes' symbols compiled fine but crashed at *load* time
++         * (dyld resolves ObjC class references eagerly, not lazily, so
++         * `-undefined dynamic_lookup`/`-U` at link time doesn't help — the
++         * class ref has to actually resolve for the whole dylib to load,
++         * even though this specific branch is never taken by anything that
++         * doesn't fetch data over a real network). Fail honestly instead of
++         * either crashing at load or silently returning wrong data. */
++        if (errorPtr)
+         {
+-            return [self initWithData:data];
+-        }
+-        else
+-        {
+-            if (isError && errorPtr)
+-            {
+-                *errorPtr = [NSError errorWithDomain:NSCocoaErrorDomain code:-1 userInfo:@{
+-                    NSLocalizedDescriptionKey:[NSHTTPURLResponse localizedStringForStatusCode:statusCode],
+-                    NSURLErrorKey:url
+-                }];
+-            }
+-            else if (errorPtr)
+-            {
+-                *errorPtr = [NSError errorWithDomain:NSCocoaErrorDomain code:-1 userInfo:@{
+-                    NSLocalizedDescriptionKey:@"connection either timed out or disconnected",
+-                    NSURLErrorKey:url
+-                }];
+-            }
+-            [self release];
+-            return nil;
++            *errorPtr = [NSError errorWithDomain:NSCocoaErrorDomain code:-1 userInfo:@{
++                NSLocalizedDescriptionKey:@"loading data from a non-file URL needs CFNetwork, which isn't built yet"
++            }];
+         }
++        [self release];
++        return nil;
+     }
+ }
+ 
+diff --git a/src/NSPlatform_posix.m b/src/NSPlatform_posix.m
+index bb8f5ffd9..989e86476 100644
+--- a/src/NSPlatform_posix.m
++++ b/src/NSPlatform_posix.m
+@@ -48,6 +48,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #include <pwd.h>
+ #import <rpc/types.h>
+ #include <stdio.h>
++#include <string.h> /* strerror — _checkAndGetPWEnt's lookup-failure report */
+ #include <sys/mman.h>
+ #include <sys/param.h>
+ #import <sys/socket.h>
+@@ -105,10 +106,38 @@ static struct passwd *pwent = NULL;
+ 
+ - (void) _checkAndGetPWEnt {
+     if (pwent == NULL) {
+-        pwent = getpwuid(getuid());
+-        if (pwent == NULL)
++        uid_t uid = getuid();
++        errno = 0;
++        pwent = getpwuid(uid);
++        if (pwent == NULL) {
++            /*
++             * Report before raising. This raise is the first thing a process
++             * hits when anything asks for NSHomeDirectory()/NSUserName(), and
++             * the resulting exception is routinely uncaught — under mldr it
++             * surfaces only as dyld's generic "dyld std::__terminate()", which
++             * names neither the exception nor this function, so the actual
++             * cause (a passwd lookup that returned nothing) is invisible.
++             *
++             * Raw write(2) rather than NSLog: NSLog goes through CoreFoundation
++             * string formatting, and on this path Foundation may not be far
++             * enough along for that to work — a diagnostic that can itself fail
++             * is worse than none, since its silence looks like the code never
++             * ran. errno is captured because getpwuid() reports "no such user"
++             * (errno untouched) and "lookup backend unavailable" identically,
++             * as NULL, and telling those two apart is the whole question here.
++             */
++            char msg[256];
++            int n = snprintf(msg, sizeof(msg),
++                "[Foundation] _checkAndGetPWEnt: getpwuid(%u) returned NULL"
++                " (errno=%d %s) — raising %s\n",
++                (unsigned)uid, errno, errno ? strerror(errno) : "unset",
++                "NSInternalInconsistencyException");
++            if (n > 0)
++                (void)write(STDERR_FILENO, msg, (size_t)(n < (int)sizeof(msg) ? n : (int)sizeof(msg) - 1));
++
+             NSRaiseException(NSInternalInconsistencyException, self, _cmd,
+                              @"Can't obtain user's information from system");
++        }
+     }
+ }
+ 
+-- 
+2.54.0
+

@@ -1,0 +1,3188 @@
+From d191144b805a025398c6b2bf198ce10f9ccf9728 Mon Sep 17 00:00:00 2001
+From: Andrey Bodrov <ap.bodrov@gmail.com>
+Date: Thu, 1 Oct 2026 13:46:06 +0000
+Subject: [PATCH] AppKit: add a Wayland backend
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Cocotron loads display backends as .backend bundles chosen by NSPriority, and
+X11 was the only one. This adds Wayland: a WaylandDisplay/WaylandWindow pair
+that renders through wl_shm and xdg-shell, plus WaylandInput translating
+wl_keyboard/wl_pointer into NSEvent.
+
+The pixel path needs no conversion. Onyx2D renders into an O2Surface tagged
+kO2ImageAlphaPremultipliedFirst | kO2BitmapByteOrder32Little, which is the same
+32-bit little-endian ARGB word as WL_SHM_FORMAT_ARGB8888, so flushBuffer is a
+memcpy into a shm pool followed by attach/damage/commit. Two buffers per window
+are tracked through wl_buffer.release so the compositor is never handed a
+surface that is still being drawn into.
+
+Unlike X11.backend this does not route the software-rendered frame through GLX;
+that indirection is an artefact of the X11 path, not a requirement of the
+raster one.
+
+Deliberately unimplemented rather than stubbed: -deminiaturize/-isMiniaturized
+raise the inherited abstract-invocation error, because xdg-shell's toplevel
+state enum has no minimised value and no un-minimise request — a silent no-op
+would be a worse lie than a loud failure.
+
+Known gaps, all commented at their sites: damage is always full-frame because
+neither Cocotron nor the X11 backend gave a verified answer about which
+coordinate space a partial rect would arrive in, and guessing it wrong would
+corrupt the display; -screens falls back to 1024x768 until a wl_output.mode
+event arrives; the waits for the first xdg_surface.configure and for a buffer
+release have no timeout.
+
+Nothing here has been compiled. The build prerequisites are present on the
+target, though: wayland 1.25, wayland-protocols 1.47, libxkbcommon 1.13,
+wayland-scanner, and xdg-shell.xml under /usr/local/share/wayland-protocols —
+checked on the FreeBSD dev machine, not in the authoring sandbox, where their
+absence had been flagged as a risk.
+---
+ AppKit/CMakeLists.txt                    |  96 +++
+ AppKit/Wayland.backend/Info.plist        |  26 +
+ AppKit/Wayland.backend/WaylandDisplay.h  | 201 ++++++
+ AppKit/Wayland.backend/WaylandDisplay.m  | 752 ++++++++++++++++++++++
+ AppKit/Wayland.backend/WaylandInput.h    | 309 +++++++++
+ AppKit/Wayland.backend/WaylandInput.m    | 616 ++++++++++++++++++
+ AppKit/Wayland.backend/WaylandKeyCodes.h | 176 +++++
+ AppKit/Wayland.backend/WaylandWindow.h   |  93 +++
+ AppKit/Wayland.backend/WaylandWindow.m   | 778 +++++++++++++++++++++++
+ 9 files changed, 3047 insertions(+)
+ create mode 100644 AppKit/Wayland.backend/Info.plist
+ create mode 100644 AppKit/Wayland.backend/WaylandDisplay.h
+ create mode 100644 AppKit/Wayland.backend/WaylandDisplay.m
+ create mode 100644 AppKit/Wayland.backend/WaylandInput.h
+ create mode 100644 AppKit/Wayland.backend/WaylandInput.m
+ create mode 100644 AppKit/Wayland.backend/WaylandKeyCodes.h
+ create mode 100644 AppKit/Wayland.backend/WaylandWindow.h
+ create mode 100644 AppKit/Wayland.backend/WaylandWindow.m
+
+diff --git a/AppKit/CMakeLists.txt b/AppKit/CMakeLists.txt
+index 393a1eb3..65ad195c 100644
+--- a/AppKit/CMakeLists.txt
++++ b/AppKit/CMakeLists.txt
+@@ -49,6 +49,57 @@ find_package(PkgConfig REQUIRED)
+ pkg_check_modules(PC_CAIRO cairo)
+ pkg_check_modules(PC_FONTCONFIG fontconfig)
+ 
++# Wayland.backend (NSDisplay backend, sibling of X11.backend below) needs
++# wayland-client (wl_display/wl_registry/... protocol calls) and
++# xkbcommon (WaylandInput's keymap/modifier state — see
++# Wayland.backend/WaylandInput.h). REQUIRED: unlike PC_CAIRO/PC_FONTCONFIG
++# above (optional accelerants for the existing X11-only build), the
++# Wayland backend target below unconditionally lists these as
++# DEPENDENCIES, so a build tree without them fails at configure time with
++# a clear message instead of an opaque link error later.
++pkg_check_modules(PC_WAYLAND_CLIENT REQUIRED wayland-client)
++pkg_check_modules(PC_XKBCOMMON REQUIRED xkbcommon)
++
++# xdg-shell is an out-of-core Wayland protocol extension: no system header
++# ships it, so its client-side C binding (xdg-shell-client-protocol.h/.c)
++# must be generated from the upstream XML via wayland-scanner. Same
++# recipe as ipa-runtime/UIKit/CMakeLists.txt:71-105 (the existing in-tree
++# precedent for a raw libwayland-client consumer needing xdg-shell),
++# replicated here rather than shared via a common .cmake helper because
++# UIKit's CMakeLists.txt is outside this module's edit scope for this
++# pass.
++find_program(WAYLAND_SCANNER wayland-scanner)
++if (WAYLAND_SCANNER)
++	find_file(XDG_SHELL_XML xdg-shell.xml
++		PATHS
++			/usr/share/wayland-protocols/stable/xdg-shell
++			/usr/local/share/wayland-protocols/stable/xdg-shell
++	)
++
++	if (XDG_SHELL_XML)
++		set(XDG_SHELL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h")
++		set(XDG_SHELL_CODE   "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.c")
++		add_custom_command(
++			OUTPUT  "${XDG_SHELL_HEADER}"
++			COMMAND "${WAYLAND_SCANNER}" client-header "${XDG_SHELL_XML}" "${XDG_SHELL_HEADER}"
++		)
++		add_custom_command(
++			OUTPUT  "${XDG_SHELL_CODE}"
++			COMMAND "${WAYLAND_SCANNER}" private-code "${XDG_SHELL_XML}" "${XDG_SHELL_CODE}"
++		)
++		set(XDG_SHELL_SOURCES "${XDG_SHELL_CODE}")
++		set(XDG_SHELL_HEADERS "${XDG_SHELL_HEADER}")
++	else()
++		message(WARNING "xdg-shell.xml not found; Wayland.backend disabled")
++		set(XDG_SHELL_SOURCES "")
++		set(XDG_SHELL_HEADERS "")
++	endif()
++else()
++	message(WARNING "wayland-scanner not found; Wayland.backend disabled")
++	set(XDG_SHELL_SOURCES "")
++	set(XDG_SHELL_HEADERS "")
++endif()
++
+ include_directories(
+ 	${CMAKE_SOURCE_DIR}/src/external/icu/icuSources/i18n
+ 	${CMAKE_SOURCE_DIR}/src/external/icu/icuSources/common
+@@ -68,6 +119,7 @@ include_directories(
+ 	${CMAKE_CURRENT_SOURCE_DIR}/NSDrawer.subproj
+ 
+ 	${CMAKE_CURRENT_SOURCE_DIR}/X11.backend
++	${CMAKE_CURRENT_SOURCE_DIR}/Wayland.backend
+ 
+ 	${X11_INCLUDE_DIR}
+ 	${X11_Xrandr_INCLUDE_PATH}
+@@ -77,6 +129,12 @@ include_directories(
+ 	${OPENGL_INCLUDE_DIRS}
+ 	${PC_CAIRO_INCLUDE_DIRS}
+ 	${PC_FONTCONFIG_INCLUDE_DIRS}
++	${PC_WAYLAND_CLIENT_INCLUDE_DIRS}
++	${PC_XKBCOMMON_INCLUDE_DIRS}
++
++	# Generated xdg-shell-client-protocol.h lands here (see
++	# add_custom_command(OUTPUT "${XDG_SHELL_HEADER}" ...) above).
++	${CMAKE_CURRENT_BINARY_DIR}
+ )
+ 
+ set(AppKit_sources
+@@ -622,3 +680,41 @@ add_backend(X11
+ 		fontconfig
+ 		xkbfile
+ )
++
++# Wayland.backend — sibling NSDisplay backend to X11 above, added alongside
++# it (not instead of it): the X11.backend target above is untouched.
++#
++# XDG_SHELL_SOURCES/HEADERS come from the wayland-scanner generation block
++# near the top of this file; when wayland-scanner or xdg-shell.xml aren't
++# available, that block leaves them empty and this backend simply won't
++# build (guarded below) rather than failing the whole configure — same
++# "degrade, don't break the tree" behavior ipa-runtime/UIKit/CMakeLists.txt
++# uses for its own optional Wayland path.
++if (XDG_SHELL_SOURCES)
++	add_backend(Wayland
++		SOURCES
++			Wayland.backend/WaylandDisplay.m
++			Wayland.backend/WaylandWindow.m
++			Wayland.backend/WaylandInput.m
++			${XDG_SHELL_SOURCES}
++			${XDG_SHELL_HEADERS}
++		INFO_PLIST
++			Wayland.backend/Info.plist
++		DEPENDENCIES
++			objc
++			system
++			CoreFoundation
++			Foundation
++			AppKit
++			Onyx2D
++			CoreGraphics
++			OpenGL
++			QuartzCore
++			# native libraries
++			wayland-client
++			xkbcommon
++	)
++else()
++	message(WARNING "Wayland.backend not configured: xdg-shell-client-protocol.h/.c "
++		"could not be generated (see wayland-scanner/xdg-shell.xml warning above)")
++endif()
+diff --git a/AppKit/Wayland.backend/Info.plist b/AppKit/Wayland.backend/Info.plist
+new file mode 100644
+index 00000000..b8a2a4cc
+--- /dev/null
++++ b/AppKit/Wayland.backend/Info.plist
+@@ -0,0 +1,26 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>CFBundleDevelopmentRegion</key>
++	<string>English</string>
++	<key>CFBundleExecutable</key>
++	<string>Wayland</string>
++	<key>CFBundleIconFile</key>
++	<string></string>
++	<key>CFBundleIdentifier</key>
++	<string>org.darlinghq.backends.Wayland</string>
++	<key>CFBundleInfoDictionaryVersion</key>
++	<string>6.0</string>
++	<key>CFBundlePackageType</key>
++	<string>BNDL</string>
++	<key>CFBundleSignature</key>
++	<string>OBJC</string>
++	<key>CFBundleVersion</key>
++	<string>1.0</string>
++	<key>NSPriority</key>
++	<integer>300</integer>
++	<key>NSPrincipalClass</key>
++	<string>WaylandDisplay</string>
++</dict>
++</plist>
+diff --git a/AppKit/Wayland.backend/WaylandDisplay.h b/AppKit/Wayland.backend/WaylandDisplay.h
+new file mode 100644
+index 00000000..4cfd30e2
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandDisplay.h
+@@ -0,0 +1,201 @@
++/* Copyright (c) 2026 bsdOS project
++
++ Permission is hereby granted, free of charge, to any person obtaining a copy of
++ this software and associated documentation files (the "Software"), to deal in
++ the Software without restriction, including without limitation the rights to
++ use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++ of the Software, and to permit persons to whom the Software is furnished to do
++ so, subject to the following conditions:
++
++ The above copyright notice and this permission notice shall be included in all
++ copies or substantial portions of the Software.
++
++ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ SOFTWARE. */
++
++/*
++ * WaylandDisplay.h
++ *
++ * NSDisplay backend that talks to a Wayland compositor instead of an X11
++ * server. Modeled directly on X11.backend/X11Display.h (the only other
++ * concrete NSDisplay subclass in this tree) — see that file for the class
++ * cluster mechanics (NSDisplay's `+currentDisplay` / plugin-bundle loader,
++ * `src/external/cocotron/AppKit/NSDisplay.m:42-95`).
++ *
++ * Scope note: this backend owns *display* connection state (registry
++ * globals, outputs, per-window bookkeeping) and the plumbing needed for
++ * WaylandWindow to present pixels, PLUS the wl_seat capability path
++ * (registry bind, wl_keyboard/wl_pointer acquisition, and the C
++ * trampolines that forward raw wl_keyboard_listener/wl_pointer_listener
++ * callbacks into WaylandInput — see WaylandInput.h for the translation
++ * half, which this file drives but does not duplicate). The extension
++ * point mentioned in earlier revisions of this comment
++ * (`-_dispatchPendingWaylandEvents` / the "unimplemented wl_seat path")
++ * is now closed: wl_seat is bound like any other global below.
++ */
++
++#import <AppKit/NSDisplay.h>
++
++/* Wayland headers are isolated to backend translation units, same pattern
++ * as ipa-runtime/UIKit/src/UIWindow.m. xdg-shell-client-protocol.h is a
++ * generated file (wayland-scanner over xdg-shell.xml) — see
++ * ipa-runtime/UIKit/CMakeLists.txt:71-105 for the exact generation recipe
++ * this bundle's CMakeLists.txt (owned by a different agent) needs to
++ * replicate for Wayland.backend's build target.
++ */
++#include <wayland-client.h>
++#include <xdg-shell-client-protocol.h>
++
++@class WaylandWindow;
++@class WaylandInput;
++
++@interface WaylandDisplay : NSDisplay {
++    struct wl_display *_display;
++    struct wl_registry *_registry;
++    struct wl_compositor *_compositor;
++    struct wl_shm *_shm;
++    struct xdg_wm_base *_wmBase;
++
++    /* wl_seat and the two device objects it hands out on capability
++     * announcement. Bound at wl_seat protocol version 1 deliberately
++     * (see -_wayland_seat_capabilities in the .m) so the wl_keyboard/
++     * wl_pointer objects it produces only need the version-1 subset of
++     * wl_keyboard_listener/wl_pointer_listener — binding a newer seat
++     * version would require also handling v2+ callbacks (repeat_info,
++     * frame, axis_source, ...) that WaylandInput does not implement. */
++    struct wl_seat *_seat;
++    struct wl_keyboard *_keyboard;
++    struct wl_pointer *_pointer;
++
++    /* The translator this display drives. Owned here (strong), handed
++     * to WaylandInput as a weak back-reference at -init time — mirrors
++     * the ownership WaylandInput.h documents at WaylandInput.h:135
++     * (`__weak WaylandDisplay *_display`). */
++    WaylandInput *_input;
++
++    /* wl_keyboard carries no per-event target (unlike wl_pointer, whose
++     * .enter/.leave frame the focus change per-call) — the focused
++     * surface must be tracked across wl_keyboard.enter/.leave so it can
++     * be threaded through to -waylandKeyboardKey:timeMs:evdevKeyCode:
++     * pressed: (WaylandInput.h:197-200), which needs it in its `surface`
++     * argument. Raw wl_surface* — not retained, Wayland objects have no
++     * refcounting visible to the client. */
++    struct wl_surface *_keyboardFocusSurface;
++
++    /* wl_pointer.motion carries no button state of its own (see
++     * WaylandInput.h:128-132 and the -waylandPointerMotion:...
++     * buttonsDown: doc, WaylandInput.h:247-249) — the caller (us) must
++     * track which buttons are down from wl_pointer.button events and
++     * pass the running mask into every motion callback. Bit layout
++     * matches WaylandInput.m's own caller contract exactly: bit
++     * (evdevButton - BTN_LEFT), i.e. bit 0 = BTN_LEFT (0x110), bit 1 =
++     * BTN_RIGHT (0x111) — see WaylandInput.m:453-456's "BSD_WL_BTN_LEFT
++     * bit" / "BSD_WL_BTN_RIGHT bit" comments, which this file's
++     * trampolines must produce, not just consume. */
++    uint32_t _pointerButtonMask;
++
++    /* First (only) wl_output we bind. Multi-monitor enumeration is not
++     * implemented (see -screens in the .m for the honest TODO) — real
++     * multi-screen support needs per-output NSScreen tracking keyed by
++     * wl_output, mirroring X11Display's XRandR-driven -screens
++     * (X11Display.m:195-260).
++     */
++    struct wl_output *_output;
++    int32_t _outputWidthPx;
++    int32_t _outputHeightPx;
++    int32_t _outputScale;
++    BOOL _outputModeKnown;
++
++    /* Did the compositor's wl_shm advertise WL_SHM_FORMAT_ARGB8888? Verified
++     * (not assumed) at registry-bind time — see -_registryGlobal:... in the
++     * .m. The protocol requires ARGB8888/XRGB8888 support unconditionally,
++     * but we check anyway rather than assume a well-behaved compositor.
++     */
++    BOOL _shmFormatArgb8888Supported;
++
++    /* wl_surface* (as NSValue pointer-box) -> WaylandWindow*, so incoming
++     * wl_surface-scoped events (frame callbacks, future input events) can
++     * be routed back to the owning window. Analogous to X11Display's
++     * `_windowsByID` (X11Display.h:33), keyed by XID there vs. wl_surface*
++     * here because Wayland has no small-integer window handle.
++     */
++    NSMutableDictionary *_windowsBySurface;
++
++    /* Extension point for the input agent: last pointer location reported
++     * by wl_pointer (once that listener exists). Until then this stays at
++     * the origin and -mouseLocation says so honestly (see .m).
++     */
++    NSPoint _lastKnownMouseLocation;
++}
++
++/// purpose: expose the live wl_display* so run-loop integration (event pump)
++///          and WaylandWindow (surface/buffer creation) can drive libwayland
++///          directly instead of poking through instance variables from
++///          outside the class.
++/// input: none
++/// output: struct wl_display* (never NULL once -init has succeeded)
++/// sideEffects: none
++- (struct wl_display *) waylandDisplay;
++
++/// purpose: expose the bound wl_compositor so WaylandWindow can create
++///          wl_surface objects.
++/// input: none
++/// output: struct wl_compositor* (never NULL once -init has succeeded)
++/// sideEffects: none
++- (struct wl_compositor *) compositor;
++
++/// purpose: expose the bound wl_shm so WaylandWindow can allocate its
++///          double-buffered shm pools.
++/// input: none
++/// output: struct wl_shm* (never NULL once -init has succeeded)
++/// sideEffects: none
++- (struct wl_shm *) shm;
++
++/// purpose: expose the bound xdg_wm_base so WaylandWindow can turn its
++///          wl_surface into an xdg_surface/xdg_toplevel.
++/// input: none
++/// output: struct xdg_wm_base* (never NULL once -init has succeeded)
++/// sideEffects: none
++- (struct xdg_wm_base *) wmBase;
++
++/// purpose: register/unregister a WaylandWindow under its wl_surface so
++///          future surface-scoped compositor events (frame callbacks,
++///          and eventually input once that lands) can be dispatched back
++///          to the right NSWindow-facing object. Mirrors X11Display's
++///          `-setWindow:forID:` (X11Display.h:50, X11Display.m:935-952).
++/// input: window (nil to unregister), surface (the wl_surface* key)
++/// output: none
++/// sideEffects: mutates _windowsBySurface
++- (void) setWindow: (WaylandWindow *) window forSurface: (struct wl_surface *) surface;
++
++/// purpose: look up the WaylandWindow owning a given wl_surface.
++/// input: surface
++/// output: WaylandWindow* or nil if unknown
++/// sideEffects: none
++- (WaylandWindow *) windowForSurface: (struct wl_surface *) surface;
++
++/// purpose: pump libwayland's socket (dispatch queued events, flush pending
++///          requests) so buffer-release callbacks, xdg_surface.configure
++///          acks, and (once wired up) input events actually get processed.
++///          Cocotron's AppKit run loop has no built-in knowledge of a
++///          Wayland fd, so this must be called from somewhere reachable on
++///          every pass through the event loop; today that's
++///          -nextEventMatchingMask:untilDate:inMode:dequeue: (mirroring how
++///          X11Display folds XNextEvent-driven work into the same call,
++///          X11Display.m:958-979), which is simple but polling-based. A
++///          real integration would register the wl_display fd
++///          (wl_display_get_fd) with CFRunLoop the way X11Display does for
++///          its X11 socket under DARLING (X11Display.m:107-120) — not done
++///          here; TODO for whoever wires the run loop up properly.
++/// input: none
++/// output: none
++/// sideEffects: processes and dispatches any queued Wayland events; may
++///              invoke buffer-release / configure listeners synchronously
++- (void) _dispatchPendingWaylandEvents;
++
++@end
+diff --git a/AppKit/Wayland.backend/WaylandDisplay.m b/AppKit/Wayland.backend/WaylandDisplay.m
+new file mode 100644
+index 00000000..28d2ad84
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandDisplay.m
+@@ -0,0 +1,752 @@
++/* Copyright (c) 2026 bsdOS project
++
++ Permission is hereby granted, free of charge, to any person obtaining a copy of
++ this software and associated documentation files (the "Software"), to deal in
++ the Software without restriction, including without limitation the rights to
++ use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++ of the Software, and to permit persons to whom the Software is furnished to do
++ so, subject to the following conditions:
++
++ The above copyright notice and this permission notice shall be included in all
++ copies or substantial portions of the Software.
++
++ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ SOFTWARE. */
++
++#import "WaylandDisplay.h"
++#import "WaylandWindow.h"
++#import "WaylandInput.h"
++
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSColor.h>
++#import <AppKit/NSDraggingManager.h>
++#import <AppKit/NSPasteboard.h>
++#import <AppKit/NSRaise.h>
++#import <AppKit/NSScreen.h>
++#import <AppKit/NSWindow.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSValue.h>
++
++#import <errno.h>
++#import <stdio.h>
++#import <stdlib.h>
++#import <string.h>
++
++/* evdev mouse button codes. Deliberately hand-copied rather than
++ * `#include <linux/input-event-codes.h>` — this tree targets FreeBSD,
++ * which has no such header, even though the Wayland wire protocol still
++ * carries Linux-numbered evdev codes on every platform. Kept in sync
++ * with WaylandInput.m's own local copy (WaylandInput.m:44-56) by value,
++ * not by sharing a header — WaylandInput.m documents these as private
++ * to that translation unit, so this file needs its own copy to build
++ * the buttonsDown bitmask it owes -waylandPointerMotion:...buttonsDown:
++ * (WaylandInput.h:255-257). */
++#define BSD_WL_BTN_LEFT   0x110
++#define BSD_WL_BTN_RIGHT  0x111
++
++@implementation WaylandDisplay
++
++/* ==========================================================================
++ * Registry / global-object callbacks
++ *
++ * Same shape as X11Display's XRandR/XKB setup in -init (X11Display.m:75-145)
++ * and the registry listener in ipa-runtime/UIKit/src/UIWindow.m:121-141 —
++ * this backend follows the latter's naming/structure since it is the
++ * existing in-tree precedent for a raw libwayland-client consumer.
++ * ========================================================================== */
++
++static void _wayland_registry_global(void *data, struct wl_registry *registry,
++                                      uint32_t name, const char *interface,
++                                      uint32_t version) {
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    (void) version;
++
++    if (strcmp(interface, wl_compositor_interface.name) == 0) {
++        self->_compositor = (struct wl_compositor *) wl_registry_bind(
++                registry, name, &wl_compositor_interface, 4);
++    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
++        self->_shm = (struct wl_shm *) wl_registry_bind(
++                registry, name, &wl_shm_interface, 1);
++    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
++        self->_wmBase = (struct xdg_wm_base *) wl_registry_bind(
++                registry, name, &xdg_wm_base_interface, 1);
++    } else if (strcmp(interface, wl_output_interface.name) == 0 &&
++               self->_output == NULL) {
++        /* Bind only the first output. Real multi-monitor support needs one
++         * NSScreen per wl_output, tracked in a dictionary the way
++         * _windowsBySurface tracks windows — not implemented, see the
++         * -screens TODO below. */
++        self->_output = (struct wl_output *) wl_registry_bind(
++                registry, name, &wl_output_interface, 2);
++    } else if (strcmp(interface, wl_seat_interface.name) == 0 &&
++               self->_seat == NULL) {
++        /* Bind at version 1 deliberately (see the ivar doc comment in
++         * WaylandDisplay.h) — the wl_keyboard/wl_pointer objects handed
++         * out by wl_seat_get_keyboard/get_pointer inherit this version,
++         * and WaylandInput's listener trampolines below only implement
++         * the version-1 callback set. */
++        self->_seat = (struct wl_seat *) wl_registry_bind(
++                registry, name, &wl_seat_interface, 1);
++    }
++}
++
++static void _wayland_registry_global_remove(void *data,
++                                             struct wl_registry *registry,
++                                             uint32_t name) {
++    (void) data;
++    (void) registry;
++    (void) name;
++    /* TODO: a hot-unplugged wl_output or a compositor restart should be
++     * handled (screens change, surfaces become defunct); out of scope for
++     * this skeleton. */
++}
++
++static const struct wl_registry_listener _wayland_registry_listener = {
++    .global = _wayland_registry_global,
++    .global_remove = _wayland_registry_global_remove,
++};
++
++static void _wayland_shm_format(void *data, struct wl_shm *shm,
++                                 uint32_t format) {
++    (void) shm;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    if (format == WL_SHM_FORMAT_ARGB8888) {
++        self->_shmFormatArgb8888Supported = YES;
++    }
++}
++
++static const struct wl_shm_listener _wayland_shm_listener = {
++    .format = _wayland_shm_format,
++};
++
++static void _wayland_wm_base_ping(void *data, struct xdg_wm_base *wmBase,
++                                   uint32_t serial) {
++    (void) data;
++    xdg_wm_base_pong(wmBase, serial);
++}
++
++static const struct xdg_wm_base_listener _wayland_wm_base_listener = {
++    .ping = _wayland_wm_base_ping,
++};
++
++static void _wayland_output_geometry(void *data, struct wl_output *output,
++                                      int32_t x, int32_t y,
++                                      int32_t physW, int32_t physH,
++                                      int32_t subpixel, const char *make,
++                                      const char *model, int32_t transform) {
++    (void) data;
++    (void) output;
++    (void) x;
++    (void) y;
++    (void) physW;
++    (void) physH;
++    (void) subpixel;
++    (void) make;
++    (void) model;
++    (void) transform;
++    /* Physical geometry isn't needed for the pixel-buffer seam; only the
++     * mode event (pixel resolution) matters for -screens below. */
++}
++
++static void _wayland_output_mode(void *data, struct wl_output *output,
++                                  uint32_t flags, int32_t width,
++                                  int32_t height, int32_t refresh) {
++    (void) output;
++    (void) refresh;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    if (flags & WL_OUTPUT_MODE_CURRENT) {
++        self->_outputWidthPx = width;
++        self->_outputHeightPx = height;
++        self->_outputModeKnown = YES;
++    }
++}
++
++static void _wayland_output_done(void *data, struct wl_output *output) {
++    (void) data;
++    (void) output;
++}
++
++static void _wayland_output_scale(void *data, struct wl_output *output,
++                                   int32_t factor) {
++    (void) output;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    self->_outputScale = factor;
++}
++
++static const struct wl_output_listener _wayland_output_listener = {
++    .geometry = _wayland_output_geometry,
++    .mode = _wayland_output_mode,
++    .done = _wayland_output_done,
++    .scale = _wayland_output_scale,
++};
++
++/* ==========================================================================
++ * wl_seat / wl_keyboard / wl_pointer — input device acquisition and the
++ * C trampolines that forward raw callback arguments into WaylandInput
++ * (see WaylandInput.h for the translation contract; this section only
++ * does argument plumbing + the bookkeeping WaylandInput's header says
++ * the caller owns: keyboard focus surface tracking and the pointer
++ * button-down bitmask).
++ * ========================================================================== */
++
++/* purpose: wl_keyboard_listener.keymap — hand the compositor-provided
++ *          keymap fd to WaylandInput, then close it.
++ * input: standard wl_keyboard_listener callback signature.
++ * output: none.
++ * sideEffects: calls -waylandKeyboardKeymapFd:format:size: (which mmaps
++ *              the fd internally, per WaylandInput.h:160-178); closes fd
++ *              afterward — WaylandInput.h explicitly documents that it
++ *              does NOT close the fd itself ("TODO confirm close-
++ *              ownership contract", WaylandInput.h:165-166), and the
++ *              wayland-book convention is that the fd is owned by the
++ *              client once handed over in this event, so closing it
++ *              here (after the mmap WaylandInput already performed) is
++ *              the correct place to discharge that ownership.
++ */
++static void _wayland_keyboard_keymap(void *data, struct wl_keyboard *keyboard,
++                                      uint32_t format, int32_t fd,
++                                      uint32_t size) {
++    (void) keyboard;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    [self->_input waylandKeyboardKeymapFd: fd format: format size: size];
++    close(fd);
++}
++
++static void _wayland_keyboard_enter(void *data, struct wl_keyboard *keyboard,
++                                     uint32_t serial, struct wl_surface *surface,
++                                     struct wl_array *keys) {
++    (void) keyboard;
++    (void) serial;
++    (void) keys;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    /* wl_keyboard events carry no per-call surface argument (unlike
++     * wl_pointer's .enter/.leave/.motion) — WaylandInput's
++     * -waylandKeyboardKey:... needs the focused surface passed in
++     * explicitly (WaylandInput.h:182-183), so it must be remembered
++     * here across the enter/leave pair. */
++    self->_keyboardFocusSurface = surface;
++}
++
++static void _wayland_keyboard_leave(void *data, struct wl_keyboard *keyboard,
++                                     uint32_t serial, struct wl_surface *surface) {
++    (void) keyboard;
++    (void) serial;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    if (self->_keyboardFocusSurface == surface) {
++        self->_keyboardFocusSurface = NULL;
++    }
++}
++
++static void _wayland_keyboard_key(void *data, struct wl_keyboard *keyboard,
++                                   uint32_t serial, uint32_t time,
++                                   uint32_t key, uint32_t state) {
++    (void) keyboard;
++    (void) serial;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    [self->_input waylandKeyboardKey: self->_keyboardFocusSurface
++                               timeMs: time
++                         evdevKeyCode: key
++                              pressed: (state == WL_KEYBOARD_KEY_STATE_PRESSED)];
++}
++
++static void _wayland_keyboard_modifiers(void *data, struct wl_keyboard *keyboard,
++                                         uint32_t serial, uint32_t modsDepressed,
++                                         uint32_t modsLatched, uint32_t modsLocked,
++                                         uint32_t group) {
++    (void) keyboard;
++    (void) serial;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    [self->_input waylandKeyboardModifiersDepressed: modsDepressed
++                                             latched: modsLatched
++                                              locked: modsLocked
++                                               group: group];
++}
++
++static const struct wl_keyboard_listener _wayland_keyboard_listener = {
++    .keymap = _wayland_keyboard_keymap,
++    .enter = _wayland_keyboard_enter,
++    .leave = _wayland_keyboard_leave,
++    .key = _wayland_keyboard_key,
++    .modifiers = _wayland_keyboard_modifiers,
++};
++
++static void _wayland_pointer_enter(void *data, struct wl_pointer *pointer,
++                                    uint32_t serial, struct wl_surface *surface,
++                                    wl_fixed_t surfaceX, wl_fixed_t surfaceY) {
++    (void) pointer;
++    (void) serial;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    [self->_input waylandPointerEnter: surface
++                              surfaceX: wl_fixed_to_double(surfaceX)
++                              surfaceY: wl_fixed_to_double(surfaceY)];
++}
++
++static void _wayland_pointer_leave(void *data, struct wl_pointer *pointer,
++                                    uint32_t serial, struct wl_surface *surface) {
++    (void) pointer;
++    (void) serial;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    [self->_input waylandPointerLeave: surface];
++}
++
++static void _wayland_pointer_motion(void *data, struct wl_pointer *pointer,
++                                     uint32_t time, wl_fixed_t surfaceX,
++                                     wl_fixed_t surfaceY) {
++    (void) pointer;
++    (void) time;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    [self->_input waylandPointerMotion: wl_fixed_to_double(surfaceX)
++                               surfaceY: wl_fixed_to_double(surfaceY)
++                            buttonsDown: self->_pointerButtonMask];
++}
++
++static void _wayland_pointer_button(void *data, struct wl_pointer *pointer,
++                                     uint32_t serial, uint32_t time,
++                                     uint32_t button, uint32_t state) {
++    (void) pointer;
++    (void) serial;
++    (void) time;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    BOOL pressed = (state == WL_POINTER_BUTTON_STATE_PRESSED);
++
++    /* Maintain the running button-down mask -waylandPointerMotion:...
++     * needs (WaylandDisplay.h's _pointerButtonMask doc explains the bit
++     * layout: bit (evdevButton - BTN_LEFT)). Only left/right are given
++     * dedicated bits because that's all -waylandPointerMotion:...
++     * consults (WaylandInput.m:453-456) — other buttons (middle, side,
++     * ...) still get folded in at their own (evdevButton - BTN_LEFT)
++     * bit position for consistency/future-proofing, but nothing reads
++     * those bits today. */
++    if (button >= BSD_WL_BTN_LEFT && (button - BSD_WL_BTN_LEFT) < 32) {
++        /* Bounds-checked BEFORE computing the shift amount: a bare
++         * `1u << (button - BSD_WL_BTN_LEFT)` with button < BSD_WL_BTN_LEFT
++         * would underflow to a huge unsigned value and shift by >=32,
++         * which is undefined behavior in C — not just "wrong bit". */
++        uint32_t bit = 1u << (button - BSD_WL_BTN_LEFT);
++        if (pressed) {
++            self->_pointerButtonMask |= bit;
++        } else {
++            self->_pointerButtonMask &= ~bit;
++        }
++    }
++
++    NSEventModifierFlags modifierFlags = [self->_input currentModifierFlags];
++    [self->_input waylandPointerButton: button
++                                pressed: pressed
++                          modifierFlags: modifierFlags];
++}
++
++static void _wayland_pointer_axis(void *data, struct wl_pointer *pointer,
++                                   uint32_t time, uint32_t axis,
++                                   wl_fixed_t value) {
++    (void) pointer;
++    (void) time;
++    WaylandDisplay *self = (WaylandDisplay *) data;
++    NSEventModifierFlags modifierFlags = [self->_input currentModifierFlags];
++    /* wl_fixed_t IS int32_t (see <wayland-util.h>), and
++     * -waylandPointerAxis:value:modifierFlags: documents its `value`
++     * parameter as taking the raw wl_fixed_t scroll amount
++     * (WaylandInput.h:283-285) — passed straight through, no
++     * wl_fixed_to_double/int conversion needed or wanted here. */
++    [self->_input waylandPointerAxis: axis
++                                value: value
++                        modifierFlags: modifierFlags];
++}
++
++static const struct wl_pointer_listener _wayland_pointer_listener = {
++    .enter = _wayland_pointer_enter,
++    .leave = _wayland_pointer_leave,
++    .motion = _wayland_pointer_motion,
++    .button = _wayland_pointer_button,
++    .axis = _wayland_pointer_axis,
++};
++
++/// purpose: wl_seat_listener.capabilities — acquire/release wl_keyboard
++///          and wl_pointer objects as the compositor announces they
++///          became available or went away (e.g. a USB keyboard
++///          unplugged), matching the Wayland protocol's expectation
++///          that clients react to capability changes rather than
++///          assuming a fixed device set for the seat's lifetime.
++/// input: standard wl_seat_listener callback signature.
++/// output: none.
++/// sideEffects: may call wl_seat_get_keyboard/get_pointer + add the
++///              matching listener, or wl_keyboard_destroy/
++///              wl_pointer_destroy; mutates self->_keyboard/_pointer.
++static void _wayland_seat_capabilities(void *data, struct wl_seat *seat,
++                                        uint32_t capabilities) {
++    WaylandDisplay *self = (WaylandDisplay *) data;
++
++    BOOL hasKeyboard = (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) != 0;
++    if (hasKeyboard && self->_keyboard == NULL) {
++        self->_keyboard = wl_seat_get_keyboard(seat);
++        wl_keyboard_add_listener(self->_keyboard, &_wayland_keyboard_listener, self);
++    } else if (!hasKeyboard && self->_keyboard != NULL) {
++        wl_keyboard_destroy(self->_keyboard);
++        self->_keyboard = NULL;
++        self->_keyboardFocusSurface = NULL;
++    }
++
++    BOOL hasPointer = (capabilities & WL_SEAT_CAPABILITY_POINTER) != 0;
++    if (hasPointer && self->_pointer == NULL) {
++        self->_pointer = wl_seat_get_pointer(seat);
++        wl_pointer_add_listener(self->_pointer, &_wayland_pointer_listener, self);
++    } else if (!hasPointer && self->_pointer != NULL) {
++        wl_pointer_destroy(self->_pointer);
++        self->_pointer = NULL;
++        self->_pointerButtonMask = 0;
++    }
++}
++
++static void _wayland_seat_name(void *data, struct wl_seat *seat,
++                                const char *name) {
++    (void) data;
++    (void) seat;
++    (void) name;
++    /* Multi-seat disambiguation (picking a named seat over "default")
++     * is not implemented — this backend uses whichever single wl_seat
++     * the compositor advertises first, same simplification as the
++     * single-wl_output handling above. */
++}
++
++static const struct wl_seat_listener _wayland_seat_listener = {
++    .capabilities = _wayland_seat_capabilities,
++    .name = _wayland_seat_name,
++};
++
++/* ==========================================================================
++ * NSDisplay overrides
++ * ========================================================================== */
++
++- init {
++    /* Same "concrete subclass init" contract as X11Display -init
++     * (X11Display.m:75-145): call [super init] first (NSDisplay's -init
++     * special-cases subclasses to just allocate _eventQueue and return,
++     * NSDisplay.m:46-51), then do backend-specific connection setup,
++     * returning nil on any failure so NSDisplay's plugin loader
++     * (NSDisplay.m:76-85) moves on to the next-priority backend. */
++    if (self = [super init]) {
++        _display = wl_display_connect(NULL);
++        if (_display == NULL) {
++            NSLog(@"WaylandDisplay: wl_display_connect failed (WAYLAND_DISPLAY=%s)",
++                  getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(unset)");
++            [self release];
++            return nil;
++        }
++
++        _outputScale = 1;
++        _windowsBySurface = [NSMutableDictionary new];
++        _lastKnownMouseLocation = NSZeroPoint;
++
++        _registry = wl_display_get_registry(_display);
++        wl_registry_add_listener(_registry, &_wayland_registry_listener, self);
++
++        /* First roundtrip: receive the registry.global advertisements and
++         * bind compositor/shm/xdg_wm_base/output. */
++        wl_display_roundtrip(_display);
++
++        if (_compositor == NULL || _shm == NULL || _wmBase == NULL) {
++            NSLog(@"WaylandDisplay: compositor did not advertise a required "
++                  @"global (compositor=%p shm=%p xdg_wm_base=%p) — cannot use "
++                  @"this backend",
++                  (void *) _compositor, (void *) _shm, (void *) _wmBase);
++            [self release];
++            return nil;
++        }
++
++        /* Wire up listeners on the objects we just bound, then do a second
++         * roundtrip so their initial events (wl_shm.format, wl_output's
++         * geometry/mode/done/scale, ping is compositor-driven not needed
++         * here) are delivered before we report ourselves ready. */
++        wl_shm_add_listener(_shm, &_wayland_shm_listener, self);
++        xdg_wm_base_add_listener(_wmBase, &_wayland_wm_base_listener, self);
++        if (_output != NULL) {
++            wl_output_add_listener(_output, &_wayland_output_listener, self);
++        }
++        if (_seat != NULL) {
++            /* wl_seat.capabilities (and .name) arrive from this listener;
++             * the roundtrip below delivers the initial capabilities
++             * event so -_wayland_seat_capabilities can acquire
++             * wl_keyboard/wl_pointer before -init returns, same timing
++             * as the shm/output listeners above. A compositor with no
++             * wl_seat at all (unusual, but not protocol-mandatory) is
++             * tolerated: keyboard/pointer just never appear, and
++             * WaylandInput's translation methods are simply never
++             * invoked — not treated as a fatal -init error, since a
++             * display with no input devices is still a valid display. */
++            wl_seat_add_listener(_seat, &_wayland_seat_listener, self);
++        } else {
++            NSLog(@"WaylandDisplay: compositor did not advertise wl_seat — "
++                  @"no keyboard/pointer input will be available");
++        }
++        wl_display_roundtrip(_display);
++
++        /* WaylandInput owns the xkbcommon context; construct it once
++         * wl_seat setup (if any) is in flight so its trampolines above
++         * have somewhere to forward events the moment wl_keyboard/
++         * wl_pointer show up in the roundtrip just issued. Not fatal if
++         * this fails (mirrors the "not fatal" wl_seat-absent case just
++         * above) — xkb_context_new() only fails on allocation failure,
++         * and losing keyboard translation is not a reason to refuse the
++         * whole display connection. */
++        _input = [[WaylandInput alloc] initWithDisplay: self];
++        if (_input == nil) {
++            NSLog(@"WaylandDisplay: WaylandInput init failed (xkb_context_new "
++                  @"out of memory?) — keyboard/pointer events will be dropped");
++        }
++
++        if (!_shmFormatArgb8888Supported) {
++            /* WL_SHM_FORMAT_ARGB8888 is mandatory per the wl_shm protocol
++             * (every compositor must support it), so this should be
++             * unreachable — but we verify rather than assume, per project
++             * rule against silent success paths. */
++            NSLog(@"WaylandDisplay: compositor's wl_shm did not advertise "
++                  @"WL_SHM_FORMAT_ARGB8888 — refusing to guess a pixel format");
++            [self release];
++            return nil;
++        }
++
++        return self;
++    }
++    return self;
++}
++
++- (void) dealloc {
++    [_windowsBySurface release];
++    [_input release];
++
++    if (_keyboard != NULL)
++        wl_keyboard_destroy(_keyboard);
++    if (_pointer != NULL)
++        wl_pointer_destroy(_pointer);
++    if (_seat != NULL)
++        wl_seat_destroy(_seat);
++    if (_output != NULL)
++        wl_output_destroy(_output);
++    if (_wmBase != NULL)
++        xdg_wm_base_destroy(_wmBase);
++    if (_shm != NULL)
++        wl_shm_destroy(_shm);
++    if (_compositor != NULL)
++        wl_compositor_destroy(_compositor);
++    if (_registry != NULL)
++        wl_registry_destroy(_registry);
++    if (_display != NULL)
++        wl_display_disconnect(_display);
++
++    [super dealloc];
++}
++
++- (struct wl_display *) waylandDisplay {
++    return _display;
++}
++
++- (struct wl_compositor *) compositor {
++    return _compositor;
++}
++
++- (struct wl_shm *) shm {
++    return _shm;
++}
++
++- (struct xdg_wm_base *) wmBase {
++    return _wmBase;
++}
++
++- (void) setWindow: (WaylandWindow *) window forSurface: (struct wl_surface *) surface {
++    NSValue *key = [NSValue valueWithPointer: surface];
++    if (window != nil) {
++        [_windowsBySurface setObject: window forKey: key];
++    } else {
++        [_windowsBySurface removeObjectForKey: key];
++    }
++}
++
++- (WaylandWindow *) windowForSurface: (struct wl_surface *) surface {
++    return [_windowsBySurface objectForKey: [NSValue valueWithPointer: surface]];
++}
++
++- (CGWindow *) newWindowWithDelegate: (NSWindow *) delegate {
++    return [[WaylandWindow alloc] initWithDelegate: delegate];
++}
++
++- (NSArray *) screens {
++    /* Cocotron wants at least one NSScreen to compute menu-bar placement,
++     * window cascading, etc. If we haven't received a wl_output.mode event
++     * yet (compositor hasn't sent one, or has no outputs at all — headless
++     * compositors like cage under WLR_BACKENDS=headless still normally
++     * create a virtual output, but this is not guaranteed by protocol),
++     * fall back to a documented placeholder size instead of pretending we
++     * know the real geometry. */
++    CGFloat width = _outputModeKnown ? (CGFloat) _outputWidthPx : 1024.0;
++    CGFloat height = _outputModeKnown ? (CGFloat) _outputHeightPx : 768.0;
++    if (!_outputModeKnown) {
++        NSLog(@"WaylandDisplay: no wl_output mode known yet, reporting a "
++              @"placeholder %gx%g screen", width, height);
++    }
++
++    NSRect frame = NSMakeRect(0, 0, width, height);
++    NSScreen *screen = [[[NSScreen alloc] initWithFrame: frame
++                                            visibleFrame: frame] autorelease];
++    return [NSArray arrayWithObject: screen];
++}
++
++- (NSPasteboard *) pasteboardWithName: (NSString *) name {
++    /* TODO: wire this to wl_data_device_manager / gtk-primary-selection for
++     * real clipboard interop. Returning a plain in-process NSPasteboard
++     * gives intra-application copy/paste (NSPasteboard's default storage)
++     * but nothing crosses to other Wayland clients yet. Documented
++     * limitation, not a silent success. */
++    return [NSPasteboard pasteboardWithName: name];
++}
++
++- (NSDraggingManager *) draggingManager {
++    /* TODO: drag-and-drop needs wl_data_device (drag source/target) wiring;
++     * not implemented. */
++    return nil;
++}
++
++- (NSColor *) colorWithName: (NSString *) colorName {
++    /* No platform theme integration (e.g. reading a Wayland
++     * color-scheme/xdg-desktop-portal setting) yet — nil means "AppKit's
++     * built-in default for this name applies", which is correct behavior,
++     * not a stub pretending to have an answer. */
++    return nil;
++}
++
++- (NSTimeInterval) textCaretBlinkInterval {
++    return 0.5;
++}
++
++- (void) hideCursor {
++    /* TODO: needs a wl_pointer to call wl_pointer_set_cursor(NULL) on —
++     * input agent's responsibility. */
++}
++
++- (void) unhideCursor {
++    /* TODO: see -hideCursor. */
++}
++
++- (id) cursorWithName: (NSString *) name {
++    /* TODO: cursor theme loading (wl_cursor_theme_load) belongs with the
++     * input agent's pointer wiring. */
++    return nil;
++}
++
++- (void) setCursor: (id) cursor {
++    /* TODO: see -cursorWithName:. */
++}
++
++- (void) beep {
++    /* No system bell concept over Wayland core protocol; intentionally a
++     * silent no-op (unlike the cursor/pasteboard TODOs above, there is no
++     * missing wiring to add here — there is no Wayland equivalent). */
++}
++
++- (CGFloat) scrollerWidth {
++    return 15.0;
++}
++
++- (NSPoint) mouseLocation {
++    /* Extension point for the input agent: once a wl_pointer.motion
++     * listener exists, it should update _lastKnownMouseLocation (and
++     * flip Y the same way -[WaylandWindow transformPoint:] does for
++     * window-local coordinates). Until then this honestly reports the
++     * origin rather than fabricating a plausible-looking position. */
++    return _lastKnownMouseLocation;
++}
++
++- (NSUInteger) currentModifierFlags {
++    /* TODO: needs wl_keyboard.modifiers tracking — input agent's job. */
++    return 0;
++}
++
++- (NSArray *) orderedWindowNumbers {
++    /* Wayland gives clients no compositor-stacking-order query API (unlike
++     * X11's _NET_CLIENT_LIST_STACKING that X11Display could read). This
++     * returns our known windows in registration order, which is NOT
++     * necessarily on-screen stacking order — documented approximation. */
++    NSMutableArray *result = [NSMutableArray array];
++    for (WaylandWindow *window in [_windowsBySurface allValues]) {
++        [result addObject: [NSNumber numberWithLong: [window windowNumber]]];
++    }
++    return result;
++}
++
++- (CGRect) insetRect: (CGRect) frame
++        forNativeWindowBorderWithStyle: (NSUInteger) styleMask
++{
++    /* This backend draws no client-side decoration (no titlebar/border),
++     * so there is nothing to inset for. TODO: once CSD (e.g. via
++     * libdecor) or the xdg-decoration protocol is wired up, this needs to
++     * return real border widths the way X11's border-hint logic does. */
++    (void) styleMask;
++    return frame;
++}
++
++- (CGRect) outsetRect: (CGRect) frame
++        forNativeWindowBorderWithStyle: (NSUInteger) styleMask
++{
++    (void) styleMask;
++    return frame;
++}
++
++- (void) warpMouse: (NSPoint) position {
++    /* Wayland gives clients no ability to warp the pointer (a deliberate
++     * protocol design choice, unlike X11's XWarpPointer). Left as a no-op
++     * rather than raising, since silently ignoring a request AppKit itself
++     * treats as best-effort is the honest behavior here — but flagged
++     * loudly so nobody mistakes this for "it worked". */
++    (void) position;
++    NSLog(@"WaylandDisplay: warpMouse: ignored — wl core protocol has no "
++          @"pointer-warp request");
++}
++
++- (void) grabMouse: (BOOL) doGrab {
++    /* TODO: pointer-constraints-unstable-v1 (or similar) is the Wayland
++     * equivalent of an X11 pointer grab; not implemented — input agent's
++     * job together with the rest of the pointer wiring. */
++    (void) doGrab;
++}
++
++- (void) _dispatchPendingWaylandEvents {
++    if (_display == NULL)
++        return;
++    /* wl_display_dispatch_pending only processes events already read off
++     * the socket by a prior wl_display_dispatch/prepare_read cycle; since
++     * we're not integrated with a real fd-watching run loop yet (see the
++     * header doc), use the blocking-but-bounded wl_display_roundtrip-free
++     * pattern from ipa-runtime/UIKit/src/UIWindow.m:359
++     * (wl_display_dispatch_pending) followed by an explicit flush so any
++     * requests we queued (e.g. a fresh wl_surface_commit) actually reach
++     * the compositor. This does NOT block waiting for new events — if
++     * nothing is queued, both calls are no-ops. */
++    wl_display_dispatch_pending(_display);
++    if (wl_display_flush(_display) < 0 && errno != EAGAIN) {
++        NSLog(@"WaylandDisplay: wl_display_flush failed: %s", strerror(errno));
++    }
++}
++
++- (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
++                          untilDate: (NSDate *) untilDate
++                             inMode: (NSRunLoopMode) mode
++                            dequeue: (BOOL) dequeue
++{
++    /* Give the compositor a chance to process anything we've queued (and
++     * us a chance to notice buffer releases / configure events) before
++     * falling through to the base class's _eventQueue-driven
++     * implementation (NSDisplay.m:149-183). See _dispatchPendingWaylandEvents's
++     * doc comment for why this is a polling stand-in, not a real fd
++     * integration. */
++    [self _dispatchPendingWaylandEvents];
++    return [super nextEventMatchingMask: mask
++                               untilDate: untilDate
++                                  inMode: mode
++                                 dequeue: dequeue];
++}
++
++@end
+diff --git a/AppKit/Wayland.backend/WaylandInput.h b/AppKit/Wayland.backend/WaylandInput.h
+new file mode 100644
+index 00000000..e42721a9
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandInput.h
+@@ -0,0 +1,309 @@
++/* WaylandInput.h
++ *
++ * Wayland wl_keyboard / wl_pointer input -> AppKit NSEvent translation for
++ * the AppKit Wayland display backend.
++ *
++ * SCOPE: this file only does raw-input -> NSEvent conversion and posting.
++ * It does NOT touch wl_display/wl_registry setup, does NOT implement
++ * NSDisplay or CGWindow. That is the sibling WaylandDisplay/WaylandWindow
++ * work (WaylandDisplay.h/.m, WaylandWindow.h - see
++ * docs/SPEC-appkit-display-backend.md §2-3), done by a parallel agent.
++ * This class is meant to be driven directly from wl_keyboard_listener /
++ * wl_pointer_listener trampolines, the same way X11Display's
++ * -postXEvent: is driven directly from its own XNextEvent() loop
++ * (X11Display.m:1424-1425, -postXEvent: at :1013).
++ *
++ * ---------------------------------------------------------------------
++ * INTEGRATION STATE AS OF THIS WRITING (read WaylandDisplay.h/.m and
++ * WaylandWindow.h before touching this - they exist already, written by
++ * the parallel display/window agent working concurrently with this
++ * task):
++ * ---------------------------------------------------------------------
++ *   - WaylandDisplay already provides exactly the surface-lookup seam
++ *     this file needs: `-windowForSurface:` (WaylandDisplay.h:138),
++ *     returning a `WaylandWindow *`, backed by `_windowsBySurface`
++ *     (WaylandDisplay.h:79-85) - so no custom protocol is declared here
++ *     for that; WaylandInput takes a `WaylandDisplay *` directly (not
++ *     retained - WaylandInput.h is stored as a component owned BY the
++ *     display, mirroring how X11Display owns and drives its own event
++ *     loop rather than being handed a lookup callback from outside).
++ *   - WaylandWindow already declares `-transformPoint:`
++ *     (WaylandWindow.h:97) with the exact X11Window-parity signature
++ *     (`X11Window.h`/`.m:721-723`) - used directly below instead of a
++ *     custom `bsdWaylandTransformSurfacePoint:` selector.
++ *   - WaylandWindow's `-delegate` (the target NSWindow) and
++ *     `-windowNumber` are NOT declared in WaylandWindow.h itself, but
++ *     WaylandWindow is a `CGWindow` subclass
++ *     (`CoreGraphics/CGWindow.h:70-71,102`: `-delegate`/`-setDelegate:`/
++ *     `-windowNumber` are base-class methods) - so both Just Work on any
++ *     `WaylandWindow *` without WaylandWindow needing to redeclare them.
++ *     Verified by reading CGWindow.h directly, not assumed.
++ *   - WHAT IS STILL MISSING (not this file's job, flagged for whoever
++ *     wires the run loop / registry - see WaylandDisplay.m's own
++ *     "input agent's job" TODOs at wl_pointer.motion/wl_keyboard.
++ *     modifiers/pointer-grab call sites): WaylandDisplay does not yet
++ *     bind `wl_seat` at all (no `wl_seat_listener`, no
++ *     `wl_seat_get_keyboard`/`wl_seat_get_pointer` calls exist in
++ *     WaylandDisplay.m as of this writing - grepped for
++ *     "seat|keyboard|pointer" in that file and found only forward-
++ *     looking TODO comments, no actual binding code). This file's
++ *     methods (-waylandKeyboardKey:..., -waylandPointerMotion:...,
++ *     etc.) are the translation half; SOMETHING still needs to: (a) add
++ *     `wl_seat` to the bound-globals set in WaylandDisplay's registry
++ *     handler, (b) install a `wl_seat_listener` and, on
++ *     WL_SEAT_CAPABILITY_KEYBOARD/POINTER, call
++ *     `wl_seat_get_keyboard`/`_get_pointer`, and (c) install
++ *     `wl_keyboard_listener`/`wl_pointer_listener` C trampolines whose
++ *     bodies are one-line calls into the `WaylandInput` methods
++ *     declared below. That wiring is out of scope for this pass (it's
++ *     WaylandDisplay.m surface, owned by the other agent) - flagging it
++ *     explicitly rather than leaving it to be discovered by silent
++ *     absence.
++ *
++ * purpose: declare the input-translation object.
++ * input: n/a (header)
++ * output: n/a (header)
++ * sideEffects: n/a (header)
++ */
++
++#ifndef _WAYLANDINPUT_H
++#define _WAYLANDINPUT_H
++
++#import <Foundation/Foundation.h>
++#import <AppKit/NSEvent.h>
++
++#include <stdint.h>
++#include <xkbcommon/xkbcommon.h>
++
++struct wl_surface;
++@class NSWindow, WaylandDisplay, WaylandWindow;
++
++/* purpose: stateful translator from wl_keyboard/wl_pointer callback
++ *          arguments to NSEvent instances, posted onto the current
++ *          NSDisplay's event queue.
++ * input: fed via the -waylandKeyboard*/-waylandPointer* methods below,
++ *        called directly from wl_keyboard_listener/wl_pointer_listener
++ *        trampolines set up by WaylandDisplay.
++ * output: none directly - NSEvents are posted as a side effect (see
++ *         sideEffects).
++ * sideEffects: calls [[NSDisplay currentDisplay] postEvent:atStart:NO]
++ *              once per translated input event, exactly like
++ *              X11Display::-postXEvent: does at X11Display.m:1074/1117/
++ *              1155/1214. Also owns an xkbcommon xkb_state, which is
++ *              mutated by every keyboard event.
++ */
++@interface WaylandInput : NSObject {
++    struct xkb_context *_xkbContext;
++    struct xkb_keymap *_xkbKeymap;
++    struct xkb_state *_xkbState;
++
++    /* Tracks the last physical key pressed, to compute isARepeat the
++     * same way X11Display does with _lastKeySym (X11Display.m:1056-1059)
++     * - except Wayland gives us no separate "this is an auto-repeat"
++     * signal in the key event itself (X11 doesn't either, actually;
++     * X11Display infers it from "same keysym pressed again without an
++     * intervening release", which is itself an approximation - see the
++     * TODO in WaylandInput.m). */
++    uint32_t _lastKeyPressed; /* evdev keycode, or 0 if none currently down */
++
++    /* Double-click detection state, mirroring X11Display's
++     * lastClickTimeStamp/clickCount ivars (X11Display.m, used at
++     * :1080-1087). Uses wall-clock time exactly like X11Display does -
++     * NOT the Wayland event's millisecond timestamp; see rationale in
++     * WaylandInput.m. */
++    NSTimeInterval _lastClickTimeStamp;
++    NSInteger _clickCount;
++
++    /* Last known pointer position in AppKit (post-transform)
++     * coordinates, needed to compute NSEvent's deltaX/deltaY for
++     * NSMouseMoved/NSLeftMouseDragged, mirroring X11Display's use of
++     * -[window mouseLocationOutsideOfEventStream] at X11Display.m:1163.
++     * Wayland's relative-pointer protocol would give us deltas
++     * directly, but that's a separate optional protocol
++     * (zwp_relative_pointer_manager_v1) this file does not assume is
++     * available - see TODO in -waylandPointerMotion:... */
++    NSPoint _lastMotionPos;
++    WaylandWindow *_lastMotionTarget;
++
++    /* wl_pointer.button reports evdev button codes (BTN_LEFT etc.), but
++     * doesn't repeat which surface is under the pointer - wl_pointer
++     * only tells you that via .enter. We must remember it. Mirrors how
++     * X11 events always carry `ev->xany.window` themselves (X11 doesn't
++     * need this ivar because every X event embeds its target window). */
++    WaylandWindow *_currentPointerTarget;
++
++    __weak WaylandDisplay *_display;
++}
++
++/* purpose: create the translator and its xkbcommon context.
++ * input: display - the owning WaylandDisplay, used for
++ *        -windowForSurface: lookups (WaylandDisplay.h:138); not
++ *        retained (weak) since WaylandInput is expected to be an
++ *        ivar OF the display, so a strong back-reference would be a
++ *        retain cycle - same non-ownership relationship X11Window has
++ *        with its owning X11Display.
++ * output: initialized WaylandInput, or nil if xkb_context_new() fails
++ *         (out-of-memory case; xkbcommon itself gives no more specific
++ *         error).
++ * sideEffects: allocates an xkb_context via xkb_context_new(). No
++ *              keymap is loaded yet - that happens in
++ *              -waylandKeyboardKeymapFd:format:size:, which must be
++ *              called before any -waylandKeyboardKey:... call can
++ *              produce correct characters/modifiers (mirrors the real
++ *              Wayland protocol requirement: compositor always sends
++ *              wl_keyboard.keymap before any wl_keyboard.key).
++ */
++- (instancetype) initWithDisplay: (WaylandDisplay *) display;
++
++/* --- wl_keyboard_listener bridge --- */
++
++/* purpose: load/replace the active keymap from the compositor-provided
++ *          fd (wl_keyboard.keymap event).
++ * input: fd - memory-mappable fd owning the keymap description (caller
++ *        retains ownership/closes it per Wayland semantics - this
++ *        method mmaps it read-only and does not close it, matching
++ *        libxkbcommon examples; TODO confirm close-ownership contract
++ *        once WaylandDisplay's actual call site exists).
++ *        format - keymap format enum (WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1
++ *        expected; anything else is rejected).
++ *        size - mmap length in bytes, as given by the event.
++ * output: none.
++ * sideEffects: replaces _xkbKeymap/_xkbState. Any in-flight modifier
++ *              state is lost (matches real keyboard-layout-switch
++ *              behavior - X11 has the analogous XkbNewKeyboardNotify
++ *              path, not shown in the excerpt reviewed for this task).
++ */
++- (void) waylandKeyboardKeymapFd: (int) fd
++                           format: (uint32_t) format
++                             size: (uint32_t) size;
++
++/* purpose: translate one wl_keyboard.key event into an NSKeyDown/
++ *          NSKeyUp NSEvent and post it.
++ * input: surface - the currently-focused surface (from the most recent
++ *        wl_keyboard.enter; WaylandDisplay must track and pass this
++ *        through, X11 doesn't need this param because XEvent carries
++ *        its own window).
++ *        timeMs - wl_keyboard.key's `time` arg (ms, undefined base;
++ *        NOT used for NSEvent's timestamp - see .m for why).
++ *        evdevKeyCode - wl_keyboard.key's `key` arg, raw evdev/
++ *        linux-input-event-code.
++ *        pressed - YES for WL_KEYBOARD_KEY_STATE_PRESSED, NO for
++ *        _RELEASED.
++ * output: none.
++ * sideEffects: posts one NSEvent via
++ *              [[NSDisplay currentDisplay] postEvent:atStart:NO],
++ *              mutates _lastKeyPressed.
++ */
++- (void) waylandKeyboardKey: (struct wl_surface *) surface
++                      timeMs: (uint32_t) timeMs
++                evdevKeyCode: (uint32_t) evdevKeyCode
++                     pressed: (BOOL) pressed;
++
++/* purpose: fold a wl_keyboard.modifiers event into the xkb_state so
++ *          subsequent key events compute correct characters/modifier
++ *          masks.
++ * input: raw depressed/latched/locked modifier masks and the active
++ *        layout group, exactly as delivered by the event.
++ * output: none.
++ * sideEffects: calls xkb_state_update_mask(); does NOT itself post an
++ *              NSFlagsChanged event - TODO: real AppKit apps expect
++ *              NSFlagsChanged for bare modifier presses (e.g. tapping
++ *              Shift alone). X11Display gets this "for free" because
++ *              raw KeyPress/KeyRelease events for modifier keys still
++ *              flow through -postXEvent:'s KeyPress/KeyRelease case and
++ *              produce NSKeyDown/NSKeyUp with keyCode kVK_Shift etc
++ *              (not NSFlagsChanged - worth noting X11Display.m doesn't
++ *              synthesize NSFlagsChanged either, as read; it relies on
++ *              plain key events for modifier keys too). This method
++ *              mirrors that: it updates state for character
++ *              computation, and the modifier key's own
++ *              wl_keyboard.key(pressed/released) event goes through
++ *              -waylandKeyboardKey:... like any other key, matching
++ *              observed X11Display behavior.
++ */
++- (void) waylandKeyboardModifiersDepressed: (uint32_t) depressed
++                                    latched: (uint32_t) latched
++                                     locked: (uint32_t) locked
++                                      group: (uint32_t) group;
++
++/* --- wl_pointer_listener bridge --- */
++
++/* purpose: record which target now owns pointer focus (wl_pointer.enter).
++ * input: surface - newly-entered surface.
++ * output: none.
++ * sideEffects: sets _currentPointerTarget via [_display windowForSurface:].
++ */
++- (void) waylandPointerEnter: (struct wl_surface *) surface
++                    surfaceX: (double) surfaceX
++                    surfaceY: (double) surfaceY;
++
++/* purpose: clear pointer focus (wl_pointer.leave). */
++- (void) waylandPointerLeave: (struct wl_surface *) surface;
++
++/* purpose: translate wl_pointer.motion into NSMouseMoved or
++ *          NSLeftMouseDragged/NSRightMouseDragged, matching
++ *          X11Display's MotionNotify case (X11Display.m:1158-1220).
++ * input: surfaceX/surfaceY - wl_fixed-decoded surface-local coordinates.
++ *        buttonMask - evdev button codes currently held down (caller
++ *        must track this across button events; wl_pointer.motion
++ *        itself carries no button state, unlike X11's
++ *        ev->xmotion.state). See TODO in .m about this being a real
++ *        design gap this file cannot close alone.
++ * output: none.
++ * sideEffects: posts an NSEvent; updates _lastMotionPos.
++ */
++- (void) waylandPointerMotion: (double) surfaceX
++                     surfaceY: (double) surfaceY
++                  buttonsDown: (uint32_t) buttonMask;
++
++/* purpose: translate wl_pointer.button into NSLeftMouseDown/Up,
++ *          NSRightMouseDown/Up, or NSOtherMouseDown/Up, matching
++ *          X11Display's ButtonPress/ButtonRelease cases
++ *          (X11Display.m:1079-1156).
++ * input: evdevButton - BTN_LEFT (0x110) / BTN_RIGHT (0x111) /
++ *        BTN_MIDDLE (0x112) / other BTN_* from
++ *        linux/input-event-codes.h.
++ *        pressed - YES for WL_POINTER_BUTTON_STATE_PRESSED.
++ *        modifierFlags - current NSEventModifierFlags snapshot (caller
++ *        computes via -currentModifierFlags below, since
++ *        wl_pointer.button carries no modifier info of its own -
++ *        unlike X11's ev->xbutton.state).
++ * output: none.
++ * sideEffects: posts an NSEvent; updates click-count/timestamp state
++ *              for double-click detection.
++ */
++- (void) waylandPointerButton: (uint32_t) evdevButton
++                        pressed: (BOOL) pressed
++                  modifierFlags: (NSEventModifierFlags) modifierFlags;
++
++/* purpose: translate wl_pointer.axis (scroll wheel/trackpad) into
++ *          NSScrollWheel, matching X11Display's Button4/Button5-on-
++ *          release synthesis of NSScrollWheel (X11Display.m:1133-1140).
++ * input: axis - WL_POINTER_AXIS_VERTICAL_SCROLL (0) or
++ *        _HORIZONTAL_SCROLL (1).
++ *        value - wl_fixed_t scroll amount, in the same "1 step ~= 10
++ *        units" convention as X11's Button4/5 (see .m for the exact
++ *        conversion and why it's approximate).
++ * output: none.
++ * sideEffects: posts an NSEvent.
++ */
++- (void) waylandPointerAxis: (uint32_t) axis
++                        value: (int32_t) value
++                modifierFlags: (NSEventModifierFlags) modifierFlags;
++
++/* purpose: compute an NSEventModifierFlags mask from the translator's
++ *          current xkb_state, mirroring X11Display's
++ *          -modifierFlagsForState: (X11Display.m:981-999) but reading
++ *          from xkb_state instead of an X11 `unsigned int state` field
++ *          (Wayland gives us modifiers only via the separate
++ *          wl_keyboard.modifiers event/xkb_state, never inline on
++ *          pointer events).
++ * input: none (reads _xkbState).
++ * output: NSEventModifierFlags mask.
++ * sideEffects: none (xkb_state_mod_index_is_active is a pure query).
++ */
++- (NSEventModifierFlags) currentModifierFlags;
++
++@end
++
++#endif /* _WAYLANDINPUT_H */
+diff --git a/AppKit/Wayland.backend/WaylandInput.m b/AppKit/Wayland.backend/WaylandInput.m
+new file mode 100644
+index 00000000..d8383806
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandInput.m
+@@ -0,0 +1,616 @@
++/* WaylandInput.m
++ *
++ * See WaylandInput.h for the full contract and the architectural notes
++ * on why this file looks the way it does. This file is the Wayland
++ * counterpart to X11Display.m's -postXEvent: (X11Display.m:1013+),
++ * reviewed line-by-line as the reference for what fields NSEvent needs
++ * filled in and how (keyboard: X11Display.m:1020-1077; mouse buttons:
++ * :1079-1156; motion: :1158-1220; modifiers: :981-999).
++ *
++ * NOT COMPILED/LINKED YET: this file is not added to any CMakeLists.txt
++ * (see report). It has not been run through a compiler as part of this
++ * task - read it with that in mind.
++ */
++
++#import "WaylandInput.h"
++#import "WaylandKeyCodes.h"
++#import "WaylandDisplay.h"
++#import "WaylandWindow.h"
++
++#import <AppKit/NSDisplay.h>
++#import <AppKit/NSWindow.h>
++#import <Foundation/NSDebug.h>
++
++/* NSEvent_mouse gives us -_setButtonNumber:, exactly like X11Display.m
++ * uses it (X11Display.m:1116/1154). Not in AppKit's public
++ * include/AppKit headers - it's a private class internal to the AppKit
++ * source tree, imported by relative path the same way X11Display.m does
++ * (`#import "NSEvent_mouse.h"`, X11Display.m:22). Wayland.backend is a
++ * sibling directory of X11.backend under AppKit/, at the same depth, so
++ * the same relative import + the same AppKit-internal header search
++ * path (set up in AppKit/CMakeLists.txt for X11.backend/*.m today) is
++ * expected to resolve this once Wayland.backend/*.m is added there too
++ * - see report for the CMakeLists.txt change this still needs. */
++#import "../NSEvent_mouse.h"
++
++#include <sys/mman.h>
++#include <unistd.h>
++#include <string.h>
++#include <errno.h>
++
++#include <wayland-client-protocol.h>
++#include <xkbcommon/xkbcommon-names.h> // XKB_MOD_NAME_* string constants
++
++/* evdev mouse button codes (linux/input-event-codes.h). Not pulled in
++ * via a system header here because this tree targets FreeBSD, where
++ * <linux/input-event-codes.h> does not exist; Wayland clients on any
++ * platform still receive these Linux-numbered codes over the wire (the
++ * wire protocol is platform-independent), so the constants are copied
++ * verbatim rather than invented - values confirmed against
++ * /usr/include/linux/input-event-codes.h:356-360 on the host used for
++ * this research pass. TODO: if a real libevdev/input-event-codes header
++ * becomes available in the FreeBSD build (e.g. via a bundled copy),
++ * switch to including it instead of hand-copying. */
++#define BSD_WL_BTN_LEFT   0x110
++#define BSD_WL_BTN_RIGHT  0x111
++#define BSD_WL_BTN_MIDDLE 0x112
++
++@implementation WaylandInput
++
++- (instancetype) initWithDisplay: (WaylandDisplay *) display {
++    self = [super init];
++    if (self == nil)
++        return nil;
++
++    _xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
++    if (_xkbContext == NULL) {
++        [self release];
++        return nil;
++    }
++
++    _display = display;
++    _lastKeyPressed = 0;
++    _lastClickTimeStamp = 0.0;
++    _clickCount = 0;
++    _lastMotionPos = NSZeroPoint;
++    _lastMotionTarget = nil;
++    _currentPointerTarget = nil;
++
++    return self;
++}
++
++- (void) dealloc {
++    if (_xkbState != NULL)
++        xkb_state_unref(_xkbState);
++    if (_xkbKeymap != NULL)
++        xkb_keymap_unref(_xkbKeymap);
++    if (_xkbContext != NULL)
++        xkb_context_unref(_xkbContext);
++    [super dealloc];
++}
++
++#pragma mark - keyboard
++
++- (void) waylandKeyboardKeymapFd: (int) fd
++                           format: (uint32_t) format
++                             size: (uint32_t) size {
++    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
++        // Only the (universal, always-supported) XKB text format is
++        // handled. WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP (0) means "no
++        // keyboard at all" per the protocol - nothing to load either
++        // way.
++        NSLog(@"WaylandInput: unsupported keymap format %u, ignoring", format);
++        return;
++    }
++
++    // Per wl_keyboard.keymap docs: the fd is mmap-able MAP_PRIVATE
++    // (required from protocol version 7 on; MAP_SHARED may fail, so we
++    // always use MAP_PRIVATE, matching the documented-safe choice for
++    // all versions).
++    void *mapped = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
++    if (mapped == MAP_FAILED) {
++        NSLog(@"WaylandInput: mmap of keymap fd failed: %s", strerror(errno));
++        return;
++    }
++
++    struct xkb_keymap *newKeymap = xkb_keymap_new_from_string(
++            _xkbContext, (const char *) mapped, XKB_KEYMAP_FORMAT_TEXT_V1,
++            XKB_KEYMAP_COMPILE_NO_FLAGS);
++
++    munmap(mapped, size);
++
++    if (newKeymap == NULL) {
++        NSLog(@"WaylandInput: xkb_keymap_new_from_string failed");
++        return;
++    }
++
++    struct xkb_state *newState = xkb_state_new(newKeymap);
++    if (newState == NULL) {
++        NSLog(@"WaylandInput: xkb_state_new failed");
++        xkb_keymap_unref(newKeymap);
++        return;
++    }
++
++    if (_xkbState != NULL)
++        xkb_state_unref(_xkbState);
++    if (_xkbKeymap != NULL)
++        xkb_keymap_unref(_xkbKeymap);
++
++    _xkbKeymap = newKeymap;
++    _xkbState = newState;
++}
++
++- (void) waylandKeyboardModifiersDepressed: (uint32_t) depressed
++                                    latched: (uint32_t) latched
++                                     locked: (uint32_t) locked
++                                      group: (uint32_t) group {
++    if (_xkbState == NULL)
++        return; // keymap not loaded yet - protocol violation by the
++                // compositor if this happens before wl_keyboard.keymap,
++                // but don't crash over it.
++
++    xkb_state_update_mask(_xkbState, depressed, latched, locked,
++                           /* depressed_layout */ 0,
++                           /* latched_layout   */ 0,
++                           /* locked_layout    */ group);
++}
++
++- (NSEventModifierFlags) currentModifierFlags {
++    // Mirrors X11Display::-modifierFlagsForState: (X11Display.m:981-999)
++    // field-for-field, but queries xkb_state by modifier *name* instead
++    // of testing bits of an X11 `state` word - Wayland's modifiers
++    // event hands us raw mod masks whose bit assignment is keymap-
++    // defined, not fixed like X11's ShiftMask/ControlMask/etc, so we
++    // must go through xkb_keymap_mod_get_index()/
++    // xkb_state_mod_index_is_active() instead of bit-testing directly.
++    NSEventModifierFlags ret = 0;
++
++    if (_xkbState == NULL)
++        return ret;
++
++    struct xkb_keymap *keymap = xkb_state_get_keymap(_xkbState);
++
++    // XKB_MOD_NAME_* constants (XKB_MOD_NAME_SHIFT etc.) are the
++    // canonical modifier names defined by xkbcommon itself - same
++    // names X11's XKB extension uses, which is *why* this maps 1:1
++    // onto X11Display's Shift/Control/Lock/Mod4/Mod1/Mod5 list.
++    struct { const char *name; NSEventModifierFlags flag; } table[] = {
++        { XKB_MOD_NAME_SHIFT, NSShiftKeyMask },
++        { XKB_MOD_NAME_CTRL, NSControlKeyMask },
++        { XKB_MOD_NAME_CAPS, NSAlphaShiftKeyMask },
++        { XKB_MOD_NAME_LOGO, NSCommandKeyMask },  // Mod4 / Super, same as X11Display.m:991-992
++        { XKB_MOD_NAME_ALT, NSAlternateKeyMask }, // Mod1, same as X11Display.m:993-994
++        // X11Display maps Mod5 (AltGr) to NSFunctionKeyMask
++        // (X11Display.m:995-996). xkbcommon's canonical name for that
++        // modifier is "Mod5" (there is no XKB_MOD_NAME_* constant for
++        // it - AltGr isn't one of the six the library predefines).
++        { "Mod5", NSFunctionKeyMask },
++    };
++
++    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
++        xkb_mod_index_t idx = xkb_keymap_mod_get_index(keymap, table[i].name);
++        if (idx == XKB_MOD_INVALID)
++            continue;
++        if (xkb_state_mod_index_is_active(_xkbState, idx, XKB_STATE_MODS_EFFECTIVE))
++            ret |= table[i].flag;
++    }
++
++    return ret;
++}
++
++- (void) waylandKeyboardKey: (struct wl_surface *) surface
++                      timeMs: (uint32_t) timeMs
++                evdevKeyCode: (uint32_t) evdevKeyCode
++                     pressed: (BOOL) pressed {
++    if (_xkbState == NULL || _xkbKeymap == NULL) {
++        NSLog(@"WaylandInput: key event before keymap loaded, dropping");
++        return;
++    }
++
++    WaylandWindow *target = [_display windowForSurface: surface];
++    if (target == nil)
++        return; // no window owns this surface (yet/anymore) - matches
++                // X11Display silently no-op'ing when -windowForID:
++                // can't resolve the event's window.
++
++    NSWindow *window = [target delegate]; // CGWindow.h:71
++
++    // xkbcommon keycodes are evdev + 8 (see WaylandKeyCodes.h header
++    // comment and xkbcommon.h:150-161 for the citation). Every
++    // xkb_state_key_* call below needs this offset applied - forgetting
++    // it is the single most common xkbcommon integration bug and it
++    // fails *silently*: you get plausible-looking-but-wrong characters
++    // (off by one physical key) instead of a crash, because keycode+8
++    // is still very likely to be a valid key in most layouts.
++    xkb_keycode_t xkbKeycode = (xkb_keycode_t) evdevKeyCode + 8;
++
++    NSEventModifierFlags modifierFlags = [self currentModifierFlags];
++
++    // --- characters / charactersIgnoringModifiers ---
++    //
++    // X11Display gets these from Xutf8LookupString() (press) /
++    // XLookupString() (release) plus XIM composition
++    // (X11Display.m:1029-1042; XFilterEvent() at :1029 lets an input
++    // method consume the event before it becomes an NSEvent at all -
++    // dead-key/compose sequences never reach here on the X11 path,
++    // they're absorbed by XIM upstream).
++    //
++    // xkbcommon's direct equivalent of Xutf8LookupString() is
++    // xkb_state_key_get_utf8(), used below. It DOES handle dead keys
++    // and basic composition *if* the keymap itself encodes them via
++    // XKB's compose-adjacent "dead key" key types (common for European
++    // layouts) - xkb_state correctly tracks a pending dead-key and
++    // returns "" for the dead key press itself, then the composed
++    // character on the next base-key press, same observable behavior
++    // as XIM for that subset of cases.
++    //
++    // TODO (honest gap, not papered over): full IME behavior - CJK
++    // input methods, user-configurable compose sequences (~/.XCompose
++    // equivalent), multi-keystroke compose beyond what's baked into the
++    // keymap itself - requires libxkbcommon's separate *compose* API
++    // (xkb_compose_table_new_from_locale +
++    // xkb_compose_state_feed/get_status/get_utf8, a distinct object
++    // from xkb_state used here) layered on top of this. That is not
++    // wired up in this pass; it needs its own xkb_compose_state fed
++    // from xkb_state_key_get_one_sym()'s result before falling back to
++    // this method's plain xkb_state_key_get_utf8(). Flagging rather
++    // than guessing at compose-table wiring I have not verified against
++    // any real xkbcommon call site in this tree.
++    char utf8Buf[32] = {0};
++    if (pressed) {
++        xkb_state_key_get_utf8(_xkbState, xkbKeycode, utf8Buf, sizeof(utf8Buf));
++    }
++    // KeyRelease: X11Display still calls XLookupString() for the
++    // release event (X11Display.m:1037) to get `characters` for the
++    // NSKeyUp event. xkb_state_key_get_utf8() works identically for
++    // both press and release (unlike Xutf8LookupString(), which X11's
++    // own comment says "may not be used with KeyRelease",
++    // X11Display.m:1036) - so unlike X11Display we don't need a
++    // press/release branch for the lookup call itself, only for whether
++    // we bother computing it (a release of a key that produces no
++    // visible char is fine to just report "").
++    else {
++        xkb_state_key_get_utf8(_xkbState, xkbKeycode, utf8Buf, sizeof(utf8Buf));
++    }
++
++    NSString *characters = [[NSString alloc] initWithUTF8String: utf8Buf];
++
++    // charactersIgnoringModifiers: X11Display computes this via
++    // X11KeySymToUCS() on the raw KeySym looked up ignoring the
++    // Xutf8LookupString() modifier-aware path (X11Display.m:1046-1047).
++    // xkbcommon's equivalent "ignore modifiers, just resolve the plain
++    // symbol for this key in the active layout" call is
++    // xkb_state_key_get_one_sym(), which respects Shift/Level but not
++    // Control (matches AppKit's own documented semantics for
++    // charactersIgnoringModifiers: "as if only the Shift key had been
++    // used" - Control's effect specifically should NOT show up here,
++    // and xkb_state_key_get_one_sym() with the current *unmodified-by-
++    // Control* xkb_state naturally matches that since Control doesn't
++    // usually change level selection in typical keymaps).
++    //
++    // xkb_keysym_to_utf32() turns the resulting keysym into a Unicode
++    // codepoint, the moral equivalent of X11KeySymToUCS() - the actual
++    // conversion table lives inside xkbcommon itself here rather than
++    // in a hand-rolled table like X11.backend/X11KeySymToUCS.m (1600+
++    // lines - that whole file becomes unnecessary with xkbcommon).
++    xkb_keysym_t sym = xkb_state_key_get_one_sym(_xkbState, xkbKeycode);
++    uint32_t ucs32 = xkb_keysym_to_utf32(sym);
++    NSString *charactersIgnoringModifiers;
++    if (ucs32 != 0 && ucs32 <= 0xFFFF) {
++        // NSString stringWithCharacters:length: takes UTF-16 code
++        // units; codepoints above the BMP (>0xFFFF) would need a
++        // surrogate pair, which this single-unichar path doesn't build
++        // (same 16-bit assumption X11Display.m:1046 makes explicitly in
++        // its comment - kept for parity, not because it's ideal).
++        unichar u16 = (unichar) ucs32;
++        charactersIgnoringModifiers = [NSString stringWithCharacters: &u16 length: 1];
++    } else {
++        charactersIgnoringModifiers = @"";
++    }
++
++    // Carbon virtual keycode, for apps that check kVK_* constants
++    // directly (same rationale as X11Display.m:1049-1051). See
++    // WaylandKeyCodes.h for how this table was derived from
++    // CarbonKeys.h's x11ToCarbon[].
++    //
++    // TODO: unmapped evdev codes fall back to array-default 0
++    // (== kVK_ANSI_A) rather than a documented "unknown" sentinel,
++    // because kVK_ANSI_A == 0 numerically in HIToolbox/Events.h and C
++    // static-init zero-fills unlisted indices - this is the exact same
++    // ambiguity X11.backend's table has (x11ToCarbon[unmapped] is also
++    // 0), not something introduced here. A caller that cares about
++    // "no known Carbon keycode" needs its own explicit table of mapped
++    // evdev codes to disambiguate from a real A-key press; not solved
++    // in this pass.
++    unsigned short carbonKeyCode = 0;
++    if (evdevKeyCode < 256)
++        carbonKeyCode = waylandEvdevToCarbon[evdevKeyCode];
++
++    // isARepeat: same approximation X11Display uses (X11Display.m:1053-
++    // 1060) - "is this key-press the same key as the last one we saw,
++    // without a release in between" rather than a real repeat signal.
++    // Unlike X11Display (which compares X11 KeySym, i.e.
++    // post-layout symbol), we compare the raw evdev keycode - a more
++    // robust choice since it can't be confused by a layout where two
++    // different physical keys momentarily produce the same symbol.
++    // wl_keyboard actually has NO repeat-flag on the key event either
++    // (repeat is client-synthesized based on the separate
++    // wl_keyboard.repeat_info rate/delay - see WaylandInput.h's
++    // -repeat_info TODO below); this method still doesn't synthesize
++    // real key-repeat NSKeyDown events at all. TODO: real repeat
++    // requires WaylandDisplay to run a timer per the repeat_info event
++    // and call this method again itself - out of scope here, flagging
++    // as a functional gap, not silently ignoring it.
++    BOOL isARepeat = NO;
++    if (pressed) {
++        isARepeat = (_lastKeyPressed == evdevKeyCode);
++        _lastKeyPressed = evdevKeyCode;
++    } else if (_lastKeyPressed == evdevKeyCode) {
++        _lastKeyPressed = 0;
++    }
++
++    // location: X11Display transforms ev->xkey.x/y (X11Display.m:1043-
++    // 1044) - but those are root-relative-ish "where the pointer was
++    // when the key event happened", not really meaningful for a
++    // keyboard event's own geometry. wl_keyboard.key carries no
++    // position at all (there is no "where was the keyboard" concept in
++    // Wayland). We pass the last known pointer location for this
++    // target if we have one, else origin - matching the spirit (an
++    // approximate/don't-care value) of what X11Display does here.
++    NSPoint pos = ([target isEqual: _lastMotionTarget]) ? _lastMotionPos : NSZeroPoint;
++
++    NSEvent *event = [NSEvent keyEventWithType: pressed ? NSKeyDown : NSKeyUp
++                                       location: pos
++                                  modifierFlags: modifierFlags
++                                      timestamp: 0.0 // matches X11Display.m:1066 (also hardcodes 0.0 - not this file's regression)
++                                   windowNumber: [window windowNumber]
++                                        context: nil
++                                     characters: characters
++                    charactersIgnoringModifiers: charactersIgnoringModifiers
++                                      isARepeat: isARepeat
++                                        keyCode: carbonKeyCode];
++
++    [[NSDisplay currentDisplay] postEvent: event atStart: NO];
++
++    [characters release];
++    (void) timeMs; // see class comment: NSEvent timestamp intentionally not derived from this
++}
++
++#pragma mark - pointer
++
++- (void) waylandPointerEnter: (struct wl_surface *) surface
++                    surfaceX: (double) surfaceX
++                    surfaceY: (double) surfaceY {
++    _currentPointerTarget = [_display windowForSurface: surface];
++    if (_currentPointerTarget == nil)
++        return;
++
++    NSPoint local = NSMakePoint((CGFloat) surfaceX, (CGFloat) surfaceY);
++    _lastMotionPos = [_currentPointerTarget transformPoint: local]; // WaylandWindow.h:97
++    _lastMotionTarget = _currentPointerTarget;
++    // X11Display's EnterNotify handler (X11Display.m:1222-1229) only
++    // updates the "last known cursor position" bookkeeping and doesn't
++    // post an NSEvent (AppKit has no direct NSMouseEntered-from-window-
++    // server-crossing event in this code path - NSMouseEntered is
++    // synthesized higher up from tracking areas, not from the display
++    // backend). We match that: no event posted here either.
++}
++
++- (void) waylandPointerLeave: (struct wl_surface *) surface {
++    if ([_currentPointerTarget isEqual: [_display windowForSurface: surface]]) {
++        _currentPointerTarget = nil;
++    }
++    // Mirrors X11Display's LeaveNotify (X11Display.m:1231-1233): no
++    // ivar update beyond bookkeeping, no NSEvent posted.
++}
++
++- (void) waylandPointerMotion: (double) surfaceX
++                     surfaceY: (double) surfaceY
++                  buttonsDown: (uint32_t) buttonMask {
++    if (_currentPointerTarget == nil)
++        return;
++
++    NSPoint surfaceLocal = NSMakePoint((CGFloat) surfaceX, (CGFloat) surfaceY);
++
++    // *** THE Y-FLIP, THE #1 SOURCE OF "MOUSE WORKS BUT UPSIDE DOWN" BUGS ***
++    //
++    // Wayland: surface-local coordinates, origin TOP-LEFT, Y increases
++    // DOWNWARD (same convention as almost every 2D windowing/graphics
++    // API except AppKit).
++    // AppKit: window content coordinates, origin BOTTOM-LEFT, Y
++    // increases UPWARD.
++    //
++    // X11 shares Wayland's top-left/Y-down convention, and X11Window
++    // performs exactly this flip in -transformPoint: (X11Window.m:721-
++    // 723): `NSMakePoint(pos.x, _frame.size.height - pos.y)`.
++    // WaylandWindow already declares the same-named -transformPoint:
++    // (WaylandWindow.h:97) for exactly this job, so we call it directly
++    // instead of inventing a parallel selector - because only the
++    // WaylandWindow instance knows its own current surface height, and
++    // critically, whichever side implements the flip must use *surface*
++    // height at the moment of the event, not stale/cached window-frame
++    // height, or resizing while the pointer is over the window will
++    // produce a gradually-growing Y error that looks like drift/lag,
++    // not a hard failure, and is easy to miss in casual testing. (Not
++    // verified here: WaylandWindow.m does not exist yet as of this
++    // writing, so -transformPoint:'s actual implementation - and
++    // whether it truly uses live surface height rather than something
++    // stale - could not be checked; flagging for whoever writes it.)
++    NSPoint pos = [_currentPointerTarget transformPoint: surfaceLocal];
++
++    CGFloat deltaX = pos.x - _lastMotionPos.x;
++    CGFloat deltaY = pos.y - _lastMotionPos.y;
++
++    // X11Display computes NSEventType from ev->xmotion.state
++    // (X11Display.m:1196-1200), checking Button1Mask/Button2Mask only
++    // (curiously not Button3Mask for right-drag - read as written, that
++    // looks like a pre-existing gap in X11Display, not something to
++    // silently "fix" by inventing different X11 behavior; we replicate
++    // left+right handling here since we have a clean buttonMask input
++    // and there's no reason to reproduce X11Display's apparent omission
++    // of right-drag).
++    NSEventType type = NSMouseMoved;
++    if (buttonMask & (1u << 0)) { // BSD_WL_BTN_LEFT bit - see caller contract in .h TODO
++        type = NSLeftMouseDragged;
++    } else if (buttonMask & (1u << 1)) { // BSD_WL_BTN_RIGHT bit
++        type = NSRightMouseDragged;
++    }
++
++    // X11Display additionally gates NSMouseMoved (not *Dragged*) behind
++    // `[delegate acceptsMouseMovedEvents]` (X11Display.m:1202-1203) to
++    // avoid flooding apps that didn't ask for hover tracking.
++    // -acceptsMouseMovedEvents is declared on NSWindow itself
++    // (AppKit/include/AppKit/NSWindow.h:320), so it Just Works on
++    // whatever NSWindow -delegate returns, same as X11Display's usage.
++    NSWindow *window = [_currentPointerTarget delegate]; // CGWindow.h:71
++    if (type == NSMouseMoved && ![window acceptsMouseMovedEvents]) {
++        _lastMotionPos = pos;
++        return;
++    }
++
++    NSEventModifierFlags modifierFlags = [self currentModifierFlags];
++
++    NSEvent *event = [NSEvent mouseEventWithType: type
++                                         location: pos
++                                    modifierFlags: modifierFlags
++                                           window: window
++                                       clickCount: 1
++                                           deltaX: deltaX
++                                           deltaY: deltaY];
++    [[NSDisplay currentDisplay] postEvent: event atStart: NO];
++
++    _lastMotionPos = pos;
++    _lastMotionTarget = _currentPointerTarget;
++}
++
++- (void) waylandPointerButton: (uint32_t) evdevButton
++                        pressed: (BOOL) pressed
++                  modifierFlags: (NSEventModifierFlags) modifierFlags {
++    if (_currentPointerTarget == nil)
++        return;
++
++    NSWindow *window = [_currentPointerTarget waylandEventWindow];
++
++    // Double-click detection: same approach as X11Display
++    // (X11Display.m:1080-1087) - real wall-clock time via NSDate, not
++    // the Wayland event's millisecond timestamp (which has an
++    // "undefined base" per the protocol doc, wayland.xml:2443-2444).
++    //
++    // X11Display compares against `[self doubleClickInterval]`
++    // (X11Display.m:1082) - but that method is declared on X11Display
++    // itself (X11Display.h:52), NOT on the abstract NSDisplay base
++    // class (checked: no such selector in
++    // AppKit/include/AppKit/NSDisplay.h), so it is not part of the
++    // seam a non-X11 backend can rely on. X11Display's implementation
++    // (X11Display.m:882-884) just hardcodes 1.0 seconds, ignoring any
++    // system/X11 double-click setting despite the method name implying
++    // otherwise - so hardcoding the same 1.0s here reproduces X11's
++    // *actual* behavior exactly, not just its intent. TODO: if a real
++    // configurable double-click interval is ever wanted, it needs a
++    // new method added to NSDisplay's abstract interface (or read
++    // straight from NSUserDefaults, which is what a "real" backend
++    // should probably do instead of reproducing X11Display's
++    // hardcoded stub).
++    const NSTimeInterval kDoubleClickIntervalSeconds = 1.0;
++    if (pressed) {
++        NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
++        if (now - _lastClickTimeStamp < kDoubleClickIntervalSeconds) {
++            _clickCount++;
++        } else {
++            _clickCount = 1;
++        }
++        _lastClickTimeStamp = now;
++    }
++
++    NSEventType type;
++    switch (evdevButton) {
++    case BSD_WL_BTN_LEFT:
++        type = pressed ? NSLeftMouseDown : NSLeftMouseUp;
++        break;
++    case BSD_WL_BTN_RIGHT:
++        type = pressed ? NSRightMouseDown : NSRightMouseUp;
++        break;
++    default:
++        // Includes BSD_WL_BTN_MIDDLE and any BTN_SIDE/BTN_EXTRA/etc -
++        // same "everything else is Other" bucket X11Display uses for
++        // any X11 button beyond 1/3 (X11Display.m:1104/1141-1142).
++        type = pressed ? NSOtherMouseDown : NSOtherMouseUp;
++        break;
++    }
++
++    NSEvent *event = [NSEvent mouseEventWithType: type
++                                         location: _lastMotionPos
++                                    modifierFlags: modifierFlags
++                                           window: window
++                                       clickCount: _clickCount
++                                           deltaX: 0.0
++                                           deltaY: 0.0];
++
++    // buttonNumber: X11Display passes the raw X11 button number (1/2/3)
++    // straight through as buttonNumber (X11Display.m:1116/1154), which
++    // is NOT the real AppKit convention (real AppKit: 0=left, 1=right,
++    // 2=middle, 3+=other, 0-based) - it looks like a pre-existing bug/
++    // quirk in X11Display, not a deliberate scheme worth replicating.
++    // We deliberately deviate here and use the documented AppKit
++    // 0-based numbering instead, translated from the evdev code:
++    NSInteger buttonNumber;
++    switch (evdevButton) {
++    case BSD_WL_BTN_LEFT:   buttonNumber = 0; break;
++    case BSD_WL_BTN_RIGHT:  buttonNumber = 1; break;
++    case BSD_WL_BTN_MIDDLE: buttonNumber = 2; break;
++    default:                buttonNumber = 3 + (NSInteger) (evdevButton - BSD_WL_BTN_MIDDLE - 1);
++    }
++    [(NSEvent_mouse *) event _setButtonNumber: buttonNumber];
++
++    [[NSDisplay currentDisplay] postEvent: event atStart: NO];
++}
++
++- (void) waylandPointerAxis: (uint32_t) axis
++                        value: (int32_t) value
++                modifierFlags: (NSEventModifierFlags) modifierFlags {
++    if (_currentPointerTarget == nil)
++        return;
++
++    NSWindow *window = [_currentPointerTarget waylandEventWindow];
++
++    // X11's Button4/Button5 wheel events arrive as one discrete
++    // "notch" per event, with no magnitude - X11Display hardcodes
++    // deltaY = +-1.0 per notch (X11Display.m:1134-1139). wl_pointer.axis
++    // instead gives a continuous wl_fixed_t magnitude (fractional units,
++    // where the compositor's convention is ~10 units per traditional
++    // "one notch" of a physical wheel - this is a widely-used
++    // convention in Wayland compositors, not a hard protocol guarantee;
++    // TODO verify against the actual compositor this backend targets
++    // once known, rather than assuming libinput's default here).
++    // We normalize by that same ~10-units-per-notch convention so the
++    // resulting deltaY is roughly comparable in magnitude to X11Display's
++    // +-1.0 per notch, and negate per axis direction the same way
++    // X11Display does (Button4 => +1.0 "up", Button5 => -1.0 "down",
++    // X11Display.m:1135/1139).
++    double raw = wl_fixed_to_double((wl_fixed_t) value);
++    CGFloat delta = (CGFloat) (raw / 10.0);
++
++    CGFloat deltaX = 0.0, deltaY = 0.0;
++    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
++        // Wayland's vertical axis convention: positive value == content
++        // scrolls down (== wheel rotated away from the user), which is
++        // the OPPOSITE sign convention from X11Display's Button5
++        // (scroll down) => deltaY = -1.0. Negate to match.
++        deltaY = -delta;
++    } else if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
++        deltaX = delta;
++    } else {
++        return; // unknown axis - don't guess
++    }
++
++    NSEvent *event = [NSEvent mouseEventWithType: NSScrollWheel
++                                         location: _lastMotionPos
++                                    modifierFlags: modifierFlags
++                                           window: window
++                                       clickCount: 0
++                                           deltaX: deltaX
++                                           deltaY: deltaY];
++    [[NSDisplay currentDisplay] postEvent: event atStart: NO];
++}
++
++@end
+diff --git a/AppKit/Wayland.backend/WaylandKeyCodes.h b/AppKit/Wayland.backend/WaylandKeyCodes.h
+new file mode 100644
+index 00000000..49ac294e
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandKeyCodes.h
+@@ -0,0 +1,176 @@
++/* WaylandKeyCodes.h
++ *
++ * evdev (linux/input-event-codes.h) scancode -> Carbon virtual keycode
++ * (HIToolbox/Events.h kVK_*) lookup table, for the AppKit Wayland display
++ * backend.
++ *
++ * -----------------------------------------------------------------------
++ * WHY THIS TABLE EXISTS / HOW IT WAS DERIVED
++ * -----------------------------------------------------------------------
++ * The X11 backend ships an analogous table, x11ToCarbon[256], keyed by
++ * *X11* keycode:
++ *
++ *   src/external/cocotron/AppKit/X11.backend/CarbonKeys.h:23
++ *
++ * X11 keycodes and Linux evdev scancodes (the numbers wl_keyboard::key
++ * hands us, see WaylandInput.m) refer to the *same physical keys* and
++ * differ only by a constant offset of 8:
++ *
++ *   X11_keycode == evdev_keycode + 8
++ *
++ * This is not an assumption made up for this file - it is documented by
++ * libxkbcommon itself:
++ *
++ *   /usr/include/xkbcommon/xkbcommon.h:150-161
++ *     "with an X11-compatible keymap and Linux evdev scan codes ... a
++ *      fixed offset is used: xkb_keycode_t keycode_A = KEY_A + 8;"
++ *
++ * and independently confirmed by cross-checking one entry: CarbonKeys.h
++ * maps X11 keycode 38 -> kVK_ANSI_A (CarbonKeys.h:24), and evdev's
++ * KEY_A == 30 (linux/input-event-codes.h) -> 30 + 8 == 38. Matches.
++ *
++ * So this table's values were mechanically re-derived from
++ * x11ToCarbon[x11ToCarbon_index] by subtracting 8 from every index
++ * (evdev_index = x11_index - 8), NOT retyped from memory. Every entry
++ * below can be checked against CarbonKeys.h by adding 8 to the index.
++ *
++ * We deliberately do NOT #import X11.backend/CarbonKeys.h and reuse the
++ * X11 table directly: X11.backend is a separate, X11-only bundle (its
++ * CMakeLists.txt file list is X11.backend/*, see AppKit/CMakeLists.txt:
++ * 599-607) and per the architecture doc
++ * (docs/SPEC-appkit-display-backend.md, §6) the Wayland backend must not
++ * depend on X11-specific code. The *data* (which physical key maps to
++ * which Carbon constant) is not X11-specific though - it's a property of
++ * PC keyboard hardware - so re-deriving it as our own table is correct
++ * and avoids a build dependency on X11.backend.
++ *
++ * MISSING vs. X11 table (same gaps as CarbonKeys.h - see its comment
++ * block): kVK_ANSI_KeypadEquals, kVK_Function, kVK_F16..kVK_F20, kVK_Help.
++ * Unmapped evdev codes fall back to 0 (kVK_ANSI_A). Callers MUST NOT
++ * treat 0 as "this is actually the A key" - see WaylandInput.m TODO on
++ * keyCode reliability for unmapped keys.
++ */
++
++#ifndef _WAYLANDKEYCODES_H
++#define _WAYLANDKEYCODES_H
++
++#include <HIToolbox/Events.h>
++#include <stdint.h>
++
++/* Indexed by evdev scancode (linux/input-event-codes.h KEY_*).
++ * evdev codes for standard keyboard keys are < 256, matching the X11
++ * table's [256] size (X11 keycode = evdev + 8, and X11 keycodes are
++ * conventionally clamped to a byte too, so the usable range is actually
++ * evdev < 248). */
++static const uint8_t waylandEvdevToCarbon[256] = {
++    [30] = kVK_ANSI_A, /* == x11ToCarbon[38] */
++    [31] = kVK_ANSI_S, /* == x11ToCarbon[39] */
++    [32] = kVK_ANSI_D, /* == x11ToCarbon[40] */
++    [33] = kVK_ANSI_F, /* == x11ToCarbon[41] */
++    [35] = kVK_ANSI_H, /* == x11ToCarbon[43] */
++    [34] = kVK_ANSI_G, /* == x11ToCarbon[42] */
++    [44] = kVK_ANSI_Z, /* == x11ToCarbon[52] */
++    [45] = kVK_ANSI_X, /* == x11ToCarbon[53] */
++    [46] = kVK_ANSI_C, /* == x11ToCarbon[54] */
++    [47] = kVK_ANSI_V, /* == x11ToCarbon[55] */
++    [48] = kVK_ANSI_B, /* == x11ToCarbon[56] */
++    [16] = kVK_ANSI_Q, /* == x11ToCarbon[24] */
++    [17] = kVK_ANSI_W, /* == x11ToCarbon[25] */
++    [18] = kVK_ANSI_E, /* == x11ToCarbon[26] */
++    [19] = kVK_ANSI_R, /* == x11ToCarbon[27] */
++    [21] = kVK_ANSI_Y, /* == x11ToCarbon[29] */
++    [20] = kVK_ANSI_T, /* == x11ToCarbon[28] */
++    [2]  = kVK_ANSI_1, /* == x11ToCarbon[10] */
++    [3]  = kVK_ANSI_2, /* == x11ToCarbon[11] */
++    [4]  = kVK_ANSI_3, /* == x11ToCarbon[12] */
++    [5]  = kVK_ANSI_4, /* == x11ToCarbon[13] */
++    [7]  = kVK_ANSI_6, /* == x11ToCarbon[15] */
++    [6]  = kVK_ANSI_5, /* == x11ToCarbon[14] */
++    [13] = kVK_ANSI_Equal, /* == x11ToCarbon[21] */
++    [10] = kVK_ANSI_9, /* == x11ToCarbon[18] */
++    [8]  = kVK_ANSI_7, /* == x11ToCarbon[16] */
++    [12] = kVK_ANSI_Minus, /* == x11ToCarbon[20] */
++    [9]  = kVK_ANSI_8, /* == x11ToCarbon[17] */
++    [11] = kVK_ANSI_0, /* == x11ToCarbon[19] */
++    [27] = kVK_ANSI_RightBracket, /* == x11ToCarbon[35] */
++    [24] = kVK_ANSI_O, /* == x11ToCarbon[32] */
++    [22] = kVK_ANSI_U, /* == x11ToCarbon[30] */
++    [26] = kVK_ANSI_LeftBracket, /* == x11ToCarbon[34] */
++    [23] = kVK_ANSI_I, /* == x11ToCarbon[31] */
++    [25] = kVK_ANSI_P, /* == x11ToCarbon[33] */
++    [38] = kVK_ANSI_L, /* == x11ToCarbon[46] */
++    [36] = kVK_ANSI_J, /* == x11ToCarbon[44] */
++    [40] = kVK_ANSI_Quote, /* == x11ToCarbon[48] */
++    [37] = kVK_ANSI_K, /* == x11ToCarbon[45] */
++    [39] = kVK_ANSI_Semicolon, /* == x11ToCarbon[47] */
++    [43] = kVK_ANSI_Backslash, /* == x11ToCarbon[51] */
++    [51] = kVK_ANSI_Comma, /* == x11ToCarbon[59] */
++    [53] = kVK_ANSI_Slash, /* == x11ToCarbon[61] */
++    [49] = kVK_ANSI_N, /* == x11ToCarbon[57] */
++    [50] = kVK_ANSI_M, /* == x11ToCarbon[58] */
++    [52] = kVK_ANSI_Period, /* == x11ToCarbon[60] */
++    [41] = kVK_ANSI_Grave, /* == x11ToCarbon[49] */
++    [83] = kVK_ANSI_KeypadDecimal, /* == x11ToCarbon[91] */
++    [55] = kVK_ANSI_KeypadMultiply, /* == x11ToCarbon[63] */
++    [78] = kVK_ANSI_KeypadPlus, /* == x11ToCarbon[86] */
++    [69] = kVK_ANSI_KeypadClear, /* == x11ToCarbon[77] (NumLock) */
++    [98] = kVK_ANSI_KeypadDivide, /* == x11ToCarbon[106] */
++    [96] = kVK_ANSI_KeypadEnter, /* == x11ToCarbon[104] */
++    [74] = kVK_ANSI_KeypadMinus, /* == x11ToCarbon[82] */
++    [82] = kVK_ANSI_Keypad0, /* == x11ToCarbon[90] */
++    [79] = kVK_ANSI_Keypad1, /* == x11ToCarbon[87] */
++    [80] = kVK_ANSI_Keypad2, /* == x11ToCarbon[88] */
++    [81] = kVK_ANSI_Keypad3, /* == x11ToCarbon[89] */
++    [75] = kVK_ANSI_Keypad4, /* == x11ToCarbon[83] */
++    [76] = kVK_ANSI_Keypad5, /* == x11ToCarbon[84] */
++    [77] = kVK_ANSI_Keypad6, /* == x11ToCarbon[85] */
++    [71] = kVK_ANSI_Keypad7, /* == x11ToCarbon[79] */
++    [72] = kVK_ANSI_Keypad8, /* == x11ToCarbon[80] */
++    [73] = kVK_ANSI_Keypad9, /* == x11ToCarbon[81] */
++    [28] = kVK_Return, /* == x11ToCarbon[36] */
++    [15] = kVK_Tab, /* == x11ToCarbon[23] */
++    [57] = kVK_Space, /* == x11ToCarbon[65] */
++    [14] = kVK_Delete, /* == x11ToCarbon[22] (BackSpace) */
++    [1]  = kVK_Escape, /* == x11ToCarbon[9] */
++    [56] = kVK_Command, /* == x11ToCarbon[64] -- NOTE: X11 backend maps its
++                          * Alt/Mod1 key (evdev LEFTALT) to kVK_Command,
++                          * not kVK_Option. Kept as-is for parity; see
++                          * WaylandInput.m modifier-mapping comment for
++                          * why this looks backwards but matches X11. */
++    [42] = kVK_Shift, /* == x11ToCarbon[50] */
++    [58] = kVK_CapsLock, /* == x11ToCarbon[66] */
++    [125] = kVK_Option, /* == x11ToCarbon[133] (LEFTMETA/Super) */
++    [29] = kVK_Control, /* == x11ToCarbon[37] */
++    [54] = kVK_RightShift, /* == x11ToCarbon[62] */
++    [126] = kVK_RightOption, /* == x11ToCarbon[134] (RIGHTMETA/Super) */
++    [97] = kVK_RightControl, /* == x11ToCarbon[105] */
++    [115] = kVK_VolumeUp, /* == x11ToCarbon[123] */
++    [114] = kVK_VolumeDown, /* == x11ToCarbon[122] */
++    [113] = kVK_Mute, /* == x11ToCarbon[121] */
++    [63] = kVK_F5, /* == x11ToCarbon[71] */
++    [64] = kVK_F6, /* == x11ToCarbon[72] */
++    [65] = kVK_F7, /* == x11ToCarbon[73] */
++    [61] = kVK_F3, /* == x11ToCarbon[69] */
++    [66] = kVK_F8, /* == x11ToCarbon[74] */
++    [67] = kVK_F9, /* == x11ToCarbon[75] */
++    [87] = kVK_F11, /* == x11ToCarbon[95] */
++    [99] = kVK_F13, /* == x11ToCarbon[107] (Print Screen) */
++    [70] = kVK_F14, /* == x11ToCarbon[78] (Scroll Lock) */
++    [68] = kVK_F10, /* == x11ToCarbon[76] */
++    [88] = kVK_F12, /* == x11ToCarbon[96] */
++    [119] = kVK_F15, /* == x11ToCarbon[127] (Pause) */
++    [102] = kVK_Home, /* == x11ToCarbon[110] */
++    [104] = kVK_PageUp, /* == x11ToCarbon[112] */
++    [111] = kVK_ForwardDelete, /* == x11ToCarbon[119] */
++    [62] = kVK_F4, /* == x11ToCarbon[70] */
++    [107] = kVK_End, /* == x11ToCarbon[115] */
++    [60] = kVK_F2, /* == x11ToCarbon[68] */
++    [109] = kVK_PageDown, /* == x11ToCarbon[117] */
++    [59] = kVK_F1, /* == x11ToCarbon[67] */
++    [105] = kVK_LeftArrow, /* == x11ToCarbon[113] */
++    [106] = kVK_RightArrow, /* == x11ToCarbon[114] */
++    [108] = kVK_DownArrow, /* == x11ToCarbon[116] */
++    [103] = kVK_UpArrow, /* == x11ToCarbon[111] */
++};
++
++#endif /* _WAYLANDKEYCODES_H */
+diff --git a/AppKit/Wayland.backend/WaylandWindow.h b/AppKit/Wayland.backend/WaylandWindow.h
+new file mode 100644
+index 00000000..048c30bf
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandWindow.h
+@@ -0,0 +1,93 @@
++/* Copyright (c) 2026 bsdOS project
++
++ Permission is hereby granted, free of charge, to any person obtaining a copy of
++ this software and associated documentation files (the "Software"), to deal in
++ the Software without restriction, including without limitation the rights to
++ use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++ of the Software, and to permit persons to whom the Software is furnished to do
++ so, subject to the following conditions:
++
++ The above copyright notice and this permission notice shall be included in all
++ copies or substantial portions of the Software.
++
++ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ SOFTWARE. */
++
++/*
++ * WaylandWindow.h
++ *
++ * CGWindow subclass presenting Onyx2D's software-rendered O2Surface via
++ * wl_shm, instead of X11Window's GLX-composited path
++ * (X11.backend/X11Window.h/.m). See docs/SPEC-appkit-display-backend.md §4
++ * for why GLX is not needed here: the O2Surface CPU buffer is already in
++ * the right pixel format to hand straight to a wl_buffer.
++ *
++ * Double buffering: two wl_shm-backed buffers are kept per window so a
++ * buffer the compositor is still reading (has not sent wl_buffer.release
++ * for) is never reused for the next frame — see _WaylandShmBuffer /
++ * -_acquireBackBuffer below.
++ */
++
++#import <CoreGraphics/CGWindow.h>
++#import <Onyx2D/O2Geometry.h>
++
++#include <wayland-client.h>
++#include <xdg-shell-client-protocol.h>
++
++@class WaylandDisplay, NSWindow, O2Context, O2Surface;
++
++/* One shm-backed presentation buffer. We keep NUM_WAYLAND_BUFFERS of these
++ * per window (see WaylandWindow.m) and rotate through them, tracking
++ * `busy` via the wl_buffer release listener so we never write into a
++ * buffer the compositor might still be reading from.
++ */
++typedef struct {
++    struct wl_buffer *wlBuffer;
++    void *shmData;      // mmap()'d base, size == poolSize
++    size_t poolSize;    // bytes, == stride * height
++    int shmFd;
++    int32_t width;
++    int32_t height;
++    int32_t stride;
++    BOOL busy;          // YES from attach/commit until wl_buffer.release
++} WaylandShmBuffer;
++
++#define WAYLAND_WINDOW_BUFFER_COUNT 2
++
++@interface WaylandWindow : CGWindow {
++    WaylandDisplay *_waylandDisplay; // not retained; owned by NSDisplay singleton
++    NSWindow *_delegate;             // not retained, mirrors X11Window's _delegate
++
++    struct wl_surface *_surface;
++    struct xdg_surface *_xdgSurface;
++    struct xdg_toplevel *_xdgToplevel;
++    BOOL _hasPendingConfigure; // waiting for the first xdg_surface.configure
++
++    WaylandShmBuffer _buffers[WAYLAND_WINDOW_BUFFER_COUNT];
++
++    O2Context *_context; // Onyx2D drawing context AppKit renders into
++    O2Rect _frame;        // Cocoa (bottom-left origin) coordinates
++    NSUInteger _styleMask;
++    int _level;
++    BOOL _isOpaque;
++    BOOL _hasShadow;
++    BOOL _mapped; // has an initial commit gone out
++
++    NSPoint _lastMotionPos; // extension point for the input agent
++}
++
++- (instancetype) initWithDelegate: (NSWindow *) delegate;
++
++- (O2Rect) frame;
++- (struct wl_surface *) surface;
++- (NSPoint) transformPoint: (NSPoint) pos;
++- (O2Rect) transformFrame: (O2Rect) frame;
++
++- (void) setLastKnownCursorPosition: (CGPoint) point;
++
++@end
+diff --git a/AppKit/Wayland.backend/WaylandWindow.m b/AppKit/Wayland.backend/WaylandWindow.m
+new file mode 100644
+index 00000000..10da2431
+--- /dev/null
++++ b/AppKit/Wayland.backend/WaylandWindow.m
+@@ -0,0 +1,778 @@
++/* Copyright (c) 2026 bsdOS project
++
++ Permission is hereby granted, free of charge, to any person obtaining a copy of
++ this software and associated documentation files (the "Software"), to deal in
++ the Software without restriction, including without limitation the rights to
++ use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++ of the Software, and to permit persons to whom the Software is furnished to do
++ so, subject to the following conditions:
++
++ The above copyright notice and this permission notice shall be included in all
++ copies or substantial portions of the Software.
++
++ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ SOFTWARE. */
++
++#import "WaylandDisplay.h"
++#import "WaylandWindow.h"
++
++#import <AppKit/NSDisplay.h>
++#import <AppKit/NSPanel.h>
++#import <AppKit/NSRaise.h>
++#import <AppKit/NSScreen.h>
++#import <AppKit/NSWindow.h>
++#import <Foundation/NSException.h>
++#import <Onyx2D/O2Context.h>
++#import <Onyx2D/O2Context_builtin_FT.h>
++#import <Onyx2D/O2Surface.h>
++
++#import <errno.h>
++#import <fcntl.h>
++#import <math.h>
++#import <stdio.h>
++#import <string.h>
++#import <sys/mman.h>
++#import <unistd.h>
++
++/* ==========================================================================
++ * Shared-memory pool helper
++ *
++ * Same approach as ipa-runtime/UIKit/src/UIWindow.m:106-115
++ * (_create_shm_fd): shm_open + immediate shm_unlink so the fd alone keeps
++ * the mapping alive, no path left behind in /dev/shm. FreeBSD supports
++ * SHM_ANON (no name/unlink dance needed at all) — used when available,
++ * falling back to the named-then-unlinked form for portability with
++ * whatever glibc dev/test host this also gets built on.
++ * ========================================================================== */
++
++static int _wayland_window_create_shm_fd(size_t size) {
++    int fd = -1;
++
++#ifdef SHM_ANON
++    fd = shm_open(SHM_ANON, O_RDWR | O_CREAT | O_EXCL, 0600);
++#endif
++    if (fd < 0) {
++        static int counter = 0;
++        char path[64];
++        snprintf(path, sizeof(path), "/bsdos-waylandwindow-%d-%d",
++                 (int) getpid(), counter++);
++        fd = shm_open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
++        if (fd >= 0)
++            shm_unlink(path);
++    }
++    if (fd < 0)
++        return -1;
++
++    if (ftruncate(fd, (off_t) size) < 0) {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++/* ==========================================================================
++ * Per-buffer wl_buffer.release listener
++ *
++ * listener `data` is `&_buffers[i]` (a WaylandShmBuffer*, not the window),
++ * so this stays correct even if a window is deallocated mid-flight without
++ * needing a back-pointer dance.
++ * ========================================================================== */
++
++static void _wayland_buffer_release(void *data, struct wl_buffer *wlBuffer) {
++    (void) wlBuffer;
++    WaylandShmBuffer *buf = (WaylandShmBuffer *) data;
++    buf->busy = NO;
++}
++
++static const struct wl_buffer_listener _wayland_buffer_listener = {
++    .release = _wayland_buffer_release,
++};
++
++/* Private helpers, declared up front so the C listener callbacks below
++ * (which run outside the @implementation block and are wired up before
++ * the methods they call are textually defined) type-check cleanly. */
++@interface WaylandWindow ()
++- (void) _handleInitialConfigure;
++- (BOOL) _resizeBuffer: (WaylandShmBuffer *) buf
++                  width: (int32_t) width
++                 height: (int32_t) height;
++- (WaylandShmBuffer *) _acquireBackBufferForWidth: (int32_t) width
++                                            height: (int32_t) height;
++@end
++
++/* ==========================================================================
++ * xdg_surface / xdg_toplevel listeners
++ * ========================================================================== */
++
++static void _wayland_xdg_surface_configure(void *data,
++                                            struct xdg_surface *xdgSurface,
++                                            uint32_t serial) {
++    WaylandWindow *self = (WaylandWindow *) data;
++    xdg_surface_ack_configure(xdgSurface, serial);
++    [self _handleInitialConfigure];
++}
++
++static const struct xdg_surface_listener _wayland_xdg_surface_listener = {
++    .configure = _wayland_xdg_surface_configure,
++};
++
++static void _wayland_xdg_toplevel_configure(void *data,
++                                             struct xdg_toplevel *toplevel,
++                                             int32_t width, int32_t height,
++                                             struct wl_array *states) {
++    (void) data;
++    (void) toplevel;
++    (void) states;
++    /* width/height == 0 means "you choose" (the common case for a freshly
++     * mapped, non-resized toplevel) — Cocotron already knows the size it
++     * asked for via -initWithDelegate:, so there's nothing to resize to
++     * yet. A real resize-from-compositor path (user drags the SSD/CSD
++     * border) would call -[self setFrame:] here when width/height != 0;
++     * left as a TODO since interactive resize also needs xdg_toplevel's
++     * resize-edge input, which is the input agent's territory. */
++    (void) width;
++    (void) height;
++}
++
++static void _wayland_xdg_toplevel_close(void *data,
++                                         struct xdg_toplevel *toplevel) {
++    (void) toplevel;
++    WaylandWindow *self = (WaylandWindow *) data;
++    /* Route through the normal delegate close path rather than exit(0)
++     * (unlike ipa-runtime/UIKit/src/UIWindow.m:175, which is a single-window
++     * demo app) — AppKit has its own idea of whether closing this window
++     * should end the app. */
++    [[self delegate] performClose: nil];
++}
++
++static const struct xdg_toplevel_listener _wayland_xdg_toplevel_listener = {
++    .configure = _wayland_xdg_toplevel_configure,
++    .close = _wayland_xdg_toplevel_close,
++};
++
++@implementation WaylandWindow
++
++- (instancetype) initWithDelegate: (NSWindow *) delegate {
++    _delegate = delegate;
++    _level = [delegate level];
++    _styleMask = [delegate styleMask];
++
++    _waylandDisplay = (WaylandDisplay *) [NSDisplay currentDisplay];
++
++    _frame = [self transformFrame: [delegate frame]];
++    /* Guard against a zero-size buffer (X11Window does the equivalent via
++     * XCreateWindow silently accepting 0, but a wl_shm buffer with 0
++     * bytes is nonsensical) — same floor X11Window's own
++     * -transformFrame: applies (X11Window.m:717-718). */
++    if (_frame.size.width < 1.0)
++        _frame.size.width = 1.0;
++    if (_frame.size.height < 1.0)
++        _frame.size.height = 1.0;
++
++    BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
++    if (isPanel && (_styleMask & NSDocModalWindowMask))
++        _styleMask = NSBorderlessWindowMask;
++
++    struct wl_compositor *compositor = [_waylandDisplay compositor];
++    struct xdg_wm_base *wmBase = [_waylandDisplay wmBase];
++
++    _surface = wl_compositor_create_surface(compositor);
++    if (_surface == NULL) {
++        NSLog(@"WaylandWindow: wl_compositor_create_surface failed");
++        [self release];
++        return nil;
++    }
++
++    _xdgSurface = xdg_wm_base_get_xdg_surface(wmBase, _surface);
++    xdg_surface_add_listener(_xdgSurface, &_wayland_xdg_surface_listener, self);
++
++    _xdgToplevel = xdg_surface_get_toplevel(_xdgSurface);
++    xdg_toplevel_add_listener(_xdgToplevel, &_wayland_xdg_toplevel_listener, self);
++
++    const char *title = [[delegate title] UTF8String];
++    if (title != NULL)
++        xdg_toplevel_set_title(_xdgToplevel, title);
++
++    if (_styleMask & NSWindowStyleMaskResizable) {
++        xdg_toplevel_set_min_size(_xdgToplevel, 0, 0);
++        xdg_toplevel_set_max_size(_xdgToplevel, 0, 0);
++    } else {
++        xdg_toplevel_set_min_size(_xdgToplevel, (int32_t) _frame.size.width,
++                                   (int32_t) _frame.size.height);
++        xdg_toplevel_set_max_size(_xdgToplevel, (int32_t) _frame.size.width,
++                                   (int32_t) _frame.size.height);
++    }
++
++    [_waylandDisplay setWindow: self forSurface: _surface];
++
++    /* First commit with no attached buffer triggers the initial
++     * xdg_surface.configure round-trip (this is required by the xdg-shell
++     * protocol before a buffer may be attached at all). Block until it
++     * arrives, same pattern as ipa-runtime/UIKit/src/UIWindow.m:292-295. */
++    _hasPendingConfigure = YES;
++    wl_surface_commit(_surface);
++
++    struct wl_display *wlDisplay = [_waylandDisplay waylandDisplay];
++    while (_hasPendingConfigure) {
++        if (wl_display_dispatch(wlDisplay) < 0) {
++            NSLog(@"WaylandWindow: wl_display_dispatch failed while waiting "
++                  @"for initial configure: %s",
++                  strerror(errno));
++            [self release];
++            return nil;
++        }
++    }
++
++    return self;
++}
++
++- (void) _handleInitialConfigure {
++    /* purpose: mark the first xdg_surface.configure as received so
++     *          -initWithDelegate:'s blocking wait loop can proceed.
++     * input: none (invoked from the xdg_surface listener)
++     * output: none
++     * sideEffects: clears _hasPendingConfigure
++     */
++    _hasPendingConfigure = NO;
++}
++
++- (void) dealloc {
++    [self invalidate];
++    [super dealloc];
++}
++
++- (void) invalidate {
++    /* Mirrors X11Window's -invalidate contract (X11Window.m:392-422):
++     * releasable multiple times, tears down everything, notifies the
++     * delegate once. */
++    [_context release];
++    _context = nil;
++
++    if (_delegate != nil) {
++        [_delegate platformWindowDidInvalidateCGContext: self];
++        _delegate = nil;
++    }
++
++    for (int i = 0; i < WAYLAND_WINDOW_BUFFER_COUNT; i++) {
++        WaylandShmBuffer *buf = &_buffers[i];
++        if (buf->wlBuffer != NULL) {
++            wl_buffer_destroy(buf->wlBuffer);
++            buf->wlBuffer = NULL;
++        }
++        if (buf->shmData != NULL && buf->shmData != MAP_FAILED) {
++            munmap(buf->shmData, buf->poolSize);
++            buf->shmData = NULL;
++        }
++        if (buf->shmFd >= 0) {
++            close(buf->shmFd);
++            buf->shmFd = -1;
++        }
++        buf->poolSize = 0;
++        buf->width = buf->height = buf->stride = 0;
++        buf->busy = NO;
++    }
++
++    if (_xdgToplevel != NULL) {
++        xdg_toplevel_destroy(_xdgToplevel);
++        _xdgToplevel = NULL;
++    }
++    if (_xdgSurface != NULL) {
++        xdg_surface_destroy(_xdgSurface);
++        _xdgSurface = NULL;
++    }
++    if (_surface != NULL) {
++        [_waylandDisplay setWindow: nil forSurface: _surface];
++        wl_surface_destroy(_surface);
++        _surface = NULL;
++    }
++}
++
++- (void) setDelegate: delegate {
++    _delegate = delegate;
++    [self syncDelegateProperties];
++}
++
++- delegate {
++    return _delegate;
++}
++
++- (void) syncDelegateProperties {
++    /* X11Window's -syncDelegateProperties (X11Window.m:377-390) selects an
++     * XSelectInput() event mask so X11 knows which event types to deliver
++     * for this window. Wayland has no equivalent per-window subscription
++     * step for input — wl_seat delivers keyboard/pointer events to
++     * whichever surface has focus automatically, and that wiring is the
++     * input agent's responsibility, not this method's. Left as a hook
++     * (matching the base class's expectation that this method exists and
++     * is called from -setDelegate:) with nothing to do yet. */
++}
++
++- (NSUInteger) styleMask {
++    return _styleMask;
++}
++
++- (void) setStyleMask: (NSUInteger) mask {
++    _styleMask = mask;
++    /* TODO: reflect resizable/fullscreen/maximized changes via
++     * xdg_toplevel_set_min_size/set_max_size (as in -initWithDelegate:)
++     * and xdg_toplevel_(un)set_fullscreen/(un)set_maximized. Not done in
++     * this skeleton — only the at-creation-time state is applied. */
++}
++
++- (void) setLevel: (int) value {
++    _level = value;
++    /* xdg-shell has no client-settable window level/z-order concept
++     * (that's compositor policy); nothing to do beyond bookkeeping. */
++}
++
++- (void) setTitle: (NSString *) title {
++    const char *text = [title UTF8String];
++    if (text != NULL && _xdgToplevel != NULL)
++        xdg_toplevel_set_title(_xdgToplevel, text);
++}
++
++- (void) setOpaque: (BOOL) value {
++    _isOpaque = value;
++    /* TODO: an opaque window could set wl_surface_set_opaque_region to let
++     * the compositor skip alpha-blending it; correctness doesn't depend on
++     * this (WL_SHM_FORMAT_ARGB8888 is honored regardless), it's purely a
++     * compositor-side optimization left undone here. */
++}
++
++- (void) setHasShadow: (BOOL) value {
++    _hasShadow = value;
++    /* No client-drawn or protocol-level shadow support; this backend draws
++     * no decoration at all (see -insetRect:forNativeWindowBorderWithStyle:
++     * in WaylandDisplay.m), so there is nothing to toggle. */
++}
++
++- (O2Rect) frame {
++    return [self transformFrame: _frame];
++}
++
++- (void) setFrame: (O2Rect) frame {
++    O2Rect newFrame = [self transformFrame: frame];
++    if (newFrame.size.width < 1.0)
++        newFrame.size.width = 1.0;
++    if (newFrame.size.height < 1.0)
++        newFrame.size.height = 1.0;
++
++    [self invalidateContextWithNewSize: newFrame.size];
++    _frame = newFrame;
++
++    if (_xdgSurface != NULL) {
++        xdg_surface_set_window_geometry(_xdgSurface, 0, 0,
++                                         (int32_t) newFrame.size.width,
++                                         (int32_t) newFrame.size.height);
++    }
++}
++
++- (struct wl_surface *) surface {
++    return _surface;
++}
++
++- (O2Context *) createCGContextIfNeeded {
++    /* Identical bitmapInfo to X11Window's (X11Window.m:428-444):
++     * kO2ImageAlphaPremultipliedFirst | kO2BitmapByteOrder32Little.
++     *
++     * Verified against the surface format definitions in
++     * src/external/cocotron/Onyx2D/include/Onyx2D/O2Image.h:51
++     * (kO2ImageAlphaPremultipliedFirst) and :68
++     * (kO2BitmapByteOrder32Little = 0x2000, aliased to
++     * kO2BitmapByteOrder32Host at :79 — i.e. this already assumes a
++     * little-endian host, true for both the amd64/aarch64 QEMU targets and
++     * the eventual Banana Pi target per CLAUDE.md).
++     *
++     * What that combination means for memory layout: "alpha first" +
++     * "32-bit word stored little-endian" describes the 32-bit value
++     * 0xAARRGGBB with its bytes laid out little-endian in memory, i.e.
++     * byte[0]=B, byte[1]=G, byte[2]=R, byte[3]=A — which is exactly
++     * WL_SHM_FORMAT_ARGB8888 as defined by the wl_shm protocol ("[31:0]
++     * A:R:G:B 8:8:8:8 little endian", i.e. the same 0xAARRGGBB word,
++     * same little-endian byte order). So the byte-for-byte layout Onyx2D
++     * writes is already what wl_shm's ARGB8888 buffers expect — no channel
++     * shuffle or byte-swap needed between O2SurfaceGetPixelBytes() and the
++     * shm buffer, only a length-bounded memcpy (done in -flushBuffer
++     * below). This equivalence is a format-definition fact, not something
++     * that needed runtime testing to "discover" — cited here so it's not
++     * an unverified assumption either.
++     */
++    if (_context == nil) {
++        O2ColorSpaceRef colorSpace = O2ColorSpaceCreateDeviceRGB();
++        O2Surface *surface = [[O2Surface alloc]
++                   initWithBytes: NULL
++                           width: _frame.size.width
++                          height: _frame.size.height
++                bitsPerComponent: 8
++                     bytesPerRow: 0
++                      colorSpace: colorSpace
++                      bitmapInfo: kO2ImageAlphaPremultipliedFirst |
++                                  kO2BitmapByteOrder32Little];
++        O2ColorSpaceRelease(colorSpace);
++        _context = [[O2Context_builtin_FT alloc] initWithSurface: surface
++                                                         flipped: NO];
++    }
++    return _context;
++}
++
++- (O2Context *) cgContext {
++    return [self createCGContextIfNeeded];
++}
++
++- (void) invalidateContextWithNewSize: (NSSize) size
++                          forceRebuild: (BOOL) forceRebuild
++{
++    if (!NSEqualSizes(_frame.size, size) || forceRebuild) {
++        _frame.size = size;
++        if (![_context resizeWithNewSize: size]) {
++            [_context release];
++            _context = nil;
++            [_delegate platformWindowDidInvalidateCGContext: self];
++        }
++    }
++}
++
++- (void) invalidateContextWithNewSize: (NSSize) size {
++    [self invalidateContextWithNewSize: size forceRebuild: NO];
++}
++
++/* ==========================================================================
++ * Buffer (double-buffering) management
++ * ========================================================================== */
++
++- (BOOL) _resizeBuffer: (WaylandShmBuffer *) buf
++                  width: (int32_t) width
++                 height: (int32_t) height
++{
++    /*
++     * purpose: (re)allocate one WaylandShmBuffer's shm pool + wl_buffer so
++     *          it is width x height, WL_SHM_FORMAT_ARGB8888, tightly
++     *          packed (stride == width*4 to match O2Surface's own
++     *          bytesPerRow:0 packing, see -createCGContextIfNeeded above).
++     * input: buf (must not be `busy` — caller's responsibility to check),
++     *        width/height in pixels
++     * output: YES on success; NO on any allocation failure (logged, not
++     *         silently swallowed)
++     * sideEffects: destroys buf's previous wl_buffer/mapping/fd if any;
++     *              creates a new shm fd, mmap, wl_shm_pool (transient —
++     *              destroyed immediately after creating the one buffer we
++     *              need from it, same as ipa-runtime/UIKit's single-buffer
++     *              approach), and wl_buffer with a release listener
++     *              installed.
++     */
++    if (buf->wlBuffer != NULL && buf->width == width && buf->height == height)
++        return YES;
++
++    if (buf->wlBuffer != NULL) {
++        wl_buffer_destroy(buf->wlBuffer);
++        buf->wlBuffer = NULL;
++    }
++    if (buf->shmData != NULL && buf->shmData != MAP_FAILED) {
++        munmap(buf->shmData, buf->poolSize);
++        buf->shmData = NULL;
++    }
++    if (buf->shmFd >= 0) {
++        close(buf->shmFd);
++        buf->shmFd = -1;
++    }
++
++    int32_t stride = width * 4; /* ARGB8888, tightly packed */
++    size_t poolSize = (size_t) stride * (size_t) height;
++
++    int fd = _wayland_window_create_shm_fd(poolSize);
++    if (fd < 0) {
++        NSLog(@"WaylandWindow: shm allocation failed for %dx%d buffer: %s",
++              width, height, strerror(errno));
++        return NO;
++    }
++
++    void *data = mmap(NULL, poolSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (data == MAP_FAILED) {
++        NSLog(@"WaylandWindow: mmap failed for %dx%d buffer: %s", width,
++              height, strerror(errno));
++        close(fd);
++        return NO;
++    }
++
++    struct wl_shm *shm = [_waylandDisplay shm];
++    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t) poolSize);
++    struct wl_buffer *wlBuffer = wl_shm_pool_create_buffer(
++            pool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
++    /* The pool itself can be destroyed right after creating the buffer(s)
++     * we need from it — the wl_buffer keeps the underlying fd/mapping
++     * alive on the compositor side per the wl_shm protocol. */
++    wl_shm_pool_destroy(pool);
++
++    if (wlBuffer == NULL) {
++        NSLog(@"WaylandWindow: wl_shm_pool_create_buffer failed for %dx%d",
++              width, height);
++        munmap(data, poolSize);
++        close(fd);
++        return NO;
++    }
++
++    wl_buffer_add_listener(wlBuffer, &_wayland_buffer_listener, buf);
++
++    buf->wlBuffer = wlBuffer;
++    buf->shmData = data;
++    buf->poolSize = poolSize;
++    buf->shmFd = fd;
++    buf->width = width;
++    buf->height = height;
++    buf->stride = stride;
++    buf->busy = NO;
++    return YES;
++}
++
++- (WaylandShmBuffer *) _acquireBackBufferForWidth: (int32_t) width
++                                            height: (int32_t) height
++{
++    /*
++     * purpose: hand back a non-busy WaylandShmBuffer sized width x height,
++     *          resizing/allocating and blocking on the compositor's
++     *          wl_buffer.release as a last resort if every buffer we own
++     *          is currently attached and unreleased.
++     * input: width/height in pixels (the current O2Surface size)
++     * output: pointer into _buffers[] (never NULL — errors are fatal to
++     *         the flush and reported via NSLog, matching -flushBuffer's
++     *         "don't pretend it worked" requirement) or NULL on
++     *         unrecoverable allocation failure
++     * sideEffects: may block on wl_display_dispatch() waiting for a
++     *              release event; may reallocate a buffer's shm pool
++     */
++    /* Prefer an already-correctly-sized, non-busy buffer so we don't
++     * reallocate every single frame at a stable size. */
++    for (int i = 0; i < WAYLAND_WINDOW_BUFFER_COUNT; i++) {
++        WaylandShmBuffer *buf = &_buffers[i];
++        if (!buf->busy && buf->wlBuffer != NULL && buf->width == width &&
++            buf->height == height)
++            return buf;
++    }
++
++    /* Otherwise take any non-busy buffer and (re)size it. */
++    for (int i = 0; i < WAYLAND_WINDOW_BUFFER_COUNT; i++) {
++        WaylandShmBuffer *buf = &_buffers[i];
++        if (!buf->busy)
++            return [self _resizeBuffer: buf width: width height: height]
++                           ? buf
++                           : NULL;
++    }
++
++    /* Every buffer is still held by the compositor (we're presenting
++     * faster than it's releasing frames, or it's simply not pumping
++     * events). Block until one comes back rather than growing an
++     * unbounded number of buffers — bounded by WAYLAND_WINDOW_BUFFER_COUNT
++     * by design (see the header's double-buffering doc comment). This can
++     * hang if the compositor never releases a buffer (e.g. a hidden/
++     * minimized surface some compositors stop processing frame callbacks
++     * for); no timeout is implemented — TODO for production hardening.
++     */
++    struct wl_display *wlDisplay = [_waylandDisplay waylandDisplay];
++    while (YES) {
++        for (int i = 0; i < WAYLAND_WINDOW_BUFFER_COUNT; i++) {
++            WaylandShmBuffer *buf = &_buffers[i];
++            if (!buf->busy)
++                return [self _resizeBuffer: buf width: width height: height]
++                               ? buf
++                               : NULL;
++        }
++        if (wl_display_dispatch(wlDisplay) < 0) {
++            NSLog(@"WaylandWindow: wl_display_dispatch failed while waiting "
++                  @"for a free buffer: %s",
++                  strerror(errno));
++            return NULL;
++        }
++    }
++}
++
++- (void) flushBuffer {
++    /*
++     * purpose: this is the seam docs/SPEC-appkit-display-backend.md §3
++     *          calls out as "frame is ready — hand it out": copy Onyx2D's
++     *          just-rendered O2Surface into a free wl_shm buffer and
++     *          present it, replacing X11Window's GLX composite
++     *          (X11Window.m:617-644) with a direct shm attach/commit.
++     * input: none (reads _context's surface)
++     * output: none
++     * sideEffects: flushes pending Onyx2D draw ops; may block briefly
++     *              waiting for a wl_buffer.release (see
++     *              -_acquireBackBufferForWidth:height:); issues
++     *              wl_surface_attach/damage_buffer/commit + a flush
++     */
++    if (_context == nil)
++        return;
++
++    O2ContextFlush(_context);
++
++    O2Surface *surface = [_context surface];
++    int32_t width = (int32_t) O2SurfaceGetWidth(surface);
++    int32_t height = (int32_t) O2SurfaceGetHeight(surface);
++    if (width < 1 || height < 1)
++        return;
++
++    WaylandShmBuffer *buf = [self _acquireBackBufferForWidth: width
++                                                        height: height];
++    if (buf == NULL) {
++        NSLog(@"WaylandWindow: flushBuffer: no buffer available, frame dropped");
++        return;
++    }
++
++    unsigned char *srcBytes = (unsigned char *) O2SurfaceGetPixelBytes(surface);
++    size_t srcBytesPerRow = O2SurfaceGetBytesPerRow(surface);
++    size_t srcLen = srcBytesPerRow * (size_t) height;
++
++    if (srcBytesPerRow != (size_t) buf->stride || srcLen > buf->poolSize) {
++        /* Should not happen — -_resizeBuffer:width:height: sizes the wl_shm
++         * buffer to exactly match O2Surface's own tightly-packed stride
++         * (both are width*4). If it ever does, copying the wrong length
++         * would corrupt memory or leave garbage on screen, so refuse
++         * instead of guessing. */
++        NSLog(@"WaylandWindow: flushBuffer: surface stride/size mismatch "
++              @"(src %zu bytes/row, %zu total vs. buffer stride %d, pool "
++              @"%zu) — dropping frame instead of copying out of bounds",
++              srcBytesPerRow, srcLen, buf->stride, buf->poolSize);
++        return;
++    }
++
++    memcpy(buf->shmData, srcBytes, srcLen);
++    buf->busy = YES;
++
++    wl_surface_attach(_surface, buf->wlBuffer, 0, 0);
++    /* TODO: Cocotron's CGWindow base class only offers -dirtyRect: as an
++     * optional optimization hook, and X11Window (the only other backend
++     * in this tree) does not override it either — so there is no verified
++     * per-frame damage rectangle flowing down to this layer today. Damage
++     * the whole buffer every commit rather than guess a sub-rect from
++     * nothing. Cost: every commit forces the compositor to treat the full
++     * surface as changed (extra texture upload / re-composite), which
++     * matters for pure single-pixel-region updates like a blinking text
++     * caret but is not a correctness issue — just a missed optimization.
++     * Wiring real damage needs -dirtyRect: to actually be called with a
++     * meaningful rect somewhere above this class (AppKit/NSView redisplay
++     * machinery), and its coordinate space verified against this buffer's
++     * (top-left, unflipped raster) before using wl_surface_damage_buffer
++     * with anything less than the full frame. */
++    wl_surface_damage_buffer(_surface, 0, 0, width, height);
++    wl_surface_commit(_surface);
++
++    if (wl_display_flush([_waylandDisplay waylandDisplay]) < 0 &&
++        errno != EAGAIN) {
++        NSLog(@"WaylandWindow: wl_display_flush failed after commit: %s",
++              strerror(errno));
++    }
++
++    _mapped = YES;
++}
++
++/* ==========================================================================
++ * Window lifecycle (mostly limited/no-op — see per-method comments for why)
++ * ========================================================================== */
++
++- (void) showWindowWithoutActivation {
++    /* The first real presentation happens in -flushBuffer once AppKit
++     * actually draws something; there is no separate Wayland "map" request
++     * (unlike X11's XMapWindow) beyond having committed a surface, which
++     * -initWithDelegate: already did to get the initial configure. */
++}
++
++- (void) hideWindow {
++    /* xdg-shell has no "hide but keep state" request; the closest honest
++     * action a client can take is detaching its buffer, which tells the
++     * compositor to stop displaying this surface's contents. */
++    if (_surface != NULL) {
++        wl_surface_attach(_surface, NULL, 0, 0);
++        wl_surface_commit(_surface);
++    }
++}
++
++- (void) placeAboveWindow: (NSInteger) otherNumber {
++    (void) otherNumber;
++    /* No client-side stacking control over core Wayland/xdg-shell — see
++     * WaylandDisplay.m's -orderedWindowNumbers comment for the same
++     * limitation from the other direction. */
++}
++
++- (void) placeBelowWindow: (NSInteger) otherNumber {
++    (void) otherNumber;
++}
++
++- (void) makeKey {
++    /* No client-requestable focus/raise in core Wayland (the compositor
++     * decides); nothing to do beyond having a mapped, committed surface,
++     * which -flushBuffer/-showWindowWithoutActivation already ensure. */
++}
++
++- (void) makeMain {
++    /* Matches X11Window's own -makeMain (X11Window.m:548-549), which is
++     * also empty. */
++}
++
++- (void) captureEvents {
++    /* Matches X11Window's own -captureEvents (X11Window.m:551-552), also
++     * empty. */
++}
++
++- (void) miniaturize {
++    if (_xdgToplevel != NULL)
++        xdg_toplevel_set_minimized(_xdgToplevel);
++}
++
++/* -deminiaturize and -isMiniaturized are intentionally NOT overridden here
++ * (they fall through to CGWindow's O2InvalidAbstractInvocation, i.e. a
++ * loud, honest failure rather than a guess): xdg-shell's
++ * xdg_toplevel.state enum (xdg-shell.xml) has no "minimized" value and
++ * there is no un-minimize request — a client can ask to be minimized but
++ * cannot query or undo it. Doing this properly needs a compositor-specific
++ * extension or a different design; not invented here. */
++
++- (NSPoint) mouseLocationOutsideOfEventStream {
++    return [self transformPoint: _lastMotionPos];
++}
++
++- (void) setLastKnownCursorPosition: (CGPoint) point {
++    /* Extension point for the input agent's wl_pointer.motion listener —
++     * mirrors X11Window's -setLastKnownCursorPosition:
++     * (X11Window.m:646-648) exactly so wiring pointer input later is a
++     * drop-in call to this existing method, not new plumbing. */
++    _lastMotionPos = [self transformPoint: point];
++}
++
++- (void) addEntriesToDeviceDictionary: (NSDictionary *) entries {
++    (void) entries;
++    /* TODO: X11Window keeps a real _deviceDictionary
++     * (X11Window.h:44, X11Window.m:709-711) for tablet/device metadata;
++     * not modeled here since nothing in this skeleton reads it back. Add
++     * an NSMutableDictionary ivar if/when something needs it. */
++}
++
++- (NSPoint) transformPoint: (NSPoint) pos {
++    /* Same top-left-origin (Wayland) <-> bottom-left-origin (Cocoa) flip
++     * X11Window performs (X11Window.m:713-719), against our tracked
++     * primary output height instead of X11's DisplayHeight(). Falls back
++     * to the same 768px placeholder WaylandDisplay.m's -screens uses if no
++     * real output mode has been reported yet, so the two stay consistent
++     * with each other even in that degraded state. */
++    NSArray *screens = [[NSDisplay currentDisplay] screens];
++    CGFloat screenHeight = 768.0;
++    if ([screens count] > 0)
++        screenHeight = [(NSScreen *) [screens objectAtIndex: 0] frame].size.height;
++    return NSMakePoint(pos.x, screenHeight - pos.y);
++}
++
++- (O2Rect) transformFrame: (O2Rect) frame {
++    NSArray *screens = [[NSDisplay currentDisplay] screens];
++    CGFloat screenHeight = 768.0;
++    if ([screens count] > 0)
++        screenHeight = [(NSScreen *) [screens objectAtIndex: 0] frame].size.height;
++    return NSMakeRect(frame.origin.x,
++                      screenHeight - frame.origin.y - frame.size.height,
++                      fmax(frame.size.width, 1.0),
++                      fmax(frame.size.height, 1.0));
++}
++
++@end
+-- 
+2.54.0
+
