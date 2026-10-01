@@ -2072,6 +2072,31 @@ llvm-objdump --macho --disassemble \
 # 0x4e = 78 = ENOSYS, and NO store to the semaphore: it is never initialised.
 # _sem_destroy is the same shape; _sem_wait (271) and _sem_post (273) are real.
 #
+# 2026-09-30 23:5x — AND THE STUB IS UPSTREAM'S, DELIBERATELY. The body is in
+# the tree, not just in the binary:
+#   src/external/xnu/darling/src/libsystem_kernel/libsyscall/wrappers/
+#       posix_sem_obsolete.c
+# and it carries the reason in its own header comment — "system call stubs are
+# no longer generated for these from syscalls.master. Instead, provide simple
+# stubs here" — with sem_destroy, sem_getvalue and sem_init all returning
+# errno = ENOSYS, -1. The SDK agrees and says why: sys/semaphore.h marks those
+# three __deprecated and does not deprecate sem_open. So this is XNU retiring
+# the anonymous POSIX semaphore, not a damaged build and not a darling defect,
+# and "fix sem_init" would mean patching upstream code Apple deprecated.
+#
+# Which makes the constructor the real question, and it has an answer that needs
+# no guest rebuild: sem_open is implemented. It is not in the obsolete file —
+# it is sys_sem_open in .../xnu_syscall/bsd/impl/wrapped/sem_open.c, calling
+# elfcalls()->sem_open (filled by mldr from the host's sem_open, elfcalls.c:111),
+# and the host really has one. Measured on the build machine, where the answer
+# is known, parked and released:
+#   sem_open("/b358probe2", O_CREAT|O_EXCL, 0600, 0) -> 0x8248eb000
+#   sem_wait returned rc=0 errno=0 after a 200ms poster  => PARKED then RELEASED
+# So the wait this lane needs already works on a semaphore built the supported
+# way. What is NOT measured, and is the only thing standing between that and a
+# runnable lane: sem_open takes a NAME, and whether a named semaphore lands
+# where the guest's vchroot can see it is untested. Do not assume it.
+#
 # The lesson is the one this addendum keeps re-learning: a grep that returns a
 # confident 0 is evidence about the file it was pointed at, not about the
 # subsystem. Point the next one at the table the call actually reaches.
