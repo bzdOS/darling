@@ -218,8 +218,22 @@
 #define LINUX_SYS_dup           32
 #define LINUX_SYS_dup2          33
 #define LINUX_SYS_getpid        39
+/* 7 = poll on x86-64. The guest's poll(395) reaches the overlay's
+ * sys_pselect_nocancel, which forwards here; a run showed exactly two
+ * "unhandled Linux syscall 7" lines — the probe's main and spawned poll
+ * legs. FreeBSD poll(2) has the same argument shape, so this is a plain
+ * passthrough and the readiness half of the event path becomes measurable. */
+#define LINUX_SYS_poll           7
 #define LINUX_SYS_socket        41
 #define LINUX_SYS_connect       42
+#define LINUX_SYS_accept        43
+#define LINUX_SYS_bind          49
+#define LINUX_SYS_listen        50
+/* 53, NOT 134: the overlay's own linux-x86_64.h says __NR_socketpair 53, and
+ * a run proved it — the guest's socketpair drew "unhandled Linux syscall 53"
+ * here while 134 never arrived. Mainline x86-64 numbering; the first patch of
+ * this case used 134 from a table read and a measurement corrected it. */
+#define LINUX_SYS_socketpair    53
 #define LINUX_SYS_sendto        44
 #define LINUX_SYS_recvfrom      45
 #define LINUX_SYS_sendmsg       46
@@ -1614,6 +1628,12 @@ dispatch_linux_syscall(unsigned int linux_nr,
 
         return r;
     }
+    case LINUX_SYS_poll:
+        /* poll(fds, nfds, timeout) — same argument shape on both sides.
+         * The guest's poll(395) lands in the overlay's sys_pselect_nocancel
+         * which forwards here; a run showed exactly two "unhandled Linux
+         * syscall 7" lines — the probe's main and spawned poll legs. */
+        return freebsd_raw_syscall(SYS_poll, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_socket:
         /* AF_UNIX/AF_INET/AF_INET6 and SOCK_STREAM/SOCK_DGRAM share the same
          * numeric values on Linux and FreeBSD (both trace back to 4.4BSD),
@@ -2075,9 +2095,57 @@ dispatch_linux_syscall(unsigned int linux_nr,
         return freebsd_raw_syscall(
             (linux_nr == LINUX_SYS_sendto) ? SYS_sendto : SYS_recvfrom,
             a1, a2, a3, a4, a5, a6);
-    case LINUX_SYS_connect:
-        /* Same BSD-lineage passthrough as MACOS_SYS_connect above. */
+    case LINUX_SYS_connect: {
+        /* gsw-bisect: the guest's connect() draws EAFNOSUPPORT at the
+         * host-facing call while the overlay's sockaddr_fixup_from_bsd
+         * looks layout-correct on paper (bsd_family at offset 1, sun_path
+         * at 2). A run must decide which side lies, so print the sockaddr
+         * bytes this trap actually receives: garbage here means the break
+         * is upstream of the trap (overlay fixup / vchroot_expand /
+         * per-thread wd), clean bytes mean it is at or below the host
+         * call. */
+        const unsigned char *sb = (const unsigned char *)(long)a2;
+        fprintf(stderr,
+                "[gsw-bisect] connect fd=%ld len=%ld bytes=%02x %02x %02x %02x\n",
+                (long)a1, (long)a3,
+                ((long)a3 >= 1 && sb != NULL) ? sb[0] : 0,
+                ((long)a3 >= 2 && sb != NULL) ? sb[1] : 0,
+                ((long)a3 >= 3 && sb != NULL) ? sb[2] : 0,
+                ((long)a3 >= 4 && sb != NULL) ? sb[3] : 0);
         return freebsd_raw_syscall(SYS_connect, a1, a2, a3, 0, 0, 0);
+    }
+    case LINUX_SYS_bind: {
+        /* The guest's overlay sys_bind forwards here (LINUX 49); without
+         * this case it drew ENOSYS, which is why the guest could not open
+         * a listening port itself. Same BSD-lineage shape as connect. The
+         * byte print stays until the EAFNOSUPPORT this call used to draw
+         * at the host is attributed: the overlay's fixup looks clean on
+         * paper (linux_family = 2 for AF_INET), so a run must show what
+         * actually arrives. */
+        const unsigned char *sb = (const unsigned char *)(long)a2;
+        fprintf(stderr,
+                "[gsw-bisect] bind fd=%ld len=%ld bytes=%02x %02x %02x %02x\n",
+                (long)a1, (long)a3,
+                ((long)a3 >= 1 && sb != NULL) ? sb[0] : 0,
+                ((long)a3 >= 2 && sb != NULL) ? sb[1] : 0,
+                ((long)a3 >= 3 && sb != NULL) ? sb[2] : 0,
+                ((long)a3 >= 4 && sb != NULL) ? sb[3] : 0);
+        return freebsd_raw_syscall(SYS_bind, a1, a2, a3, 0, 0, 0);
+    }
+    case LINUX_SYS_listen:
+        /* Completes the self-listener alongside bind: listen(2) and
+         * accept(2) are shape-identical BSD-lineage calls. */
+        return freebsd_raw_syscall(SYS_listen, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_accept:
+        return freebsd_raw_syscall(SYS_accept, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_socketpair:
+        /* The guest's overlay sys_socketpair forwards here (LINUX 53) and
+         * drew ENOSYS before this case existed — the reason the guest had
+         * no in-process AF_UNIX source at all. FreeBSD socketpair(2) takes
+         * the same four arguments and writes the two fds straight into the
+         * caller's array, which is the same address space. This is the
+         * source guest-socket-wait's socketpair leg needs. */
+        return freebsd_raw_syscall(SYS_socketpair, a1, a2, a3, a4, 0, 0);
     case LINUX_SYS_fcntl:
         /* Same BSD-lineage passthrough as MACOS_SYS_fcntl above. */
         return freebsd_raw_syscall(SYS_fcntl, a1, a2, a3, 0, 0, 0);

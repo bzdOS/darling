@@ -307,6 +307,7 @@ struct poll_ctx {
 };
 
 static struct poll_ctx g_poll;
+static int g_poll_refused;   /* poll() drew rc<0 (ENOSYS expected in guest) */
 
 static void *poll_thread(void *p)
 {
@@ -473,9 +474,10 @@ static int make_tcp_pair(struct pair *P)
 				P->refused = 1;
 				snprintf(P->note, sizeof(P->note),
 				         "self-listener: bind(127.0.0.1) refused: %s"
-				         " — overlay sys_bind forwards to LINUX 49, which"
-				         " the trap does not define: the guest cannot"
-				         " open a port itself",
+				         " — EAFNOSUPPORT at the host-facing call with"
+				         " CLEAN sockaddr bytes at the trap ([02 00 ...];"
+				         " measured, §13 step 4): the break is at or below"
+				         " the host bind",
 				         strerror(errno));
 				return -1;
 			}
@@ -539,8 +541,8 @@ static int make_sockpair(struct pair *P)
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
 		P->refused = 1;
 		snprintf(P->note, sizeof(P->note),
-		         "socketpair refused: %s (errno=%d) — the trap defines"
-		         " neither macOS 135 nor Linux 134; expected in the guest",
+		         "socketpair refused: %s (errno=%d) — overlay forwards to"
+		         " LINUX 53; the trap carries that case on this branch",
 		         strerror(errno), errno);
 		return -1;
 	}
@@ -723,12 +725,14 @@ static void run_poll_leg(const char *legname, int (*make)(struct pair *),
 
 	*main_ret = *spawn_ret = 0;
 	*refused = 0;
+	g_poll_refused = 0;
 
 	if (make(&P) < 0) {
 		printf("  %-6s %-10s not exercised — %s\n", "main", legname, P.note);
 		*refused = 1;
 	} else {
 		rc = poll_on_main(P.rfd, P.wfd, &r);
+		if (r.rc < 0) g_poll_refused = 1;
 		if (rc == 0) {
 			*main_ret = (r.rc > 0);
 			print_wait("main", legname, &r, r.rc == 0, NULL);
@@ -743,6 +747,7 @@ static void run_poll_leg(const char *legname, int (*make)(struct pair *),
 		*refused = 1;
 	} else {
 		rc = poll_on_spawned(P.rfd, P.wfd, &r);
+		if (r.rc < 0) g_poll_refused = 1;
 		if (rc == 0) {
 			*spawn_ret = (r.rc > 0);
 			print_wait("thread", legname, &r, r.rc == 0, NULL);
@@ -864,6 +869,12 @@ int main(void)
 		       " Linux calls (pselect6/ppoll, select) the trap does not"
 		       " define; runtime behaviour is only measured where a valid"
 		       " fd existed\n");
+	else if (g_poll_refused)
+		printf("  support: poll REFUSED (rc<0) on a valid fd — the"
+		       " overlay's poll/select forward to LINUX pselect6/ppoll/"
+		       " select, none of which the trap defines; the readiness"
+		       " half stays closed and the read legs above carry the"
+		       " verdict\n");
 	else
 		printf("  support: poll main=%s thread=%s\n",
 		       p_main ? "returned on readiness" : "timed out/DID-NOT-RETURN",

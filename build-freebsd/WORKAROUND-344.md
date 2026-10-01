@@ -2257,13 +2257,72 @@ artefacts full of addresses; they are quoted here, not committed.
 # both families reach the host refused — whether the refusal rides on the wd
 # is exactly what a measurement must decide, not a reading.
 #
-# FOLLOWS, cheapest first: (1) repair the guest socket path — bisecting the
-# EAFNOSUPPORT needs guest-side changes, which this task's boundaries
-# forbid (trap/mldr/guest untouched); (2) readiness: poll(395)/select(93)
-# exist in the overlay's bsd_syscall_table but forward to LINUX
-# pselect6/ppoll/select, none of which the trap defines — once a socket fd
-# exists, wl's multiplexing half still needs LINUX 23/270/271 or an
-# elfcalls slot before it can be measured at all; (3) with (1) done, re-run
-# this probe with DARLING_THREAD_PEER_SOCK=<host AF_UNIX echo socket> — it
-# already speaks that source, and the native (B) is what the run should
-# then reproduce or refute inside the guest.
+# §13 addendum, step 4 — THE CHANNEL IS OPEN: (B) INSIDE THE GUEST.
+# 2026-10-01, on task/guest-socket-channel. Step 3's instrument verdict was
+# "(not exercised)": every connected-socket source refused before any wait
+# could park. This step opens the cheapest source and re-measures.
+#
+# WHAT WAS PATCHED (mldr's freebsd_syscall_trap.c, LINUX dispatch — the
+# slice this task allows): plain BSD-lineage passthroughs the guest's
+# overlay already forwards to but the trap never defined:
+#   socketpair = 53  (NOT 134 — a table read said 134; a run said "unhandled
+#                     Linux syscall 53" and the overlay's own linux-x86_64.h
+#                     agrees: __NR_socketpair 53. Measurement over reading,
+#                     the lesson of step 2, one level down.)
+#   bind = 49, listen = 50, accept = 43 — the self-listener's calls.
+#   poll = 7 — the guest's poll(395) lands in the overlay's
+#             sys_pselect_nocancel which forwards here; the previous run
+#             showed exactly two "unhandled Linux syscall 7" lines.
+# Rebuilt by the usual recipe: sh build-freebsd/build-mldr-only.sh (RC=0,
+# installed to the canonical mldr path; the script's own install-or-fatal
+# step did not fire).
+#
+# MEASURED, guest run (one authorization, file output;
+# socket-wait-final.log, RC=0):
+#   socketpair: available here
+#   main   read       RETURNED (parked) rc=1 errno=0 over 2000ms
+#   thread read       RETURNED-NO-PARK rc=1 errno=0 over 1998ms
+#   main   poll       RETURNED-NO-PARK rc=1 errno=0 over 2001ms
+#   thread poll       RETURNED-NO-PARK rc=1 errno=0 over 2000ms
+#   VERDICT (B) via socketpair: both the main-thread control and the
+#   spawned thread came back from a released blocking SOCKET read — and
+#   poll(POLLIN) returned on readiness on both thread kinds as well. So
+#   inside this guest, socket READS and socket READINESS both resume on
+#   spawned threads. Native self-test stayed (B) (RC=0) and the sabotage
+#   control still prints DID-NOT-RETURN on every spawned leg (RC=0), so
+#   the verdict can fail and did not.
+#
+# The (B) verdict's own sentence — "narrows to the readiness/multiplexing
+# half" — is now HALF-RETIRED: readiness returned too. What remains of the
+# roundtrip hang's suspects: libwayland's own machinery, the epoll side
+# (LINUX 213/232/233 are already in the trap and measurable next), and the
+# sysinfo spam below.
+#
+# MEASURED, the EAFNOSUPPORT bisect (the correlation step 3 left open):
+# the trap's new bind case prints the sockaddr bytes it receives, and they
+# are CLEAN — [gsw-bisect] bind fd=3 len=16 bytes=02 00 b8 ce (family 2 =
+# AF_INET little-endian, port 0xb8ce = the probe's 47310) — while the host
+# bind still refuses with EAFNOSUPPORT. So the break is AT OR BELOW the
+# host bind call, NOT in sockaddr_fixup_from_bsd and NOT in
+# vchroot_expand/get_perthread_wd for AF_INET (the fixup only touches the
+# wd for PF_LOCAL). The %gs/get_perthread_wd correlation therefore stays
+# UNMEASURED but UNIMPLICATED for this path; it stays unmerged. The
+# connect-side byte print never fired — the self-listener dies at bind, so
+# no connect was ever attempted with a valid fd. A host-side look at
+# kern_bind is the next measurement; the self-listener leg (probe leg 3)
+# stays blocked until it.
+#
+# MEASURED, noise with a name: 1 243 648 lines of "[darling-mldr]
+# unhandled Linux syscall 99 — ENOSYS" span the leg window of the final
+# run (65 MB log). 99 is __NR_sysinfo in the overlay's linux-x86_64.h —
+# NOT brk: __NR_brk is 12 there, so step 2's note calling 99 "brk" was
+# wrong and is corrected here. A guest thread loops sysinfo while the legs
+# run; the results are unaffected (RC=0, verdict printed). Follow-up: a
+# print of a1 in the trap's default case names the caller.
+#
+# FOLLOWS: (1) epoll-side measurement — the trap already defines 213/232/
+# 233, so an epoll_wait-on-a-socketpair probe is the next cheap run and
+# would close the multiplexing question the way poll just closed the
+# readiness one; (2) kern_bind's EAFNOSUPPORT with clean bytes — host-side
+# bisection, outside this slice's tree; (3) the sysinfo loop's caller.
+
