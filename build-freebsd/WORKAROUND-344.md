@@ -2444,14 +2444,69 @@ artefacts full of addresses; they are quoted here, not committed.
 # internals). mldr/trap were not touched: the trap's poll/socketpair were
 # measured alive in steps 4-5 and are not on this path's way to failing.
 #
-# FOLLOWS: (1) the call-level confirmation — a guest thread calling
-# wl_display_dispatch on a display whose buffer is EMPTY and stays empty
-# (nothing in flight) should park in the same read path, and that probe is
-# two dozen lines on the existing dlsym surface; (2) the fix direction
-# lives in native-libwayland/thread integration on the host side, outside
-# this slice's boundaries; (3) the backend's own init calls the same
-# roundtrip on main (disassembly refs at 0x1079/0x129f) and works — the
-# asymmetry is the thread, exactly as run №9-4 recorded.
+# §13 addendum, step 7 — THE 2x2 FILLS WITH RETURNS: THE EMPTY-BUFFER
+# CONDITION AND THE MARSHAL PATH ARE BOTH REFUTED; THE PARK'S LAST HIDEOUT
+# IS NAMED. 2026-10-01, on task/wl-empty-buffer-dispatch. Step 6 attributed
+# the park to "native libwayland's blocking read path on a guest-created
+# thread" — with one structural caveat it could not remove: the decomposed
+# lane always entered dispatch with the reply already waiting (its own poll
+# did the waiting), so "empty buffer at entry" and "guest thread" were
+# never separated. This probe separates them, cell by cell.
+#
+# THE PROBE: tests/src/guest-wl-empty-buffer-dispatch.c (new; pure C;
+# libSystem-only link; backend dlopen'd by guest path, C surface dlsym'd —
+# the surface every probe since step 5 uses). Fresh display per cell (a
+# parked thread poisons its display). Staging: DARLING_STAGING_TREES from
+# the closure-derived list (Frameworks + PrivateFrameworks + usr/lib).
+#
+# MEASURED, guest run (sway headless; wl-emptybuf2.log, RC=0) — the 2x2
+# plus two analysis cells, ALL RETURNED:
+#   cell4 full    x main    dispatch RETURNED rc=2 over 0ms  (the 0f00018b control, one line)
+#   cell3 pre-buf x thread  marshal rc=12, own-poll rc=1, dispatch RETURNED rc=2 over 0ms
+#   cell1 empty   x thread  marshal rc=12, dispatch RETURNED rc=2 over 0-1ms
+#   cell2 empty   x main    marshal rc=12, dispatch RETURNED rc=2 over 0ms (main unbounded by design)
+#   cell5 empty   x thread, flags-marshal (the wl_display_sync form)
+#                            marshal rc=12, dispatch RETURNED rc=2 over 0ms
+#   cell6 empty   x main,  flags-marshal  dispatch RETURNED rc=2 over 1ms
+#   negative control: connect(gsw-dead-nope-0000) returned NULL — refusal
+#   observed; errno 0 again (step 6's nuance: NULL is the signal here).
+#
+# WHAT THE DURATIONS PROVE: cell1's dispatch was entered BEFORE the reply
+# could arrive (marshal+flush+dispatch take microseconds; sway answers in
+# milliseconds) and its 0-1ms duration is a WAIT, not a pre-buffered
+# straight-through — so the empty-at-entry condition was genuinely
+# exercised on a guest thread, and the call RETURNED. The native blocking
+# read from a guest thread works.
+#
+# ATTRIBUTION, corrected by measurement: step 6's "native read path parks
+# on guest threads" is REFUTED at call level. So is the task's
+# empty-buffer premise (cell1 returned) and, by the analysis cells, the
+# marshal-path hypothesis (the wl_proxy_marshal_flags form that
+# wl_display_sync uses internally returns from guest threads too). Every
+# exported primitive — marshal in both forms, flush, poll, dispatch,
+# listener callbacks — returns from guest threads in every shape tested,
+# and the FULL №9-4 control from 0f00018b (main answered, spawned blocked)
+# still stands on the opaque call. The park reproduces ONLY inside
+# wl_display_roundtrip itself.
+#
+# THE REMAINING DELTA, named as far as the exported surface allows: what
+# the opaque roundtrip does that no cell does is wl_display_sync's own
+# internal listener, wl_proxy_set_queue on the callback, and the dispatch
+# LOOP until done — roundtrip's body above the primitives. The exported
+# surface cannot decompose further without opening native libwayland,
+# which this slice's boundaries forbid; the host-side slice takes exactly
+# that step. The premise chain, each link measured rather than assumed:
+# primitives alive (step 5) -> stateful layer (refuted by 0f00018b's
+# variant d) -> native read path (refuted here by cell1) -> roundtrip's
+# own body on a guest thread (the current, final-at-this-depth name).
+#
+# FOLLOWS: the host-side slice opens native libwayland's roundtrip
+# (sync-listener/set_queue/loop) around a guest-created thread — the one
+# code path this probe, by its boundaries, could only circle. No guest or
+# trap change is implicated by anything measured so far: every trap-side
+# primitive (steps 4-5) and every exported libwayland call (here) behaves
+# on spawned threads.
+
 
 
 
