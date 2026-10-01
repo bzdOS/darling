@@ -2510,3 +2510,54 @@ artefacts full of addresses; they are quoted here, not committed.
 
 
 
+#
+# ---- §13 STEP 8: the host-side slice — debug copy built, body still
+# unobservable, the substitution levers measured rather than assumed ----
+#
+# What was built: a native libwayland-client 1.25.0 copy (88536 bytes,
+# sha256 ac32f46d..., exported surface 65/65 identical to the system
+# library) carrying 13 anchor-asserted stderr markers [wlbody] #N inside
+# the roundtrip body. The instrument script asserts anchor uniqueness and
+# the loop bodies/waits are untouched — the markers cannot change the
+# behaviour they are meant to observe. Sources, build recipe and the
+# markers patch live in build-freebsd/wl-native-debug/; the binary itself
+# is not committed.
+#
+# What was measured: the copy is resolved not by the host linker but by
+# the guest loader's own walker (elfcalls lm_find chain inside the
+# loader), whose search list on the run is absolute-only — /lib, /usr/lib,
+# /usr/local/lib — and who therefore opens the SYSTEM copy in every run
+# (Opened .../usr/lib/libwayland-client.so.0, note osrel 1500068,
+# dynsymcount 151 — the system file's, not the copy's). Four substitution
+# levers were planted with sha-verified copies and all failed to divert
+# the walk: LD_LIBRARY_PATH (the pre-slice assumption — refuted by the
+# first trace), DYLD_LIBRARY_PATH, a relative usr/lib copy in the process
+# CWD, and the copy at the vchroot-relative usr/lib of the run's staging
+# tree. An EARLIER trace of the same walker did walk relative dyld
+# components before the absolute phase — "usr/lib/libwayland-client.so.0"
+# among them, the vchroot-relative candidate that would have caught the
+# planted copy — but that phase was not formed in any run of this slice
+# (once, one mangled component, "F-8/...", appeared instead). The
+# relative-phase list is state/env-dependent in a way not pinned by
+# measurement; pinning it further means instrumenting the walker itself,
+# which is loader territory and outside this slice's boundaries.
+#
+# What the runs still reproduced, unbroken: the session repro on the
+# loader path parks exactly as before — variant (a) DID-NOT-RETURN within
+# 8000ms, variant (d) on a FRESH display returned 2, and the full control
+# (c) answered on the MAIN thread of the same session (roundtrip returned
+# 2, wl_display_get_error=0) while the spawned lane stayed blocked — the
+# "guest thread" attribution of the park stands, again, with zero
+# [wlbody] markers because the system copy has none.
+#
+# The chain, each link measured rather than assumed: primitives alive
+# (step 5) -> stateful layer (refuted by variant d) -> native read path
+# (refuted by cell1) -> roundtrip's own body on a guest thread (the park
+# itself) -> body of the native roundtrip NOT observable through the
+# loader's walk (here, four levers dead). The next observable step is
+# named precisely: either the walker's relative-phase list gets pinned and
+# steered from the loader side, or the guest shim gains a run-only
+# absolute-path dlopen (probe-side change) — with the copy opening, the
+# 13 markers appear on stderr and the park's last [wlbody] line names the
+# link: mutex, read_events, TLS key of the host-foreign thread, condvar,
+# or the dispatch loop.

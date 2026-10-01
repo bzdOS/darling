@@ -1,0 +1,137 @@
+diff --git a/src/wayland-client.c b/src/wayland-client.c
+index 50b3b4b..44e0eb2 100644
+--- a/src/wayland-client.c
++++ b/src/wayland-client.c
+@@ -27,6 +27,13 @@
+ #define _GNU_SOURCE
+ 
+ #include <stdlib.h>
++
++/* wlbody: diagnostic stderr markers for the roundtrip park; no
++ * behaviour change — see build/wl-debug-copy/README notes. */
++static unsigned long wlbody_seq;
++#define WLB(...) do { fprintf(stderr, "[wlbody] #%lu ", ++wlbody_seq); \
++	fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
++
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <stdio.h>
+@@ -1460,6 +1467,8 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
+ 	struct wl_display *display_wrapper;
+ 	struct wl_callback *callback;
+ 	int done, ret = 0;
++	WLB("roundtrip_queue ENTER tid=%lu display=%p queue=%p",
++	    (unsigned long)pthread_self(), (void *)display, (void *)queue);
+ 
+ 	done = 0;
+ 
+@@ -1467,16 +1476,29 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
+ 	if (!display_wrapper)
+ 		return -1;
+ 
++	WLB("  set_queue wrapper=%p queue=%p", (void *)display_wrapper,
++	    (void *)queue);
+ 	wl_proxy_set_queue((struct wl_proxy *) display_wrapper, queue);
+ 	callback = wl_display_sync(display_wrapper);
++	WLB("  sync(display_wrapper=%p) returned callback=%p",
++	    (void *)display_wrapper, (void *)callback);
+ 	wl_proxy_wrapper_destroy(display_wrapper);
+ 
+ 	if (callback == NULL)
+ 		return -1;
+ 
+ 	wl_callback_add_listener(callback, &sync_listener, &done);
+-	while (!done && ret >= 0)
+-		ret = wl_display_dispatch_queue(display, queue);
++	{
++		int wlbody_i = 0;
++		while (!done && ret >= 0) {
++			WLB("  dispatch-loop iter=%d ENTER queue=%p",
++			    wlbody_i, (void *)queue);
++			ret = wl_display_dispatch_queue(display, queue);
++			WLB("  dispatch-loop iter=%d LEAVE ret=%d done=%d",
++			    wlbody_i, ret, done);
++			wlbody_i++;
++		}
++	}
+ 
+ 	if (ret == -1 && !done)
+ 		wl_callback_destroy(callback);
+@@ -1743,9 +1765,16 @@ read_events(struct wl_display *display)
+ 	int total, rem, size;
+ 	uint32_t serial;
+ 
++	WLB("  read_events ENTER tid=%lu reader_count=%d -> %d",
++	    (unsigned long)pthread_self(), display->reader_count,
++	    display->reader_count - 1);
+ 	display->reader_count--;
+ 	if (display->reader_count == 0) {
++		WLB("    branch: this thread is the reader (blocking socket read)");
++		WLB("    wl_connection_read ENTER (native blocking read)");
+ 		total = wl_connection_read(display->connection);
++		WLB("    wl_connection_read LEAVE total=%d errno=%d",
++		    total, errno);
+ 		if (total == -1) {
+ 			if (errno == EAGAIN) {
+ 				/* we must wake up threads whenever
+@@ -1779,6 +1808,7 @@ read_events(struct wl_display *display)
+ 		display_wakeup_threads(display);
+ 	} else {
+ 		serial = display->read_serial;
++		WLB("    branch: other readers present -> reader_cond WAIT (serial=%u, tid=%lu)", serial, (unsigned long)pthread_self());
+ 		while (display->read_serial == serial)
+ 			pthread_cond_wait(&display->reader_cond,
+ 					  &display->mutex);
+@@ -1850,7 +1880,10 @@ wl_display_read_events(struct wl_display *display)
+ 		return -1;
+ 	}
+ 
++	WLB("  wl_display_read_events ENTER tid=%lu",
++	    (unsigned long)pthread_self());
+ 	ret = read_events(display);
++	WLB("  wl_display_read_events LEAVE ret=%d errno=%d", ret, errno);
+ 
+ 	pthread_mutex_unlock(&display->mutex);
+ 
+@@ -1983,6 +2016,8 @@ wl_display_prepare_read_queue(struct wl_display *display,
+ 		ret = -1;
+ 	} else {
+ 		display->reader_count++;
++		WLB("  prepare_read_queue queue=%p -> reader_count=%d",
++		    (void *)queue, display->reader_count);
+ 		ret = 0;
+ 	}
+ 
+@@ -2055,7 +2090,10 @@ wl_display_poll(struct wl_display *display,
+ 			timespec_sub_saturate(&result, &deadline, &now);
+ 			remaining_timeout = &result;
+ 		}
++		WLB("    ppoll ENTER fd=%d events=%d timeout=%s", pfd[0].fd,
++		    pfd[0].events, remaining_timeout ? "set" : "NULL(infinite)");
+ 		ret = ppoll(pfd, 1, remaining_timeout, NULL);
++		WLB("    ppoll LEAVE ret=%d errno=%d", ret, errno);
+ 	} while (ret == -1 && errno == EINTR);
+ 
+ 	return ret;
+@@ -2141,7 +2179,10 @@ wl_display_dispatch_queue_timeout(struct wl_display *display,
+ 			break;
+ 		}
+ 
++		WLB("    dispatch: wl_display_read_events call");
+ 		ret = wl_display_read_events(display);
++		WLB("    dispatch: wl_display_read_events rc=%d errno=%d",
++		    ret, errno);
+ 		if (ret == -1)
+ 			break;
+ 
+@@ -2212,7 +2253,10 @@ wl_display_dispatch_queue(struct wl_display *display,
+ {
+ 	int ret;
+ 
++	WLB("dispatch_queue ENTER tid=%lu queue=%p",
++	    (unsigned long)pthread_self(), (void *)queue);
+ 	ret = wl_display_dispatch_queue_timeout(display, queue, NULL);
++	WLB("dispatch_queue LEAVE ret=%d", ret);
+ 	assert(ret == -1 || ret > 0);
+ 
+ 	return ret;
