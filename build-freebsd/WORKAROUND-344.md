@@ -2320,9 +2320,70 @@ artefacts full of addresses; they are quoted here, not committed.
 # run; the results are unaffected (RC=0, verdict printed). Follow-up: a
 # print of a1 in the trap's default case names the caller.
 #
-# FOLLOWS: (1) epoll-side measurement — the trap already defines 213/232/
-# 233, so an epoll_wait-on-a-socketpair probe is the next cheap run and
-# would close the multiplexing question the way poll just closed the
-# readiness one; (2) kern_bind's EAFNOSUPPORT with clean bytes — host-side
-# bisection, outside this slice's tree; (3) the sysinfo loop's caller.
+# §13 addendum, step 5 — THE ROUNDTRIP STAGES DO NOT PARK: ATTRIBUTION BY
+# EXCLUSION, AND WHAT IS LEFT. 2026-10-01, on task/wl-roundtrip-stage.
+# Step 4 opened the socket channel and measured (B) — socket reads and poll
+# readiness both return on spawned guest threads — so №9-4's hang is not
+# the descriptor/event path. This step asks WHERE the roundtrip parks, by
+# measuring its own body.
+#
+# THE PROBE: tests/src/guest-wl-roundtrip-stage.c (new; pure C; libSystem
+# only). It loads the vendored backend the way run №9-3 loaded it — dlopen
+# by the dylib's GUEST path, dlsym per function, every resolution printed —
+# and decomposes the roundtrip into its three stages, each with a marker,
+# rc/errno and its own clock duration: marshal wl_display.sync +
+# wl_display_flush (the write), poll(POLLIN) on wl_display_get_fd (the
+# readiness wait), wl_display_dispatch + the sync callback done (the
+# read/dispatch). libwayland's roundtrip_queue IS this sequence, so a park
+# at stage N is an attribution. wl_display_dispatch stands in for
+# dispatch_queue: this build exports dispatch, not dispatch_queue, and
+# №9-4's roundtrip used the default queue anyway.
+#
+# THE RUN'S OWN WALL FIRST: the first attempt died at dlopen — "Library not
+# loaded: /System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/
+# Onyx2D" — because the harness's built-in staging list covers usr/lib and
+# System/Library/Frameworks but not PrivateFrameworks, and the backend dylib
+# links Onyx2D. The closure-derived list (check-guest-dylib-compat.py
+# --emit-staging-trees, handed over as DARLING_STAGING_TREES) stages all
+# three trees and the load proceeds. Measured, and it is exactly the miss
+# run-wayland-window-probe.sh's step 3b exists to prevent.
+#
+# MEASURED, guest run (one sudo, file output; wl-stage2.log, RC=0):
+#   [negative control] connect(gsw-dead-nope-0000) REFUSED errno=No such
+#     file or directory — the instrument distinguishes refusal from hang.
+#   (a) main at rest:  marshal+flush RETURNED rc=12 over 0ms; poll RETURNED
+#       rc=1 over 1ms; dispatch RETURNED rc=2 over 0ms; sync callback
+#       FIRED. The lane completed.
+#   (b) main in bounded join: the same, all stages RETURNED, callback fired.
+#   (c) main concurrent — №9-4's exact shape: "main-lane: roundtrip
+#       returned 2 (errno 0), wl_display_get_error=0" AND the spawned lane
+#       completed its decomposition on the same display. Both lanes got
+#       their replies.
+#   VERDICT: (none) — all three variants completed.
+#
+# ATTRIBUTION: on a FRESH connection the roundtrip's stages do not park on
+# a spawned thread, with main at rest, main joined, or main concurrently
+# roundtripping the same display. So the park is NOT flush, NOT poll, NOT
+# dispatch, and NOT contention for the shared default queue — every
+# primitive the roundtrip is made of is measured alive. What №9-4 had and
+# this probe's fresh display does not: the backend's own stateful session —
+# registry globals bound, shm pool, xdg surface, a committed window, and
+# the backend's listeners and queues attached to that display. The park
+# lives in that stateful/backend layer, and naming the exact stage inside
+# it needs the next probe: drive the vendored backend to that state (the
+# window-probe lineage — NSBundle, -[WaylandDisplay waylandDisplay], dlsym
+# roundtrip) and decompose THERE. Recorded, not assumed: this run excludes
+# the primitives; it does not yet name the stateful stage.
+#
+# Side measurements: sway answered the sync in 0-1ms on the headless seat,
+# so the poll stage had real traffic to wait for. The sysinfo(99) spam was
+# 598 lines here against 1 243 648 in the socket-wait run — the spam
+# scales with the socketpair probe's path, not with wl traffic; its caller
+# is still unnamed.
+#
+# FOLLOWS: (1) the stateful-backend stage probe above — the one that can
+# put a name on the park; (2) kern_bind's EAFNOSUPPORT with clean bytes at
+# the trap (§13 step 4) — host-side bisection, outside this slice;
+# (3) the sysinfo loop's caller (a1 print in the trap's default case).
+
 
