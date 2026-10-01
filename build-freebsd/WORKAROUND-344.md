@@ -2207,3 +2207,63 @@ grep -aE 'sem_init|sem_wait|after post|REFUSED|^VERDICT|^  \(refused|^  \(A|^  \
 
 Logs stay in `$DARLING_BUILD_DIR`, outside the source tree, and are machine
 artefacts full of addresses; they are quoted here, not committed.
+
+# §13 addendum, step 3 — THE SOCKET HALF OF THE DISCRIMINATOR: NOT MEASURED,
+# AND THE CHANNEL IS WHAT CLOSED. 2026-10-01. New probe:
+# tests/src/guest-socket-wait.c (the lane probe untouched). Question: do
+# SOCKET waits return on a SPAWNED guest thread? The merged (B) said
+# resumption is alive for nanosleep, a pipe read and sem_wait; wl's
+# roundtrip from a spawned thread hangs (run №9-4), and roundtrip's blocking
+# work is a socket read multiplexed with a readiness wait — so this asks the
+# socket half directly, main-thread control + spawned thread per leg.
+#
+# MEASURED, native self-test (the answer is known here, so the probe must
+# pass): cc -Wall -pthread -o /tmp/gsw-native tests/src/guest-socket-wait.c
+#   main   read       RETURNED (parked) rc=1 errno=0 over 2000ms
+#   thread read       RETURNED (parked) rc=2 errno=0 over 2000ms
+#   main/thread poll  returned on readiness, 2000ms
+#   thread conn+rd    RETURNED (parked) over 2000ms
+#   VERDICT (B) — socket reads return on spawned threads, natively.
+# Sabotage control (release write deleted in a COPY, not in the tracked
+# file): DID-NOT-RETURN printed on every spawned read leg and both poll
+# legs, RC=0 — the deadline is real, so (B) above can fail and did not.
+#
+# MEASURED, guest peerless run (one authorization, file output):
+#   timeout --foreground -k 60 180 sudo env DARLING_* \
+#       DARLING_TEST_BINARY=guest-socket-wait-macho \
+#       "$DARLING_BUILD_DIR/launch-dynamic" \
+#       >"$DARLING_BUILD_DIR/socket-wait-peerless.log" 2>&1     # RC=0, 16868 B
+# Every connected-socket source refuses BEFORE any wait can park:
+#   socketpair       overlay sys_socketpair -> LINUX 134 -> trap has no
+#                    134 -> ENOSYS. The guest table carries [135] but its
+#                    body needs a Linux socketpair the trap never defines.
+#   bind (self-port) overlay sys_bind -> LINUX 49 -> trap has no 49 ->
+#                    ENOSYS: the guest cannot open a port itself.
+#   AF_INET connect  EAFNOSUPPORT at the host-facing call (measured).
+#   AF_UNIX connect  EAFNOSUPPORT TOO, on the same path shape the wayland
+#                    socket uses — second run with the AF_UNIX echo peer:
+#                    socket-wait-unix.log, RC=0, 16533 B.
+#   VERDICT printed: (not exercised) — an INSTRUMENT verdict.
+#
+# NOT MEASURED: whether a socket wait returns on a spawned guest thread —
+# there is no fd in this guest build on which to park one. The pipe half of
+# the discriminator was already answered alive by the merged (B); the socket
+# half is not a thread question here, it is a channel question. NOT MERGED,
+# NOT MEASURED: the %gs/get_perthread_wd change — it stays unmerged until a
+# run measures it, and this probe does not touch it. Correlation noted, not
+# claimed: the AF_UNIX connect path runs get_perthread_wd() inside
+# vchroot_expand (the %gs-backed per-thread wd), and sockaddr_fixup_from_bsd
+# reads layout-correct on paper (bsd_family at offset 1, sun_path at 2) yet
+# both families reach the host refused — whether the refusal rides on the wd
+# is exactly what a measurement must decide, not a reading.
+#
+# FOLLOWS, cheapest first: (1) repair the guest socket path — bisecting the
+# EAFNOSUPPORT needs guest-side changes, which this task's boundaries
+# forbid (trap/mldr/guest untouched); (2) readiness: poll(395)/select(93)
+# exist in the overlay's bsd_syscall_table but forward to LINUX
+# pselect6/ppoll/select, none of which the trap defines — once a socket fd
+# exists, wl's multiplexing half still needs LINUX 23/270/271 or an
+# elfcalls slot before it can be measured at all; (3) with (1) done, re-run
+# this probe with DARLING_THREAD_PEER_SOCK=<host AF_UNIX echo socket> — it
+# already speaks that source, and the native (B) is what the run should
+# then reproduce or refute inside the guest.
