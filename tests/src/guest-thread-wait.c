@@ -21,22 +21,22 @@
  * correction is precisely that the call being made is not the one named here
  * before.
  *
- * 2026-09-30, LATER — THE MISSING PRIMITIVE IS NOT THE ONE NAMED BELOW, and
- * this file has now been wrong about that in the other direction. It is not
- * 271 that is missing from a syscall table: 271 IS in the guest's
- * ___bsd_syscall_table ([271] = sys_sem_wait, alongside 272 trywait and 273
- * post), and sys_sem_wait is wired to elfcalls()->sem_wait, which mldr fills
- * with the host's sem_wait. The wait has a real implementation behind it.
+ * 2026-09-30, LATEST — THE CONSTRUCTOR IS sem_open, AND THE WAIT NEVER MOVED.
+ * The three legs used to call sem_init, which in this guest is an upstream stub:
+ * XNU stopped generating the syscalls for the obsolete anonymous POSIX
+ * semaphore (libsyscall/wrappers/posix_sem_obsolete.c says so in its own
+ * comment; sys/semaphore.h marks sem_init, sem_destroy and sem_getvalue
+ * __deprecated and does not mark sem_open). So every leg here waited on an
+ * object nothing had built, and the EINVAL it drew described THAT, not the
+ * wait. sem_open is wired through elfcalls()->sem_open and does build one —
+ * measured in tests/src/guest-sem-open.c and in the run whose log this file's
+ * sibling writes.
  *
- * What is missing is EARLIER: _sem_init in this guest's
- * usr/lib/system/libsystem_kernel.dylib is a stub. It sets errno to 78 and
- * returns -1 without touching the object at all (disassembly, §13 of
- * WORKAROUND-344.md). So every wait in this probe has been reading an
- * UNINITIALISED int, and the EINVAL it draws belongs to that. A lane measured
- * on an uninitialised semaphore cannot say anything about parking, waking or
- * guest threads, which is why every wait's rc AND errno is now recorded and
- * sem_init's rc is printed beside them: a reader must not have to guess which
- * of the two numbers belongs to the wait.
+ * What this file deliberately does NOT do: it does not touch sem_wait. The wait
+ * is 271 -> elfcalls()->sem_wait -> the host's sem_wait, and it parks and comes
+ * back. Three earlier commits of this file each went looking for the missing
+ * primitive somewhere it was not, so the note is worth more than the change:
+ * the primitive was never missing. A CONSTRUCTOR was.
  *
  * 2026-09-30 — THE CLAIM THAT WAS WRONG, AND WHY THE PROBE NOW CHECKS INSTEAD
  * OF ASSUMING. This file used to say the lock legs run "sem_wait (over 202)"
@@ -136,6 +136,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>   /* O_CREAT | O_EXCL for sem_open */
 
 #define BOUND_MS      3000
 #define RELEASE_MS    2000   /* how long a wait is given to be REALLY parked */
@@ -208,27 +209,75 @@ static const char *wait_word(const struct wait_result *r)
 	return "RETURNED-NO-PARK";
 }
 
-/* The three sem_init results, in call order. File-scope because
- * recorded_init() sits above main() and records into them. */
+/* The three constructor results, in call order. File-scope because
+ * recorded_open() sits above main() and records into them. */
 static int init_rc[3];
 static int init_err[3];
 
-/* EVERY sem_init, RECORDED. A wait on a semaphore nobody initialised is not a
- * measurement of anything, and this probe was discarding the answer: sem_init
- * returns -1/ENOSYS in this guest's overlay without initialising the object at
- * all, so the wait that follows is reading an uninitialised int and the EINVAL
- * it returns belongs to that, not to the wait. One wrapper, so the next call
- * site cannot forget it the way these three did. */
-static int recorded_init(sem_t *s, int pshared, unsigned int value, int n)
-{
-	int rc;
+/* THE NAMES THE THREE LEGS' SEMAPHORES LIVE UNDER.
+ *
+ * sem_open takes a name, so these three have to be distinct, they have to be
+ * unlinked afterwards for the probe to be safe to run twice, and they have to
+ * carry a leading slash because POSIX requires one — the bare name is refused
+ * with EINVAL, which the lane's own self-test had to be taught before it would
+ * tell the truth.
+ */
+#define SEM_NAME_LEN 64
+static char sem_names[3][SEM_NAME_LEN];
 
+/* ONE CONSTRUCTOR CALL SITE, AND IT RECORDS ITSELF.
+ *
+ * The constructor is sem_open rather than sem_init because sem_init in this
+ * guest is an upstream stub: XNU stopped generating the syscalls for the
+ * obsolete anonymous POSIX semaphore (libsyscall/wrappers/posix_sem_obsolete.c
+ * says so in its own comment; sys/semaphore.h marks sem_init, sem_destroy and
+ * sem_getvalue __deprecated and does not mark sem_open). Every leg used to wait
+ * on an object that nothing had initialised, and the EINVAL it drew belonged to
+ * that. sem_open is wired through elfcalls()->sem_open and works — measured,
+ * see tests/src/guest-sem-open.c, and the lane's own run.
+ *
+ * The pid keeps the names unique between concurrent runs, so a rerun cannot
+ * collide with a leftover and cannot inherit somebody else's semaphore. It is
+ * also why the name is not a constant: a fixed name would make O_EXCL fail on
+ * the second run for a reason that has nothing to do with the lane.
+ *
+ * value is the initial count, which is what sem_init's third argument used to
+ * mean. The control passes 1 (already available, so its wait cannot park) and
+ * the two lane legs pass 0.
+ */
+static sem_t *recorded_open(unsigned int value, int n)
+{
+	sem_t *s;
+
+	snprintf(sem_names[n], SEM_NAME_LEN, "/gtw-%ld-%d",
+	         (long)getpid(), n);
 	errno = 0;
-	rc = sem_init(s, pshared, value);
-	init_rc[n] = rc;
+	s = sem_open(sem_names[n], O_CREAT | O_EXCL, 0600, value);
+	init_rc[n] = (s == NULL) ? -1 : 0;
 	init_err[n] = errno;
-	return rc;
+	return s;
 }
+
+/* Cleanup is a RESULT LINE, not a courtesy: a probe that leaves a named
+ * semaphore behind is a probe whose next run can fail for the wrong reason,
+ * and that failure would be read as a finding about the lane. */
+static void unlink_all(void)
+{
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		if (sem_names[i][0] == '\0') continue;
+		if (sem_unlink(sem_names[i]) != 0)
+			printf("  note: sem_unlink(%s) failed: %s\n", sem_names[i],
+			       strerror(errno));
+	}
+}
+
+/* recorded_init() is gone: sem_init cannot initialise anything in this guest
+ * and a wrapper around a stub is a wrapper around nothing. recorded_open()
+ * above is its replacement, and it returns the semaphore so a caller cannot
+ * wait on a constructor that failed — which is the failure this file spent two
+ * commits misreading. */
 
 static struct lane_report rep;
 
@@ -458,7 +507,7 @@ static void send_to_peer(int fd)
 
 int main(void)
 {
-	sem_t lock;
+	sem_t *lock;
 	pthread_t tl, td;
 	struct wait_result wr_control, wr_main;
 	char msbuf_control[32], msbuf_lock[32], msbuf_main[32];
@@ -507,10 +556,19 @@ int main(void)
 
 /* ---------- control: the main thread, both legs ---------- */
 	puts("[control] main thread:");
-	recorded_init(&lock, 0, 0, 0);
-	sem_post(&lock);                 /* this thread releases its own */
-	do_lock(&lock, &wr_control);
-	control_lock = rep.lock_reached;
+	/* value 1: already available, so this wait CANNOT park. That is the point
+	 * of a control — it is the baseline the lane's parking claims are read
+	 * against, and a control that could park would be a second lane leg. */
+	lock = recorded_open(1, 0);
+	if (lock == NULL) {
+		printf("  %-6s %-12s rc=%d errno=%s — no semaphore to wait on\n",
+		       "main", "sem_open", init_rc[0],
+		       init_err[0] ? strerror(init_err[0]) : "0");
+	} else {
+		do_lock(lock, &wr_control);
+		control_lock = rep.lock_reached;
+	}
+	if (lock == NULL) control_lock = 0;
 	wait_ms(&wr_control, msbuf_control, sizeof(msbuf_control));
 	/* The control now says what the wait DID, not merely that it was reached.
 	 * Its job is to answer "does this guest's semaphore wait work at all",
@@ -520,11 +578,10 @@ int main(void)
 	       wait_word(&wr_control), wr_control.rc,
 	       wr_control.err ? strerror(wr_control.err) : "0",
 	       msbuf_control);
-	/* The sem_init that produced that number, or did not. Without this line
-	 * the EINVAL above is unattributable: a wait on an uninitialised
-	 * semaphore is the same number as a wait on a broken one, and only one
-	 * of those two says anything about parking. */
-	printf("  %-6s %-12s rc=%d errno=%s\n", "main", "sem_init", init_rc[0],
+	/* The constructor that produced that number. Printed beside the wait on
+	 * purpose: a wait on an object nothing built is the same errno as a wait
+	 * on a broken one, and only one of those says anything about parking. */
+	printf("  %-6s %-12s rc=%d errno=%s\n", "main", "sem_open", init_rc[0],
 	       init_err[0] ? strerror(init_err[0]) : "0");
 
 	control_desc = 0;
@@ -547,9 +604,17 @@ int main(void)
 	/* ---------- the lane: two spawned threads, one per leg ---------- */
 	puts("[lane] spawned guest threads:");
 	memset(&rep, 0, sizeof(rep));
-	recorded_init(&lock, 0, 0, 1);   /* nobody will post this one */
+	lock = recorded_open(0, 1);      /* nobody will post this one */
 
-	if (pthread_create(&tl, NULL, lock_thread, &lock) != 0) {
+	if (lock == NULL) {
+		printf("  %-6s %-12s rc=%d errno=%s — no semaphore to wait on\n",
+		       "thread", "sem_open", init_rc[1],
+		       init_err[1] ? strerror(init_err[1]) : "0");
+		threads_ok = 0;
+	}
+
+	if (lock != NULL &&
+	    pthread_create(&tl, NULL, lock_thread, lock) != 0) {
 		puts("  FATAL: the lock thread could not be created");
 		threads_ok = 0;
 	}
@@ -584,7 +649,7 @@ int main(void)
 		       rep.lock_parked ? " (still parked 2s in)" : "");
 
 		t0 = now_ms();
-		sem_post(&lock);              /* the release, and the only one */
+		sem_post(lock);               /* the release, and the only one */
 		wait_flag(&rep.lock_returned);
 		if (!rep.lock_returned)
 			printf("  %-6s %-12s %s\n", "thread", "after post",
@@ -609,16 +674,20 @@ int main(void)
 		 * about threads — main's control above posts FIRST and so never blocks,
 		 * which is why that control cannot stand in for this. */
 		{
-			sem_t lock_m;
+			sem_t *lock_m;
 			pthread_t tp;
 
-			recorded_init(&lock_m, 0, 0, 2);
-			if (pthread_create(&tp, NULL, main_poster, &lock_m) != 0) {
+			lock_m = recorded_open(0, 2);
+			if (lock_m == NULL) {
+				printf("  %-6s %-12s rc=%d errno=%s — no semaphore to wait"
+				       " on\n", "main", "sem_open", init_rc[2],
+				       init_err[2] ? strerror(init_err[2]) : "0");
+			} else if (pthread_create(&tp, NULL, main_poster, lock_m) != 0) {
 				puts("  FATAL: the main leg's poster thread could not be created");
 				threads_ok = 0;
 			} else {
 				rep.m_reached = 1;        /* BEFORE the wait: "reached" is the claim */
-				timed_wait(&lock_m, &wr_main);   /* main blocks for real */
+				timed_wait(lock_m, &wr_main);   /* main blocks for real */
 				rep.m_returned = 1;       /* reaching THIS line is the answer */
 				wr_main.parked = (rep.m_reached && !rep.m_returned);
 				pthread_detach(tp);
@@ -665,46 +734,30 @@ int main(void)
 		puts("  (unknown) the main-thread control failed, so the lane has no clean");
 		puts("            baseline and its result means nothing.");
 	} else if (init_rc[0] < 0) {
-		/* THE WAIT'S NUMBER BELONGS TO THE INITIALISATION, and this branch is
-		 * where that is said out loud rather than left for a reader to infer.
-		 *
-		 * sem_init refused (rc=-1, errno printed below), so the semaphore was
-		 * never initialised, so the sem_wait that followed read an
-		 * uninitialised int and its EINVAL describes THAT. Every number the
-		 * run printed above — the control's, the lane leg's, main's — inherits
-		 * this. Reading them as properties of the wait, or of guest threads,
-		 * or of the wake path, would name a component for a failure that
-		 * happened before it was called.
-		 *
-		 * This is why the previous run's verdict was still one step short: it
-		 * said "no working semaphore wait" and blamed the wait, when the wait
-		 * was never reached. The wait may well be fine.
+		/* THE CONSTRUCTOR REFUSED, so every sem_wait below it read nothing this
+		 * probe built. The verdict says so rather than leaving a reader to infer
+		 * it from two numbers printed above: the wait's errno belongs to the
+		 * constructor's failure, not to the wait. Kept as its own branch because
+		 * it is the failure this file spent two commits misreading — it named
+		 * the wait, and the wait was never reached.
 		 */
-		printf("  (refused) sem_init REFUSED (rc=%d errno=%s), so the semaphore"
-		       " was never initialised and every sem_wait in this run read an"
-		       " uninitialised int.\n", init_rc[0],
-		       init_err[0] ? strerror(init_err[0]) : "0");
+		printf("  (refused) sem_open REFUSED (rc=%d errno=%s) for the control's"
+		       " semaphore, so the legs below have no object this probe built.\n",
+		       init_rc[0], init_err[0] ? strerror(init_err[0]) : "0");
 		printf("            The wait's own errno (%s) belongs to that, not to"
-		       " the wait: it is what an uninitialised object draws.\n",
+		       " the wait.\n",
 		       wr_control.err ? strerror(wr_control.err) : "0");
-		puts("            Neither (A) nor (B) can be claimed, and neither can a");
-		puts("            finding about the wait: the lane's legs need an");
-		puts("            initialised semaphore. Instrument verdict.");
-		puts("            FIRST STEP TOWARD THE LANE: a semaphore this guest can");
-		puts("            actually initialise — not a syscall table entry. The");
-		puts("            primitive the probe names is not the one that is missing.");
+		puts("            Neither (A) nor (B) can be claimed. Instrument verdict.");
 	} else if (wr_control.rc < 0) {
-		/* The control refused on a semaphore that was ALREADY POSTED, so there
-		 * was no contention, no parking and nothing to release: this guest's
-		 * semaphore wait does not exist as far as the control can tell. That
-		 * names the primitive and stops the run, because a lane measured with a
-		 * primitive that is not there measures nothing. This is a REFUSAL
-		 * status, and it is deliberately NOT a classification: the rubric's A/B
-		 * are both statements about parking and waking, and neither can be made
-		 * from a call that was refused. */
+		/* The control refused on a semaphore that was ALREADY AVAILABLE (value
+		 * 1), so there was no contention, no parking and nothing to release:
+		 * this guest's semaphore wait does not exist as far as the control can
+		 * tell. A REFUSAL status, deliberately NOT a classification: the
+		 * rubric's A/B are both statements about parking and waking, and neither
+		 * can be made from a call that was refused. */
 		printf("  (refused) the main-thread control's sem_wait was REFUSED"
-		       " (rc=%d errno=%s) on an already-posted semaphore that sem_init"
-		       " DID initialise, so this guest has no working semaphore wait.\n",
+		       " (rc=%d errno=%s) on a semaphore sem_open built and made"
+		       " AVAILABLE, so this guest has no working semaphore wait.\n",
 		       wr_control.rc, wr_control.err ? strerror(wr_control.err) : "0");
 		puts("            Nothing was parked and nothing was released, so neither (A)");
 		puts("            nor (B) can be claimed: the lane's legs need a wait that");
@@ -802,6 +855,10 @@ int main(void)
 
 	if (peer >= 0) close(peer);
 	if (peer_lane >= 0) close(peer_lane);
-	sem_destroy(&lock);
+	/* Named semaphores are unlinked, not destroyed: sem_destroy is the other
+	 * upstream stub here and would be a no-op that looked like cleanup. Leaving
+	 * the names behind would make the next run's O_EXCL fail for a reason that
+	 * has nothing to do with the lane. */
+	unlink_all();
 	return 0;
 }
