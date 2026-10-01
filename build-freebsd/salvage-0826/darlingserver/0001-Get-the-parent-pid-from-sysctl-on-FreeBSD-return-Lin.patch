@@ -1,0 +1,127 @@
+From a7c1f3377bcd915f92af6dcaefdfb3602e11b87d Mon Sep 17 00:00:00 2001
+From: Andrey Bodrov <ap.bodrov@gmail.com>
+Date: Thu, 1 Oct 2026 13:46:27 +0000
+Subject: [PATCH] Get the parent pid from sysctl on FreeBSD; return Linux errno
+ to the guest
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Process constructor read /proc/<pid>/status for PPid with no FreeBSD guard,
+unlike every other /proc use in the file. FreeBSD mounts linprocfs at
+/compat/linux/proc, so the open silently yields an unreadable stream, the
+getline loop runs zero times, nothing throws, and parentProcess stays null for
+every process. parentProcess is what a child inherits its vchroot and groups
+from; the DARLING_VCHROOT_PATH fallback further down was covering for this on
+the first process of a tree. Use sysctl KERN_PROC_PID instead.
+
+Separately: reply codes travel to the guest in the Linux errno space, since the
+client is a Linux build of libsystem_kernel. On Linux the server's own errno
+values are those values, so upstream writes -ENOSYS directly; on FreeBSD ENOSYS
+is 78 rather than 38 and reaches the guest as Linux EREMCHG. Observed live as a
+PthreadCanceled reply of -78 the guest could not act on. Of the errno values
+returned from call.cpp only ENOSYS differs — ESRCH and ENOMEM happen to match.
+---
+ src/call.cpp    | 19 +++++++++++++++++++
+ src/process.cpp | 37 +++++++++++++++++++++++++++++++++++--
+ 2 files changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/src/call.cpp b/src/call.cpp
+index cc10f1d..fd7dd72 100644
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -31,6 +31,25 @@
+ 
+ static DarlingServer::Log callLog("calls");
+ 
++/*
++ * Reply codes travel to the guest in the LINUX errno space. The client half of
++ * this protocol is Darling's libsystem_kernel, which is a Linux build and
++ * compares what comes back against Linux values. On Linux the server's own
++ * errno numbers ARE those values, so upstream can write -ENOSYS directly; on
++ * FreeBSD the two spaces diverge and -ENOSYS (78 here, 38 there) reaches the
++ * guest as Linux EREMCHG — an unrelated error it cannot act on. Observed live
++ * on 185: a PthreadCanceled reply of -78 that the guest made no sense of.
++ *
++ * Only the codes that actually differ need this. Of the errno values returned
++ * from this file, ESRCH (3) and ENOMEM (12) happen to be identical in both
++ * spaces and are left as they are; ENOSYS is the one that is not.
++ */
++#ifdef DARLING_FREEBSD
++	#define DSERVER_GUEST_ENOSYS (-38)
++#else
++	#define DSERVER_GUEST_ENOSYS (-ENOSYS)
++#endif
++
+ DarlingServer::Log DarlingServer::Call::rpcReplyLog("replies");
+ 
+ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Message&& requestMessage) {
+diff --git a/src/process.cpp b/src/process.cpp
+index 669240a..6c4fa4c 100644
+--- a/src/process.cpp
++++ b/src/process.cpp
+@@ -30,6 +30,10 @@
+ #include <sys/mman.h>
+ #ifdef DARLING_FREEBSD
+ #include <sys/event.h>  /* kqueue, kevent, EVFILT_PROC, NOTE_EXIT */
++#ifdef DARLING_FREEBSD
++#include <sys/sysctl.h> /* KERN_PROC_PID — parent pid, see the constructor */
++#include <sys/user.h>   /* struct kinfo_proc */
++#endif
+ #include <sys/ptrace.h> /* PT_ATTACH/PT_DETACH — #198 process_vm_readv/writev shim needs an active attach */
+ #include <sys/wait.h>   /* waitpid — sync with PT_ATTACH's stop before PT_IO */
+ #endif
+@@ -69,12 +73,40 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 
+ 	_pidfd = std::make_shared<FD>(pidfd);
+ 
++	std::shared_ptr<Process> parentProcess = nullptr;
++
++#ifdef DARLING_FREEBSD
++	// sysctl, not /proc. Every other /proc use in this file is already guarded
++	// for FreeBSD; this one was not, and it fails silently rather than loudly:
++	// FreeBSD mounts linprocfs at /compat/linux/proc, so opening
++	// "/proc/<pid>/status" simply yields a stream that is never readable, the
++	// getline loop below runs zero times, no exception is raised and
++	// parentProcess stays null — for EVERY process.
++	//
++	// The consequence is not cosmetic. parentProcess is what a child inherits
++	// its vchroot and groups from, so without it a forked child loses the
++	// overlay root entirely. The DARLING_VCHROOT_PATH fallback further down was
++	// papering over exactly this for the first process in a tree.
++	{
++		struct kinfo_proc kp;
++		size_t len = sizeof(kp);
++		int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(id) };
++
++		if (sysctl(mib, 4, &kp, &len, nullptr, 0) == 0 && len >= sizeof(kp)) {
++			if (auto maybeParentProcess = processRegistry().lookupEntryByID(kp.ki_ppid)) {
++				parentProcess = *maybeParentProcess;
++				_parentProcess = parentProcess;
++			}
++		}
++		// A parent that darlingserver does not know about is normal — the first
++		// process in a tree is started by something outside it — so a failed
++		// lookup is not an error here, unlike a failed *parse* on Linux below.
++	}
++#else
+ 	// we could use stat instead of status, but it's more complicated with comm potentially getting in the way of parsing (it can include whitespace and parentheses)
+ 	std::ifstream statusFile("/proc/" + std::to_string(id) + "/status");
+ 	std::string line;
+ 
+-	std::shared_ptr<Process> parentProcess = nullptr;
+-
+ 	while (std::getline(statusFile, line)) {
+ 		if (line.substr(0, sizeof("PPid") - 1) == "PPid") {
+ 			auto pos = line.find_last_of('\t');
+@@ -96,6 +128,7 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 			break;
+ 		}
+ 	}
++#endif // DARLING_FREEBSD
+ 
+ 	if (parentProcess) {
+ 		std::shared_lock parentLock(parentProcess->_rwlock);
+-- 
+2.54.0
+

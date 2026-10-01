@@ -1,0 +1,79 @@
+From 89905cf9dcedb1ece42b40badc6dd95d7a44fd0c Mon Sep 17 00:00:00 2001
+From: Andrey Bodrov <ap.bodrov@gmail.com>
+Date: Thu, 1 Oct 2026 13:46:59 +0000
+Subject: [PATCH 2/2] NSUserDefaults: actually persist
+ setPersistentDomain:forName:
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+It called registerDefaults:, which populates NSRegistrationDomain — the
+volatile "factory defaults" layer that is consulted for reads but never written
+to disk. setPersistentDomain:forName: was therefore a no-op that reported
+success: `defaults write com.example Key Value` returned silently and left no
+plist behind, because the values only ever existed in memory and synchronize
+had nothing persistent to flush. Use setObject:forKey: instead.
+
+removePersistentDomainForName: had the mirror-image mistake: it cleared `self`
+and ignored domainName entirely, so removing another application's domain wiped
+the caller's own defaults and left the intended one untouched.
+
+Verified on FreeBSD (darling-freebsd port): `defaults write com.bsdos.demo
+Greeting Hello` now produces Library/Preferences/com.bsdos.demo.plist
+containing that key. Not tested on Linux — no Linux Darling available here —
+but neither path is platform-specific.
+---
+ src/NSUserDefaults.m | 29 ++++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/src/NSUserDefaults.m b/src/NSUserDefaults.m
+index 5a9ffc765..282be3d59 100644
+--- a/src/NSUserDefaults.m
++++ b/src/NSUserDefaults.m
+@@ -476,7 +476,18 @@ static void initQueues() {
+         [defaults removeObjectForKey: key];
+     }
+ 
+-    [defaults registerDefaults: domain];
++    /*
++     * setObject:forKey:, not registerDefaults:. registerDefaults: populates
++     * NSRegistrationDomain — the volatile "factory defaults" layer, which is
++     * consulted for reads but never written to disk. Using it here made
++     * setPersistentDomain:forName: a no-op that reported success: `defaults
++     * write com.example Key Value` returned silently and left no plist behind,
++     * because the values only ever existed in memory and synchronize had
++     * nothing persistent to flush.
++     */
++    for (id key in domain) {
++        [defaults setObject: [domain objectForKey: key] forKey: key];
++    }
+     [defaults synchronize];
+ 
+     // Post a notification on self.
+@@ -485,11 +496,19 @@ static void initQueues() {
+ 
+ - (void) removePersistentDomainForName: (NSString *) domainName
+ {
+-    NSDictionary *defaultsDictionary = [self dictionaryRepresentation];
+-    for (NSString *key in [defaultsDictionary allKeys]) {
+-        [self removeObjectForKey:key];
++    /*
++     * Operate on the NAMED domain, as the selector says. This used to clear
++     * `self` instead, ignoring domainName entirely — so removing some other
++     * application's domain wiped the caller's own defaults and left the
++     * intended one untouched. Same shape of mistake as
++     * setPersistentDomain:forName: above.
++     */
++    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName: domainName];
++
++    for (NSString *key in [[defaults dictionaryRepresentation] allKeys]) {
++        [defaults removeObjectForKey: key];
+     }
+-    [self synchronize];
++    [defaults synchronize];
+ }
+ 
+ - (void) addSuiteNamed: (NSString *) suiteName {
+-- 
+2.54.0
+
