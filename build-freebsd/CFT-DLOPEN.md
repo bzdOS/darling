@@ -94,3 +94,45 @@ guest cannot even read the Mach-O (`hexdump /FWbin` → ENOENT);
 per-link padding (staged 14/11/13) does **not** fix it (still `image not
 found`), probe stays at 41 images — **the wall is not in the listing: the
 guest cannot resolve/read a visible file** — stop.
+
+## Read layer — guest open on the padded tree + host truss
+
+### Guest read (the read layer works)
+
+The guest's `/bin`-style tools read known files fine: a guest `hexdump -C
+-n 8` of `/usr/lib/libSystem.B.dylib` prints the fat Mach-O magic
+`ca fe ba be`, and `/etc/hosts` prints its text. So the emulated open
+path is functional for those files.
+
+Marker probe: a file created in the *local* staging overlay is **not**
+readable as the guest (`/MARKER-LOCAL` and
+`/tmp/darling-local-overlay/MARKER-LOCAL` both fail), and the
+`/FWbin` symlink to the padded Mach-O also fails — so the guest's root is
+the **overlay**, not the local staging tree. The previous turn's per-link
+padding lived in the local staging (`$LOCAL/Frameworks`), which the guest
+does not read from; the padded-tree read was therefore not measured on the
+guest's actual view.
+
+### Host truss
+
+`truss -f` of a whole chrome-probe run captures the staging's openats
+(`O_WRONLY|O_CREAT` of the framework files under
+`/tmp/darling-local-overlay/Frameworks/…`) and the pax reads, but the run
+aborts before the guest's framework openat:
+
+```
+Assertion failed: (LIST_NEXT(info->curthread, entries) == NULL),
+function find_exit_thread, file /usr/src/usr.bin/truss/setup.c, line 422.
+```
+
+— truss's own assertion fails on the multi-threaded guest processes, so
+the host-side openat of the guest's `/Frameworks/…` path was not captured.
+
+### Verdict (read layer, one line)
+
+post-padding read = **not measured on the guest's root** (the guest root
+is the overlay; the padding was in the local staging, unreadable to the
+guest); the read layer itself works (known files read, `cafebabe` /
+text); host-openat = **not captured** — `truss -f` aborts on its own
+assertion (`find_exit_thread`, setup.c:422); failure layer = undetermined
+(guest-resolve vs emu-open vs dyld).
