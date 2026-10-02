@@ -78,6 +78,16 @@ The remaining unknown is the exact primitive inside the host `dlsym` path
 (rtld object lock / dlerror TLS / libthr bookkeeping for a host-foreign
 thread). That is what the syscall trace of the parked tid names next.
 
+## Truss does not survive the guest (negative control)
+
+`truss -f` over the identical run kills it before the probe's first step:
+the log ends in `thr_kill(<pid>, SIGILL)` — the NSException abort path —
+while the untrussed run reaches the park every time. The ptrace-based
+tracer interferes with the guest's signal/trap machinery (SIGSYS delivery
+included), so syscall-level naming must come from dtrace (kernel probes,
+no ptrace). This negative is measured, not assumed: same command, same
+environment, only `truss -f` added.
+
 ## Differential note
 
 The probe-side differential (call the native pointer directly, bypassing
