@@ -237,6 +237,53 @@ sub_once("\t\tret = wl_display_read_events(display);\n",
          "\t\t    ret, errno);\n",
          "timeout read_events call")
 
+# 13) sync-callback fire — the smoking gun: did the lane's callback run
+sub_once("static void\n"
+         "sync_callback(void *data, struct wl_callback *callback, uint32_t serial)\n"
+         "{\n"
+         "\tint *done = data;\n"
+         "\n"
+         "\t*done = 1;\n",
+         "static void\n"
+         "sync_callback(void *data, struct wl_callback *callback, uint32_t serial)\n"
+         "{\n"
+         "\tint *done = data;\n"
+         "\n"
+         "\twlb_log(\"sync-callback fired cb=%p q=%p ser=%u\",\n"
+         "\t    (void *)callback,\n"
+         "\t    (void *)(((struct wl_proxy *)callback)->queue), serial);\n"
+         "\t*done = 1;\n",
+         "sync-callback fire")
+
+# 14) queue_event landing — which queue each decoded event goes to
+sub_once("\tclosure->proxy = proxy;\n"
+         "\tincrease_closure_args_refcount(closure);\n"
+         "\n"
+         "\tif (proxy == &display->proxy)\n"
+         "\t\tqueue = &display->display_queue;\n"
+         "\telse\n"
+         "\t\tqueue = proxy->queue;\n"
+         "\n"
+         "\tif (!queue)\n"
+         "\t\twl_abort(\"Tried to add event to destroyed queue\\n\");\n"
+         "\n"
+         "\twl_list_insert(queue->event_list.prev, &closure->link);\n",
+         "\tclosure->proxy = proxy;\n"
+         "\tincrease_closure_args_refcount(closure);\n"
+         "\n"
+         "\tif (proxy == &display->proxy)\n"
+         "\t\tqueue = &display->display_queue;\n"
+         "\telse\n"
+         "\t\tqueue = proxy->queue;\n"
+         "\n"
+         "\tif (!queue)\n"
+         "\t\twl_abort(\"Tried to add event to destroyed queue\\n\");\n"
+         "\n"
+         "\twlb_log(\"queue_event: id=%u op=%u proxy=%p -> queue=%p\",\n"
+         "\t    id, opcode, (void *)proxy, (void *)queue);\n"
+         "\twl_list_insert(queue->event_list.prev, &closure->link);\n",
+         "queue_event landing")
+
 open(PATH, "w").write(src)
 print("written:", PATH)
 
@@ -262,6 +309,7 @@ for _i, _ln in enumerate(_clines):
     if _ln.startswith("#include"):
         _clines.insert(_i + 1, "void wlb_log(const char *fmt, ...);")
         _clines.insert(_i + 2, "#include <sys/thr.h>")
+        _clines.insert(_i + 3, "#include <pthread.h>")
         break
 else:
     print("FATAL: no #include line in connection.c")
@@ -295,8 +343,8 @@ sub_once_c("\t\tdo {\n"
            "\t\t{\n"
            "\t\t\tlong _tid = 0;\n"
            "\t\t\tthr_self(&_tid);\n"
-           "\t\t\twlb_log(\"read-tid fd=%d tid=%lu\", connection->fd,\n"
-           "\t\t\t    (unsigned long)_tid);\n"
+           "\t\t\twlb_log(\"read-tid fd=%d lwp=%lu pt=%lu\", connection->fd,\n"
+           "\t\t\t    (unsigned long)_tid, (unsigned long)pthread_self());\n"
            "\t\t}\n",
            "read site")
 
