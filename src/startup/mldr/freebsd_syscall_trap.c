@@ -124,7 +124,13 @@
 #include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
 #include <sys/mount.h> /* native struct statfs — statfs/fstatfs translation */
 #include "sigaction_translate.h" /* mldr_sys_rt_sigaction — see LINUX_SYS_rt_sigaction */
+#include "trap_log.h"            /* exit-caller logging slice — write(2) markers */
 #include <darlingserver/rpc.h>
+
+/* exit-caller logging slice: gate captured ONCE at trap setup (single
+ * threaded, getenv is safe there) so the handlers can read it without
+ * touching environ. DARLING_TRAP_LOG=1 enables; default off. */
+int mldr_trap_log_enabled = 0;
 
 /* ── macOS syscall class constants ─────────────────────────────────────────── */
 
@@ -2517,6 +2523,10 @@ dispatch_linux_syscall(unsigned int linux_nr,
     default:
         fprintf(stderr,
             "[darling-mldr] unhandled Linux syscall %u — ENOSYS\n", linux_nr);
+        /* exit-caller logging slice: name the caller of the unhandled
+         * raw-Linux syscall (times(99) in the (a) window is the target) */
+        if (mldr_trap_log_enabled)
+            mldr_tlog("linux-unhandled", (long)linux_nr, (long)a1);
         return -ENOSYS;
     }
 }
@@ -2685,6 +2695,11 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
 
     ucontext_t *uctx = (ucontext_t *)uctx_void;
 
+    /* exit-caller logging slice: handler entry — did this thread ever get
+     * here, and does the handler ever return? */
+    if (mldr_trap_log_enabled)
+        mldr_tlog("SIGSYS ENTER", (long)(uintptr_t)uctx, 0);
+
 #if defined(__x86_64__)
     mcontext_t *mc = &uctx->uc_mcontext;
 
@@ -2704,6 +2719,8 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
             fprintf(stderr, " %02x", (unsigned)rip[i]);
         }
         fprintf(stderr, "\n");
+        if (mldr_trap_log_enabled)
+            mldr_tlog("SIGSYS RE-RAISE(recover-fail)", (long)mc->mc_rip, 0);
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
         sigaction(SIGSYS, &sa_dfl, NULL);
         raise(SIGSYS);
@@ -2756,6 +2773,9 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
             " at rip=0x%llx\n",
             (raw_eax >> 24) & 0xff, raw_eax,
             (unsigned long long)mc->mc_rip);
+        if (mldr_trap_log_enabled)
+            mldr_tlog("SIGSYS RE-RAISE(unknown-class)", (long)raw_eax,
+                      (long)mc->mc_rip);
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
         sigaction(SIGSYS, &sa_dfl, NULL);
         raise(SIGSYS);
@@ -2783,6 +2803,8 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
         mc->mc_rflags &= ~0x1ULL;            /* clear carry flag */
     }
     /* rip is already past the syscall — no mc_rip adjustment needed */
+    if (mldr_trap_log_enabled)
+        mldr_tlog("SIGSYS LEAVE", (long)mc->mc_rax, 0);
 
 #elif defined(__aarch64__)
     /*
@@ -2896,11 +2918,17 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
     mcontext_t *mc = &uctx->uc_mcontext;
     const uint8_t *pc = (const uint8_t *)(uintptr_t)mc->mc_rip;
 
+    /* exit-caller logging slice: handler entry with the faulting pc */
+    if (mldr_trap_log_enabled)
+        mldr_tlogx("SIGILL ENTER", pc, (long)mc->mc_rax);
+
     if (pc[0] != 0x0f || pc[1] != 0x0b) {
         /* Not one of ours — a genuine illegal instruction elsewhere.
          * Restore default disposition and re-raise so the process gets the
          * normal SIGILL termination/core dump. */
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+        if (mldr_trap_log_enabled)
+            mldr_tlogx("SIGILL RE-RAISE(not-ours)", pc, (long)mc->mc_rax);
         sigaction(signo, &sa_dfl, NULL);
         raise(signo);
         return;
@@ -2917,6 +2945,8 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
             mldr_report_trap(&_mldr_traps[i], mc);
 
             struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+            if (mldr_trap_log_enabled)
+                mldr_tlogx("SIGILL RE-RAISE(trap-site)", pc, (long)i);
             sigaction(signo, &sa_dfl, NULL);
             raise(signo);
             return;
@@ -2938,6 +2968,8 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
      * that convention belongs to the macOS BSD-syscall class only. */
     mc->mc_rax = (uint64_t)ret;
     mc->mc_rip += 2; /* skip the ud2 the CPU never actually executed */
+    if (mldr_trap_log_enabled)
+        mldr_tlog("SIGILL LEAVE", (long)mc->mc_rax, (long)linux_nr);
 }
 #endif /* __x86_64__ */
 
@@ -3064,6 +3096,8 @@ mldr_setup_thread_signal_stack(void)
             "[darling-mldr] WARNING: could not map an alternate signal stack"
             " for this thread: %s — a raw-syscall trap on it will crash in"
             " signal delivery\n", strerror(errno));
+        if (mldr_trap_log_enabled)
+            mldr_tlog("altstack FAIL(mmap)", 0, errno);
         return -1;
     }
 
@@ -3078,16 +3112,23 @@ mldr_setup_thread_signal_stack(void)
             "[darling-mldr] WARNING: sigaltstack() failed for this thread:"
             " %s — a raw-syscall trap on it will crash in signal delivery\n",
             strerror(errno));
+        if (mldr_trap_log_enabled)
+            mldr_tlog("altstack FAIL(sigaltstack)", 0, errno);
         munmap(stack, SIGSYS_ALTSTACK_SIZE);
         return -1;
     }
 
+    if (mldr_trap_log_enabled)
+        mldr_tlog("altstack OK", (long)(uintptr_t)stack, 0);
     return 0;
 }
 
 void
 setup_macos_syscall_trap(void)
 {
+    /* exit-caller logging slice: capture the gate before any thread exists */
+    mldr_trap_log_enabled = (getenv("DARLING_TRAP_LOG") != NULL);
+
     /* Alternate stack: prevents the handler from clobbering the Mach-O stack */
     stack_t altss = {
         .ss_sp    = _sigsys_altstack,
