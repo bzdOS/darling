@@ -261,12 +261,13 @@ _clines = csrc.split("\n")
 for _i, _ln in enumerate(_clines):
     if _ln.startswith("#include"):
         _clines.insert(_i + 1, "void wlb_log(const char *fmt, ...);")
+        _clines.insert(_i + 2, "#include <sys/thr.h>")
         break
 else:
     print("FATAL: no #include line in connection.c")
     sys.exit(1)
 csrc = "\n".join(_clines)
-print("ok(c): wlb_log declaration")
+print("ok(c): wlb_log declaration + thr.h")
 
 # c1) the flush site — bytes to the compositor
 sub_once_c("\t\t} while (len == -1 && errno == EINTR);\n"
@@ -281,6 +282,18 @@ sub_once_c("\t\t} while (len == -1 && errno == EINTR);\n"
            "\t\tif (len == -1)\n"
            "\t\t\treturn -1;\n",
            "flush sendmsg")
+
+# c2) the read site — every read from the display fd, with tid: whose
+# dispatch consumed the bytes (the done-24 question of reply-delivery)
+sub_once_c("\t\tdo {\n"
+           "\t\t\tlen = wl_os_recvmsg_cloexec(connection->fd, &msg, MSG_DONTWAIT);\n"
+           "\t\t} while (len < 0 && errno == EINTR);\n",
+           "\t\tdo {\n"
+           "\t\t\tlen = wl_os_recvmsg_cloexec(connection->fd, &msg, MSG_DONTWAIT);\n"
+           "\t\t} while (len < 0 && errno == EINTR);\n"
+           "\t\twlb_log(\"read: fd=%d -> %ld tid=%lu\", connection->fd,\n"
+           "\t\t    (long)len, (unsigned long)thr_self());\n",
+           "read site")
 
 open(CPATH, "w").write(csrc)
 print("written:", CPATH)
