@@ -1,8 +1,8 @@
 diff --git a/src/wayland-client.c b/src/wayland-client.c
-index 50b3b4b..44e0eb2 100644
+index 50b3b4b..82c82cd 100644
 --- a/src/wayland-client.c
 +++ b/src/wayland-client.c
-@@ -27,6 +27,13 @@
+@@ -27,6 +27,17 @@
  #define _GNU_SOURCE
  
  #include <stdlib.h>
@@ -12,11 +12,15 @@ index 50b3b4b..44e0eb2 100644
 +static unsigned long wlbody_seq;
 +#define WLB(...) do { fprintf(stderr, "[wlbody] #%lu ", ++wlbody_seq); \
 +	fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
++/* wrap: entry markers that do NOT consume the #N sequence, so existing
++ * number-to-site mapping stays comparable across instrumentation rounds. */
++#define WLBW(...) do { fprintf(stderr, "[wlbody] wrap "); \
++	fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 +
  #include <stdint.h>
  #include <stddef.h>
  #include <stdio.h>
-@@ -1460,6 +1467,8 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
+@@ -1460,6 +1471,8 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
  	struct wl_display *display_wrapper;
  	struct wl_callback *callback;
  	int done, ret = 0;
@@ -25,7 +29,7 @@ index 50b3b4b..44e0eb2 100644
  
  	done = 0;
  
-@@ -1467,16 +1476,29 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
+@@ -1467,16 +1480,29 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
  	if (!display_wrapper)
  		return -1;
  
@@ -57,7 +61,16 @@ index 50b3b4b..44e0eb2 100644
  
  	if (ret == -1 && !done)
  		wl_callback_destroy(callback);
-@@ -1743,9 +1765,16 @@ read_events(struct wl_display *display)
+@@ -1505,6 +1531,8 @@ wl_display_roundtrip_queue(struct wl_display *display, struct wl_event_queue *qu
+ WL_EXPORT int
+ wl_display_roundtrip(struct wl_display *display)
+ {
++	WLBW("ENTER tid=%lu display=%p",
++	    (unsigned long)pthread_self(), (void *)display);
+ 	return wl_display_roundtrip_queue(display, &display->default_queue);
+ }
+ 
+@@ -1743,9 +1771,16 @@ read_events(struct wl_display *display)
  	int total, rem, size;
  	uint32_t serial;
  
@@ -74,7 +87,7 @@ index 50b3b4b..44e0eb2 100644
  		if (total == -1) {
  			if (errno == EAGAIN) {
  				/* we must wake up threads whenever
-@@ -1779,6 +1808,7 @@ read_events(struct wl_display *display)
+@@ -1779,6 +1814,7 @@ read_events(struct wl_display *display)
  		display_wakeup_threads(display);
  	} else {
  		serial = display->read_serial;
@@ -82,7 +95,7 @@ index 50b3b4b..44e0eb2 100644
  		while (display->read_serial == serial)
  			pthread_cond_wait(&display->reader_cond,
  					  &display->mutex);
-@@ -1850,7 +1880,10 @@ wl_display_read_events(struct wl_display *display)
+@@ -1850,7 +1886,10 @@ wl_display_read_events(struct wl_display *display)
  		return -1;
  	}
  
@@ -93,7 +106,7 @@ index 50b3b4b..44e0eb2 100644
  
  	pthread_mutex_unlock(&display->mutex);
  
-@@ -1983,6 +2016,8 @@ wl_display_prepare_read_queue(struct wl_display *display,
+@@ -1983,6 +2022,8 @@ wl_display_prepare_read_queue(struct wl_display *display,
  		ret = -1;
  	} else {
  		display->reader_count++;
@@ -102,7 +115,7 @@ index 50b3b4b..44e0eb2 100644
  		ret = 0;
  	}
  
-@@ -2055,7 +2090,10 @@ wl_display_poll(struct wl_display *display,
+@@ -2055,7 +2096,10 @@ wl_display_poll(struct wl_display *display,
  			timespec_sub_saturate(&result, &deadline, &now);
  			remaining_timeout = &result;
  		}
@@ -113,7 +126,7 @@ index 50b3b4b..44e0eb2 100644
  	} while (ret == -1 && errno == EINTR);
  
  	return ret;
-@@ -2141,7 +2179,10 @@ wl_display_dispatch_queue_timeout(struct wl_display *display,
+@@ -2141,7 +2185,10 @@ wl_display_dispatch_queue_timeout(struct wl_display *display,
  			break;
  		}
  
@@ -124,7 +137,7 @@ index 50b3b4b..44e0eb2 100644
  		if (ret == -1)
  			break;
  
-@@ -2212,7 +2253,10 @@ wl_display_dispatch_queue(struct wl_display *display,
+@@ -2212,7 +2259,10 @@ wl_display_dispatch_queue(struct wl_display *display,
  {
  	int ret;
  
