@@ -37,18 +37,23 @@ darlingserver (control). The probe's stdout runs on a pty
 (`$DARLING_SRC_DIR`/`$DARLING_OVERLAY`/`$DARLING_BUILD_DIR`); dump in
 `$DARLING_BUILD_DIR/wl-body-wchan.txt`.
 
-## Run matrix (×3, all reached the window)
+## Run matrix (×3)
 
-| run | T1 first sight (baseline) | T2/T3 window |
-|-----|---------------------------|--------------|
-| 1 | guest 92499 visible, `92499 101182 RN - mldr` | absent: ps empty, procstat ESRCH, kill -0 "No such process" |
-| 2 | guest visible, ps -H row present | absent, same shape |
-| 3 | guest visible, ps -H row present | absent, same shape |
+| run | T1 first sight (baseline) | window |
+|-----|---------------------------|--------|
+| 1 | guest 92499: `92499 101182 RN - mldr`, lstart non-empty, procstat `<running>`, kill -0 = EPERM (alive) | ps -H empty, procstat ESRCH, kill -0 = ESRCH |
+| 2 | guest 25217: `25217 101097 RN - mldr`, lstart non-empty, procstat kstack `...tty_wait...ttydev_write...sys_write`, kill -0 = EPERM | ps -H empty, procstat ESRCH, kill -0 = ESRCH |
+| 3 | guest 33354: resolution landed after it had already left ps — ps -H empty, but kill -0 = EPERM (kernel-resident) | — |
 
-In all three the resolved pid is ps-visible with its thread rows at
-first sight and absent from the ps/kvm view later in the run — while
-the probe's log continues through `[step 12]`. That is the
-process-scope door, not the stale-pid artifact of run 3.
+Across the runs the resolved pid is ps-visible with its thread rows at
+first sight (runs 1–2, validated by non-empty `lstart,comm`) and absent
+from the ps/kvm view later in the run — while the probe's log continues
+through `[step 12]`. Run 3's `kill -0 = EPERM` (kernel-resident while
+ps-empty) is the strongest form: the process is not simply gone. The
+kernel-existence probe is therefore mixed (`ps` empty always; `kill -0`
+ESRCH in runs 1–2, EPERM in run 3), so "left ps" is certain and
+"exited vs hidden" is not settled by these tools. This is the
+process-scope door, not the stale-pid artifact of the earlier run 3.
 
 ## Run 1 verbatim (the differential)
 
@@ -106,11 +111,22 @@ launchd-global), so kernel-wait's "main visible" cannot be assumed to
 be the parked lane's process; the parentage-resolved pid measured here
 is.
 
+## The earlier verdict is withdrawn / re-issued
+
+The commit before this one (`f0d018e94`) concluded the same shape —
+"ps -H empty, procstat -kk ESRCH" — but from a pid resolved by the
+`pgrep -f 'mldr-real/mldr'` route that this branch shows is blind to the
+fresh mldr: it matched a stale low pid (1474), not the target, so the
+conclusion was not evidence. This measurement re-issues the same
+conclusion on a parentage-resolved, lstart-validated pid: the shape
+holds, now on the right process.
+
 ## Verdict (one line, per the order)
 
 On a parentage-resolved, lstart-validated pid the parked lane's process
 yields **no** `ps -H` row at the park (no wchan, no host frame) — it
 leaves the kvm process view, while the pre-park baseline has its thread
-rows; the rtld-lock holder is **not named** (markers need the gate,
-which dies in the sigqueue storm before the window), and singularity is
-not proven from this chassis.
+rows (and in run 3 `kill -0` = EPERM shows it kernel-resident while
+ps-empty); the rtld-lock holder is **not named** (markers need the
+gate, which dies in the sigqueue storm before the window), and
+singularity is not proven from this chassis.
