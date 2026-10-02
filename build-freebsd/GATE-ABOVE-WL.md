@@ -88,6 +88,36 @@ included), so syscall-level naming must come from dtrace (kernel probes,
 no ptrace). This negative is measured, not assumed: same command, same
 environment, only `truss -f` added.
 
+## Dtrace: usable, but the dlsym probe is too hot to reach the window
+
+`dtrace` runs on this kernel (`fbt` matches 45835 probes) and needs no
+ptrace, so it was the replacement for truss. The script compiles and the
+traced run starts, but any probe on `dlsym` entry (with `stack()`) slows
+the process to a crawl: the guest dyld resolves its binds through the same
+bridge constantly from startup, so the probe fires thousands of times
+before the probe program reaches step 01, and the run dies on its timeout
+with zero variants exercised (measured: three script revisions, `dlsym`
+entry probe matched, 0 hits in the output while the run output never
+printed a step line). Naming the primitive inside the host `dlsym` needs
+TIME-GATED probes — enable the `dlsym` probes only inside the variant-(a)
+window (a `tick`-scheduled enable/disable, or `lockstat` on the display's
+object) — that is the next instrumentation design, not a re-run of this
+one.
+
+## Verdict
+
+The gate of variant (a) is named by measurement: **the vendored dylib's
+`__lazy` resolver — a fresh `elfcalls->dlsym_fatal` (host `dlsym`) call on
+every `wl_display_roundtrip` invocation, executed on the DARLING-created
+guest thread.** Everything above it (the probe's indirect call through its
+own dlsym pointer) is instrument-free and fast; everything below it (the
+native wrapper) never executes on the parked lane. The park is
+session-state-dependent (variant (d) completes the same chain on a fresh
+display) and the blocked primitive inside the host `dlsym` (rtld object
+lock / dlerror TLS / libthr bookkeeping for a host-foreign thread) is the
+one remaining unknown, with the time-gated dtrace named as the tool to
+close it.
+
 ## Differential note
 
 The probe-side differential (call the native pointer directly, bypassing
