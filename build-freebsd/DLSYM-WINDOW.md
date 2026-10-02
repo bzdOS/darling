@@ -90,4 +90,43 @@ window of a markers-on run — the pid resolved at the harness's
 `Running:` line (the recipe from the word-at-park slice) — which names
 the kernel-side wait state of the parked lane directly.
 
+## Follow-up reading 3: the vanishing REPRODUCES — and the kernel code
+names the only three ESRCH doors
+
+The kernel-watch run (tight pid resolution at the harness's
+`Running:` line, procstat at the park) reproduces the old vanishing
+cleanly with markers on: at the first `DID-NOT-RETURN` the process is
+**alive per ps** (mldr, ppid = the timeout, with its darlingserver
+child) yet `procstat -kk` returns `sysctl(kern.proc): No such
+process` twice, 2 s apart — and no `rtld_exit`/`lm_fini` appears
+anywhere before the park (the only teardown markers in the log are
+the harness `sh` children at staging time).
+
+The kernel source (`/usr/src/sys/kern/kern_proc.c`) pins the doors:
+`sysctl_kern_proc` looks the target up with `pget(name[0],
+PGET_CANSEE, &p)` (:1762), and `pget` (:511-575) returns ESRCH in
+exactly three cases:
+
+1. `pfind_any(pid) == NULL` — the pid is not in the pidhash;
+2. `PGET_NOTWEXIT && (p->p_flag & P_WEXIT)` — the process is in exit;
+3. `PGET_NOTINEXEC && (p->p_flag & P_INEXEC)` — the process is
+   mid-fork/exec.
+
+Measured elimination: (1) is impossible for a process ps lists with a
+live child; (2) has NO caller in evidence — the elfcalls exit slot
+never fires before the park (zero `elf-exit CALL` markers), mldr's
+own `exit()` sites are startup-time loader errors only (loader.c,
+commpage.c), and the trap's guest exit maps to raw `_exit` (no
+P_WEXIT); (3) would mean a process stuck mid-fork/exec — the ps truth
+shows a stable tree with no fork churn at the park. The vanishing
+remains unexplained by any reachable exit/fork path and narrows to a
+sysctl-walk/thread-state interaction — the parked process's state
+breaks the kern.proc snapshot for the caller while kvm still lists
+it.
+
+Next lever, well-defined: dtrace **fbt** on the kernel side (the
+provider works on this kernel — measured) tracing `pget`/
+`sysctl_kern_proc` during the park: the failing branch and its input
+state get named live — no ptrace, no guest contact.
+
 
