@@ -218,10 +218,26 @@ static void dump_bind_lock(const char *tag)
 	FILE *f = fopen("/proc/self/maps", "r");
 	char line[512];
 	void *base = NULL;
+	int realpid = 0;
+	FILE *pf;
 
 	if (f == NULL) {
-		note("[bindlock] %s maps-unreadable errno=%d", tag, errno);
-		return;
+		/* /proc/self is not reachable from the guest view; the watcher
+		 * resolves the real mldr pid at run start and leaves it in
+		 * /tmp/park-realpid — read that, then /proc/<pid>/maps. */
+		pf = fopen("/tmp/park-realpid", "r");
+		if (pf != NULL) {
+			if (fscanf(pf, "%d", &realpid) == 1 && realpid > 0) {
+				char p[64];
+				snprintf(p, sizeof(p), "/proc/%d/maps", realpid);
+				f = fopen(p, "r");
+			}
+			fclose(pf);
+		}
+		if (f == NULL) {
+			note("[bindlock] %s maps-unreadable errno=%d", tag, errno);
+			return;
+		}
 	}
 	while (fgets(line, sizeof(line), f) != NULL) {
 		unsigned long start, end, off;
