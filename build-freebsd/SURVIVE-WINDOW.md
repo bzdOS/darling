@@ -84,3 +84,34 @@ trades death for livelock. The real lever is upstream: find who
 stop the source; the dlsym/exit-caller window measurements stay
 deferred until then.
 
+## Follow-up reading: the trap's kill translation names the signal chain
+
+A source sweep after the storm verdict found the untranslated pass in
+the trap's Linux-syscall dispatch:
+
+```c
+case LINUX_SYS_kill:
+    return freebsd_raw_syscall(SYS_kill, a1, a2, 0, 0, 0, 0);
+```
+
+(`freebsd_syscall_trap.c:2354`) — the LINUX signal number in `a2` goes
+to the host `kill(2)` as-is. The comment block of the very next case
+(`rt_sigaction`) documents this exact bug class: "signal numbers diverge
+above 15". Consequence for the storm chain: a guest sending what IT
+calls SIGUSR1 (Linux number 10) through this path is delivered by the
+host as FreeBSD signal 10 — **SIGBUS**. So the naming chain resolves:
+the guest's intent was SIGUSR1 (the authorization's name was the
+guest's truth), the host-side delivery name is SIGBUS, and the
+"FATAL signal 10" prints were that translation all along.
+
+What the pass does NOT explain: the measured `si_code=3` (SI_QUEUE) —
+the trap's `kill` path delivers SI_USER (code 0), so the queued copy
+still comes from a kernel-side sigqueue (si_pid=0) whose source remains
+unnamed. The untranslated kill is a real, named defect on the same
+signal path and belongs in the fix set for the slice that stops the
+queue.
+
+Sweep negatives (recorded): no `sigqueue`/`pthread_kill`/`EVFILT_SIGNAL`
+anywhere in mldr's own sources — mldr never queues signals itself.
+
+
