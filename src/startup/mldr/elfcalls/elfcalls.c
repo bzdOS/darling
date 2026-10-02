@@ -6,13 +6,22 @@
 #include <semaphore.h>
 #include <locale.h>
 #include <unistd.h>
+#include <execinfo.h> /* backtrace — exit-caller logging slice */
 #include "elfcalls.h"
 #include "threads.h"
+#include "trap_log.h"
 #include <sys/un.h>
 #include <sys/socket.h>
 #include <fcntl.h>
 
 #include <darlingserver/rpc.h>
+
+/* exit-caller logging slice: gate checked in normal context (these wrappers
+ * never run inside a signal handler), getenv per call is fine there. */
+static int mldr_trap_log_enabled_elf(void)
+{
+	return getenv("DARLING_TRAP_LOG") != NULL;
+}
 
 static void* dlopen_simple(const char* name)
 {
@@ -32,13 +41,44 @@ static void* dlopen_fatal(const char* name)
 
 static void* dlsym_fatal(void* handle, const char* sym)
 {
-	void* addr = dlsym(handle, sym);
+	void* addr;
+
+	/* exit-caller logging slice: the prime suspect for the (a) park —
+	 * a failed dlsym on a guest-created thread must show entry, result
+	 * and tid before the fatal path runs. */
+	if (mldr_trap_log_enabled_elf())
+		mldr_tlogx("elf-dlsym ENTER", (const void*)sym,
+			   (long)(uintptr_t)handle);
+
+	addr = dlsym(handle, sym);
+
+	if (mldr_trap_log_enabled_elf())
+		mldr_tlogx("elf-dlsym RETURN", addr, addr == NULL);
+
 	if (!addr)
 	{
 		fprintf(stderr, "Failed to lookup symbol %s (ELF): %s\n", sym, dlerror());
 		abort();
 	}
 	return addr;
+}
+
+/* exit-caller logging slice: every guest-reachable host exit(3) passes
+ * through this wrapper — the caller of record for the P_WEXIT evidence
+ * (TRAP-WEDGE-READ.md). backtrace/backtrace_symbols_fd run in normal
+ * context here; the marker itself stays write(2)-only. */
+static void elfcalls_exit(int ec)
+{
+	if (mldr_trap_log_enabled_elf()) {
+		void *bt[8];
+		int n;
+
+		mldr_tlog("elf-exit CALL", ec, 0);
+		n = backtrace(bt, 8);
+		if (n > 0)
+			backtrace_symbols_fd(bt, n > 4 ? 4 : n, 2);
+	}
+	exit(ec);
 }
 
 static int dlclose_fatal(void* handle)
@@ -100,7 +140,7 @@ void elfcalls_make(struct elf_calls* calls)
 	calls->darling_thread_get_stack = __darling_thread_get_stack;
 
 	calls->get_errno = get_errno;
-	calls->exit = exit;
+	calls->exit = elfcalls_exit;
 
 	calls->malloc = malloc;
 	calls->free = free;
