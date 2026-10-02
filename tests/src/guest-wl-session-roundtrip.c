@@ -579,8 +579,12 @@ int main(void)
 	/* ---- variant (a): main at rest, spawned lane runs the opaque
 	 * roundtrip — №9-4's call shape without main touching the queue ---- */
 	step("variant (a): main at rest, spawned lane runs wl_display_roundtrip");
-	/* kernel-esrch gate: a harmless revoke(2) of a nonexistent path
-	 * arms the host-side dtrace window for exactly this variant. */
+	/* kernel-esrch gate — measured semantics (KERNEL-ESRCH.md,
+	 * Method notes): the Linux revoke(2) trap translation returns
+	 * WITHOUT issuing the host call, so this revoke cannot arm the
+	 * dtrace window. The revoke() call is the window's POINT MARKER:
+	 * it marks the variant (a) site; the host-side observer raises
+	 * the dtrace window off the step marker written just above. */
 	revoke("/tmp/kernel-esrch-gate");
 	dump_bind_lock("pre-a");
 	{
