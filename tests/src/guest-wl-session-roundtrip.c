@@ -270,6 +270,10 @@ static void dump_bind_lock(const char *tag)
 #define ST_DISPATCH 3
 #define ST_DONE     4
 #define LANE_BOUND_MS 8000
+/* roundtrip-return lane: runtime override — WL_LANE_BOUND_MS=120000
+ * makes the (a)/(d) waits bound-free-ish, to separate a real park from
+ * the 8s bound burning under trace load. */
+static long lane_bound_ms = LANE_BOUND_MS;
 
 struct decomp_lane {
 	void *wl;
@@ -323,7 +327,7 @@ static void *decomp_body(void *p)
 	pfd.fd = L->fd;
 	pfd.events = POLLIN;
 	pfd.revents = 0;
-	L->s[ST_POLL].rc = poll(&pfd, 1, LANE_BOUND_MS);
+	L->s[ST_POLL].rc = poll(&pfd, 1, lane_bound_ms);
 	L->s[ST_POLL].err = errno;
 	L->s[ST_POLL].ms = now_ms() - t0;
 
@@ -393,6 +397,13 @@ int main(void)
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
+
+	/* roundtrip-return lane: bound override from the environment */
+	{
+		const char *b = getenv("WL_LANE_BOUND_MS");
+		if (b != NULL && b[0] != '\0')
+			lane_bound_ms = atol(b);
+	}
 
 	step("start: pid=%d uid=%d", (int)getpid(), (int)getuid());
 	note("WAYLAND_DISPLAY=%s", getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(unset)");
@@ -558,7 +569,7 @@ int main(void)
 		     decomp_main_rc < 0 ? strerror(errno) : "0",
 		     decomp_main_err, now_ms() - t0);
 
-		completed = wait_flag(&g_dc.returned, LANE_BOUND_MS) && g_dc.done;
+		completed = wait_flag(&g_dc.returned, lane_bound_ms) && g_dc.done;
 		print_decomp("lane", &g_dc, completed);
 		sem_destroy(&done);
 		dump_bind_lock("post-b");
@@ -588,7 +599,7 @@ int main(void)
 		pthread_detach(th);
 		note("lane started; main is NOT touching the display");
 		/* main sleeps out the bound — at rest, not dispatching */
-		answered = wait_flag((volatile int *)&rt_result, LANE_BOUND_MS) &&
+		answered = wait_flag((volatile int *)&rt_result, lane_bound_ms) &&
 		           rt_result != -12345;
 		a_spawn_answered = answered;
 		if (answered)
@@ -597,7 +608,7 @@ int main(void)
 			     rt_errno ? strerror(rt_errno) : "0");
 		else {
 			note("lane: DID-NOT-RETURN within %dms — parked inside"
-			     " wl_display_roundtrip", LANE_BOUND_MS);
+			     " wl_display_roundtrip", lane_bound_ms);
 			dump_bind_lock("a-parked");
 		}
 		sem_destroy(&done);
@@ -637,7 +648,7 @@ int main(void)
 				pthread_detach(th);
 				note("lane started on the FRESH display; main at rest");
 				d_fresh_answered =
-					(wait_flag((volatile int *)&rt_result, LANE_BOUND_MS) &&
+					(wait_flag((volatile int *)&rt_result, lane_bound_ms) &&
 					 rt_result != -12345);
 				if (d_fresh_answered == 1)
 					note("lane: roundtrip returned %d (errno %s)",
@@ -645,7 +656,7 @@ int main(void)
 					     rt_errno ? strerror(rt_errno) : "0");
 				else
 					note("lane: DID-NOT-RETURN within %dms — parked on a"
-					     " FRESH display too", LANE_BOUND_MS);
+					     " FRESH display too", lane_bound_ms);
 			}
 			/* a parked lane may still be inside libwayland on it:
 			 * deliberately not disconnected; the process exits anyway */

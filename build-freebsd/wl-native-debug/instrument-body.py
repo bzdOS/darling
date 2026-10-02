@@ -290,6 +290,19 @@ sub_once("\tclosure->proxy = proxy;\n"
          "\twl_list_insert(queue->event_list.prev, &closure->link);\n",
          "queue_event landing")
 
+# 15) roundtrip_queue tail — does the post-done tail run and return
+sub_once("\tif (ret == -1 && !done)\n"
+         "\t\twl_callback_destroy(callback);\n"
+         "\n"
+         "\treturn ret;\n",
+         "\tif (ret == -1 && !done)\n"
+         "\t\twl_callback_destroy(callback);\n"
+         "\n"
+         "\twlb_log(\"roundtrip_queue TAIL done=%d ret=%d pt=%lu\", done, ret,\n"
+         "\t    (unsigned long)pthread_self());\n"
+         "\treturn ret;\n",
+         "roundtrip_queue tail")
+
 open(PATH, "w").write(src)
 print("written:", PATH)
 
