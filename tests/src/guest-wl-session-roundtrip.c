@@ -579,6 +579,9 @@ int main(void)
 	/* ---- variant (a): main at rest, spawned lane runs the opaque
 	 * roundtrip — №9-4's call shape without main touching the queue ---- */
 	step("variant (a): main at rest, spawned lane runs wl_display_roundtrip");
+	/* kernel-esrch gate: a harmless revoke(2) of a nonexistent path
+	 * arms the host-side dtrace window for exactly this variant. */
+	revoke("/tmp/kernel-esrch-gate");
 	dump_bind_lock("pre-a");
 	{
 		pthread_t th;
