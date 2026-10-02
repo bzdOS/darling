@@ -303,6 +303,79 @@ sub_once("\tif (ret == -1 && !done)\n"
          "\treturn ret;\n",
          "roundtrip_queue tail")
 
+# 16) dispatch_event — the callback window: pre-invoke unlock and the
+# post-callback re-lock where the (a) lane is suspected to stand
+sub_once("\tpthread_mutex_unlock(&display->mutex);\n"
+         "\n"
+         "\tif (proxy->dispatcher) {\n",
+         "\tpthread_mutex_unlock(&display->mutex);\n"
+         "\twlb_log(\"dispatch_event pre-invoke unlock pt=%lu rc=%d\",\n"
+         "\t    (unsigned long)pthread_self(), display->reader_count);\n"
+         "\n"
+         "\tif (proxy->dispatcher) {\n",
+         "dispatch_event pre-invoke unlock")
+
+sub_once("\tpthread_mutex_lock(&display->mutex);\n"
+         "\n"
+         "\tdestroy_queued_closure(closure);\n",
+         "\twlb_log(\"dispatch_event post-callback re-lock pt=%lu rc=%d\",\n"
+         "\t    (unsigned long)pthread_self(), display->reader_count);\n"
+         "\tpthread_mutex_lock(&display->mutex);\n"
+         "\twlb_log(\"dispatch_event re-lock ACQUIRED pt=%lu\",\n"
+         "\t    (unsigned long)pthread_self());\n"
+         "\n"
+         "\tdestroy_queued_closure(closure);\n",
+         "dispatch_event callback re-lock")
+
+# 17) static dispatch_queue tail
+sub_once("\twhile (!wl_list_empty(&queue->event_list)) {\n"
+         "\t\tdispatch_event(display, queue);\n"
+         "\t\tif (display->last_error)\n"
+         "\t\t\tgoto err;\n"
+         "\t\tcount++;\n"
+         "\t}\n"
+         "\n"
+         "\treturn count;\n",
+         "\twhile (!wl_list_empty(&queue->event_list)) {\n"
+         "\t\tdispatch_event(display, queue);\n"
+         "\t\tif (display->last_error)\n"
+         "\t\t\tgoto err;\n"
+         "\t\tcount++;\n"
+         "\t}\n"
+         "\n"
+         "\twlb_log(\"dispatch_queue TAIL count=%d err=%d pt=%lu\", count,\n"
+         "\t    display->last_error, (unsigned long)pthread_self());\n"
+         "\treturn count;\n",
+         "dispatch_queue tail")
+
+# 18) dispatch_queue_pending unlock — the state at the exit unlock
+sub_once("\tret = dispatch_queue(display, queue);\n"
+         "\n"
+         "\tpthread_mutex_unlock(&display->mutex);\n"
+         "\n"
+         "\treturn ret;\n",
+         "\tret = dispatch_queue(display, queue);\n"
+         "\n"
+         "\twlb_log(\"dispatch-pending unlock rc=%d reader_count=%d pt=%lu\",\n"
+         "\t    ret, display->reader_count, (unsigned long)pthread_self());\n"
+         "\tpthread_mutex_unlock(&display->mutex);\n"
+         "\n"
+         "\treturn ret;\n",
+         "dispatch-pending unlock")
+
+# 19) cancel_read unlock — the other exit door
+sub_once("\tcancel_read(display);\n"
+         "\n"
+         "\tpthread_mutex_unlock(&display->mutex);\n"
+         "}\n",
+         "\tcancel_read(display);\n"
+         "\n"
+         "\twlb_log(\"cancel_read unlock reader_count=%d pt=%lu\",\n"
+         "\t    display->reader_count, (unsigned long)pthread_self());\n"
+         "\tpthread_mutex_unlock(&display->mutex);\n"
+         "}\n",
+         "cancel_read unlock")
+
 open(PATH, "w").write(src)
 print("written:", PATH)
 
