@@ -206,6 +206,48 @@ static int resolve_c_surface(void)
 	return 0;
 }
 
+/* ---- bind-lock word reader: at any probe moment, print the state of the
+ * rtld bind lock that host dlsym takes (do_dlsym -> rlock_acquire on
+ * rtld_bind_lock). The lock pointer variable sits in ld-elf's BSS at link
+ * offset 0x1fe20 on this host build; the lock word is the uint32 at the
+ * object it points to (def_lock_acquire: write-lock = cmpxchg to 1,
+ * read-lock = add 2). Reading is plain loads in the shared address space;
+ * /proc/self/maps is how the base is found. ---- */
+static void dump_bind_lock(const char *tag)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	char line[512];
+	void *base = NULL;
+
+	if (f == NULL) {
+		note("[bindlock] %s maps-unreadable errno=%d", tag, errno);
+		return;
+	}
+	while (fgets(line, sizeof(line), f) != NULL) {
+		unsigned long start, end, off;
+		if (sscanf(line, "%lx-%lx %*4s %lx %*s %*s",
+			   &start, &end, &off) != 3)
+			continue;
+		if (strstr(line, "ld-elf.so.1") != NULL && off == 0) {
+			base = (void *)start;
+			break;
+		}
+	}
+	fclose(f);
+	if (base == NULL) {
+		note("[bindlock] %s ld-elf-base-not-found", tag);
+		return;
+	}
+	{
+		void **slot = (void **)((char *)base + 0x1fe20);
+		void *lockobj = *slot;
+		unsigned int word = lockobj ? *(unsigned int *)lockobj : 0;
+		note("[bindlock] %s base=%p slot=%p lockobj=%p word=0x%x",
+		     tag, base, (void *)slot, lockobj, word);
+	}
+}
+
+
 /* ---- the decomposed lane (variant b), file-scope state ---- */
 #define ST_FLUSH    1
 #define ST_POLL     2
@@ -465,7 +507,11 @@ int main(void)
 		}
 	}
 
-	/* ---- variant (b): main dispatches, spawned lane decomposes ---- */
+	/* ---- variant (b): main dispatches, spawned lane decomposes ----
+	 * Skipped entirely when WL_SKIP_B is set: run order A then makes
+	 * variant (a) the FIRST spawned lane of the session (the order
+	 * experiment for the bind-lock holder). */
+	if (getenv("WL_SKIP_B") == NULL) {
 	step("variant (b): main dispatches (roundtrip), spawned lane decomposes");
 	{
 		pthread_t th, tm;
@@ -499,11 +545,14 @@ int main(void)
 		completed = wait_flag(&g_dc.returned, LANE_BOUND_MS) && g_dc.done;
 		print_decomp("lane", &g_dc, completed);
 		sem_destroy(&done);
+		dump_bind_lock("post-b");
+		}
 	}
 
 	/* ---- variant (a): main at rest, spawned lane runs the opaque
 	 * roundtrip — №9-4's call shape without main touching the queue ---- */
 	step("variant (a): main at rest, spawned lane runs wl_display_roundtrip");
+	dump_bind_lock("pre-a");
 	{
 		pthread_t th;
 		struct rt_arg arg;
@@ -530,11 +579,14 @@ int main(void)
 			note("lane: roundtrip returned %d (errno %s) over the"
 			     " bound", rt_result,
 			     rt_errno ? strerror(rt_errno) : "0");
-		else
+		else {
 			note("lane: DID-NOT-RETURN within %dms — parked inside"
 			     " wl_display_roundtrip", LANE_BOUND_MS);
+			dump_bind_lock("a-parked");
+		}
 		sem_destroy(&done);
 	}
+	dump_bind_lock("post-a");
 
 	/* ---- variant (d): FRESH display + spawned opaque roundtrip — is the
 	 * park stateful-specific, or does the native roundtrip park on a
