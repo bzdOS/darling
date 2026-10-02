@@ -156,3 +156,57 @@ vchroot-relative `usr/lib/` of the staging tree; the absolute phase never
 does. Pinning the phase on (item 7's environment) is therefore the lever that
 makes a planted instrumented `libwayland-client.so.0` observable from the
 guest run.
+
+## Step 3: with the phase on, the instrumented copy opens — and the trail names the park
+
+One harness detail decides where a planted copy can live: `cleanup()`
+(launch-dynamic-smoke.c lines 468-473) removes the WHOLE local overlay cache
+at the start of every run, so a copy planted into the cache before a run is
+gone before the walk. The copy survives if it is planted either in the
+source overlay's `usr/lib` (the staging pass copies whole trees into the
+fresh cache) or outside the cache in the run's CWD.
+
+Run: the ON environment of pin 7, with the instrumented `libwayland` copy
+(marked at 13 anchors in the roundtrip body) present in both places. Result:
+the walk opens the planted copy through the relative component —
+`Trying "usr/lib/libwayland-client.so.0"` -> `Opened "usr/lib/libwayland
+-client.so.0", fd 8` — and the log carries 152 `[wlbody]` marker lines: the
+roundtrip body is observable for the first time.
+
+What the trail says, per variant:
+
+- variant (d), FRESH display, spawned lane, opaque `wl_display_roundtrip`:
+  the full body runs on the guest-spawned thread —
+  `roundtrip_queue ENTER` (#99) -> `sync` -> `dispatch_queue` ->
+  `prepare_read_queue` -> `ppoll` -> `wl_connection_read` (read returned 24
+  bytes) -> `dispatch-loop ... done=1` — and the call returns 2. The
+  primitives are alive on spawned threads; the body is not intrinsically
+  broken there.
+
+- variant (c), stateful session, spawned lane FIRST, main concurrently
+  roundtripping: the spawned lane ENTERS the body (#117) and parks at
+  **#123 `ppoll(fd=8, events=POLLIN, timeout=NULL)`** inside the native read
+  path (`prepare_read_queue -> ppoll -> wl_connection_read`), while main's
+  roundtrip on the same display/queue gets `ppoll LEAVE ret=1` (#141),
+  reads the 24-byte reply (#147-#148) and finishes (`done=1`, #152). The
+  reply is drained by the main lane; the spawned lane's infinite ppoll never
+  returns. The park link for the stateful session is therefore the read-path
+  poll on the guest-created thread with the reply consumed by the other
+  lane — the mutex/read/TLS candidates of the earlier journal narrow to this
+  one observable step.
+
+- variant (a), stateful session, main AT REST, spawned lane, opaque
+  roundtrip — the original repro: the parked lane emits **no markers at
+  all** (five distinct marker tids in the whole log, none of them the (a)
+  lane). The call never reaches `roundtrip_queue`'s first instrumented
+  line. With the current anchors the shallowest nameable site is the call
+  entry path BEFORE the native body — the guest-side export/lazy-bind chain
+  into libwayland, or the display mutex taken before the body's first
+  statement. Variant (d) proves the identical call completes on a fresh
+  display, so this entry-path park is state-dependent on the session.
+
+Next anchor to close (a): a marker at `wl_display_roundtrip` itself (the
+one-line wrapper) and at the shim's export entry; if (a) still emits
+nothing, the park is in the guest-side bind/TLS machinery upstream of
+libwayland, and the shim's entry is the site to instrument.
+
