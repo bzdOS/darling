@@ -52,3 +52,45 @@ root; a stage-level padding of the guest's `/Frameworks/` to 9 entries
 does **not** fix the dlopen (still `image not found`), so the failure is
 deeper than the entry count — the framework's `Versions/…`/path resolve
 on the June dyld.
+
+## Control #3 — per-link padding and the guest file read
+
+### Per-link measurements (real entries)
+
+```
+Frameworks/Google Chrome for Testing Framework.framework            5  (<8)
+  .../Google Chrome for Testing Framework.framework/Versions        2  (<8)
+  .../Versions/154.0.8029.0                                         4  (<8)
+```
+
+All three links are below the `getdirentries64` threshold, so every one of
+them is unreadable to the guest by the wall.
+
+### Guest file read
+
+A space-free symlink to the Mach-O was placed in the guest's staging root
+(`/FWbin -> …/Versions/154.0.8029.0/Google Chrome for Testing Framework`).
+A guest `hexdump -C -n 8 /FWbin` returns `No such file or directory` (then
+`Bad file descriptor`) — the guest cannot open the 267 MB file at all, so
+the failure is not "dyld refuses to map a readable file": the path is not
+resolvable/readable to the guest.
+
+### Per-link padding + probe
+
+The **source** framework's three links were padded to 14/11/13 entries
+(so the harness staging copies the padding), and the chrome probe re-run
+with `DARLING_SMOKE_REFRESH=1`. The staged links are 14/11/13 — and the
+failure is **identical**:
+
+```
+[dyld-trace] done. count=41
+dlopen //../Frameworks/…/Google Chrome for Testing Framework: … image not found.
+```
+
+### Verdict (control #3, one line)
+
+dlopen failure = the framework path (5/2/4 real entries, all `<8`) and the
+guest cannot even read the Mach-O (`hexdump /FWbin` → ENOENT);
+per-link padding (staged 14/11/13) does **not** fix it (still `image not
+found`), probe stays at 41 images — **the wall is not in the listing: the
+guest cannot resolve/read a visible file** — stop.
