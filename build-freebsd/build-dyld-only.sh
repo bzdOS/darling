@@ -16,7 +16,16 @@ BD=${DARLING_BUILD_DIR:-/tmp/darling-build}
 SRC=${DARLING_SRC_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
 SALV="${SRC}/build-freebsd/dyld-salvage/src/external/dyld"
 DST="${SRC}/src/external/dyld"
+# Reuse the existing configured cache: a fresh top-level configure stops
+# in src/external/darling-dmg on a missing `fuse` pkg-config module.
 BUILDDIR="${BD}/dyld-only"
+
+# Diagnostic rebuild: tolerate the glue.c fallbacks duplicating the static
+# libs. The dyld CMakeLists overwrites CMAKE_EXE_LINKER_FLAGS with
+# "${CMAKE_EXE_LINKER_FLAGS_SAVED} -nostdlib", so the flag must be seeded
+# into _SAVED to survive. The first definition in the link line (glue.c.o)
+# wins; acceptable for a diagnostic dyld — the live overlay is not touched.
+MULDEFS="-Wl,--allow-multiple-definition"
 
 echo "== applying salvage files to ${DST}"
 cp -p "${SALV}/src/dyld2.cpp"            "${DST}/src/dyld2.cpp"
@@ -26,7 +35,10 @@ cp -p "${SALV}/darling/src/sandbox-dummy.c" "${DST}/darling/src/sandbox-dummy.c"
 cp -p "${SALV}/CMakeLists.txt"           "${DST}/CMakeLists.txt"
 
 echo "== cmake configure"
-cmake -G Ninja -B "${BUILDDIR}" "${DST}" || exit 2
+cmake -G Ninja -B "${BUILDDIR}" \
+	-DCMAKE_EXE_LINKER_FLAGS="${MULDEFS}" \
+	-DCMAKE_EXE_LINKER_FLAGS_SAVED="${MULDEFS}" \
+	"${SRC}" || exit 2
 
 echo "== ninja system_loader"
 ninja -C "${BUILDDIR}" system_loader || exit 3
