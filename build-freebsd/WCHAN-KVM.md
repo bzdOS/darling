@@ -1,94 +1,116 @@
-# wchan-kvm: what the kernel shows for the parked lane — the ESRCH door,
-# reproduced in the window with an observer control
+# wchan-kvm: the kernel view of the parked lane's process, on a
+# correctly-resolved pid
 
-Order: kvm snapshots of the parked (a)-lane's threads (ps -H + procstat),
-×3 distribution, an observer-side control, and a one-line verdict of what
-the lane stands on at kernel level.
+Order: kvm snapshots of the parked variant-(a) lane's process — ps -H
+thread rows with wchan, per-pid procstat -kk, and a kernel-existence
+check — taken at a pid resolved by parentage (no target argv pattern),
+×3 distribution, with a pre-park baseline.
+
+## Pid resolution (no target argv patterns)
+
+The fresh mldr that runs the probe is the **parent** of the fresh
+darlingserver: `launch-dynamic` exec's mldr, mldr forks the
+darlingserver as its child and runs the target in-process. So:
+
+1. fresh darlingserver = the highest-pid `darlingserver
+   /tmp/darling-dynamic-smoke` process by `ps args`;
+2. its **parent** (`ppid`) = the fresh mldr;
+3. cross-checked against the target's own `start: pid=N` line — they
+   match;
+4. validation at snapshot time: `ps -p PID -o lstart,comm` must be
+   non-empty.
+
+A ppid-walk from the darlingserver to its *children* resolves the
+launchd-global, which defuncts early — not the target. The old
+`pgrep -f 'mldr-real/mldr'` route is blind to the fresh mldr (vchroot
+rewrites the target's argv) and matched a stale low pid (1474) in the
+earlier run 3; it is not used here.
 
 ## Reproduction command (acceptance artifact)
 
-The watcher: `build-freebsd/wchan-watch.sh` (committed). It starts the
-probe (gate OFF — the run must reach the window), resolves the mldr pid,
-and on the `[step 09] ... DID-NOT-RETURN` marker takes timestamped
-snapshots: `ps -H -axo pid,tid,state,wchan,comm` for the parked process,
-`procstat -kk <pid>` (per-pid), the same dumps on the darlingserver child
-of the same session (control), and `procstat -a -kk` rows for the pid.
+`sh build-freebsd/wchan-watch.sh` — the watcher starts the probe (gate
+OFF), resolves the fresh mldr by parentage, and snapshots:
+`ps -H -axo pid,tid,state,wchan,comm` for the guest, `procstat -kk
+<pid>`, `kill -0 <pid>` (kernel existence), and the same for the
+darlingserver (control). The probe's stdout runs on a pty
+(`ptyrun.py`) so the step markers are real-time. Env-derived roots
+(`$DARLING_SRC_DIR`/`$DARLING_OVERLAY`/`$DARLING_BUILD_DIR`); dump in
+`$DARLING_BUILD_DIR/wl-body-wchan.txt`.
 
-Run: `sh build-freebsd/wchan-watch.sh` (env-derived roots: the script
-reads `DARLING_SRC_DIR`/`DARLING_OVERLAY`/`DARLING_BUILD_DIR` from the
-environment, defaults relative to the tree) — output log
-`$DARLING_BUILD_DIR/wl-body-wchan.txt` (per-run snapshot) and
-`wl-body-wchan-watch.log` (the probe log with the park marker).
+## Run matrix (×3, all reached the window)
 
-## Run matrix (5 runs, honest)
+| run | T1 first sight (baseline) | T2/T3 window |
+|-----|---------------------------|--------------|
+| 1 | guest 92499 visible, `92499 101182 RN - mldr` | absent: ps empty, procstat ESRCH, kill -0 "No such process" |
+| 2 | guest visible, ps -H row present | absent, same shape |
+| 3 | guest visible, ps -H row present | absent, same shape |
 
-| run | outcome |
-|-----|---------|
-| 1 | no snapshot — watcher stuck in a nested `ps` spin (fixed: flat loop) |
-| 2 | no snapshot — pid never resolved (fixed: `pgrep`, then log-pid, then comm) |
-| 3 | **snapshot captured** (output below) |
-| 4 | snapshot fired against a stale low pid (1474) — see persistence note |
-| 5 | watcher loop exhausted early (sleep timing artifact) — run killed |
+In all three the resolved pid is ps-visible with its thread rows at
+first sight and absent from the ps/kvm view later in the run — while
+the probe's log continues through `[step 12]`. That is the
+process-scope door, not the stale-pid artifact of run 3.
 
-## Run 3 snapshot (verbatim)
+## Run 1 verbatim (the differential)
 
 ```
-=== park t0=16:44:14 pid=1474 ===
---- ps -H: all threads of the parked process ---
+=== T1 pre-park baseline (first sight) 19:44:45 guest=92499 logpid= logmark=[] ===
+--- validation ps -p guest -o lstart,comm (must be non-empty) ---
+  PID STARTED                  COMMAND
+92499 Fri Oct  2 19:44:45 2026 mldr
+--- ps -H rows for the guest (all its threads + wchan) ---
   PID    LWP STAT WCHAN    COMMAND
---- procstat -kk per-pid (ESRCH expected at the park) ---
+92499 101182 RN   -        mldr
+--- procstat -kk per-guest ---
+92499 101182 mldr   -   <running>
+--- kernel existence: kill -0 ---
+kill: 92499: Operation not permitted        (alive)
+--- control: darlingserver threads (pid 92553) ---
+92553 123143 SN+  select   darlingserver/darlingserver
+92553 231496 SN+  uwait    darlingserver/darlingserver
+92553 231497 SN+  uwait    darlingserver/darlingserver
+
+=== T2 in the window (guest left ps) 19:44:46 guest=92499 logpid=92499 logmark=[LANE FINDING] ===
+--- validation ps -p guest -o lstart,comm ---
+PID STARTED COMMAND                       (empty)
+--- ps -H rows for the guest ---
+  PID    LWP STAT WCHAN    COMMAND          (empty)
+--- procstat -kk per-guest ---
 procstat: sysctl(kern.proc): No such process
-procstat: procstat_getprocs()
---- control: darlingserver child of the same session ---
-darlingserver pid=99787
-  PID    LWP STAT WCHAN    COMMAND
-99787 102579 SN   select   darlingserver/darlingserver
-99787 206526 SN   uwait    darlingserver/darlingserver
-99787 206527 SN   uwait    darlingserver/darlingserver
-=== park t1=16:44:16 ===
-  PID    LWP STAT WCHAN    COMMAND
---- procstat -a -kk all-route rows for the parked pid ---
-SNAPSHOT DONE
+--- kernel existence: kill -0 ---
+kill: 92499: No such process
+
+=== T3 confirm (stable) 19:44:50 guest=92499 logmark=[LANE FINDING] ===
+(identical to T2)
 ```
 
-Reading: at the park, the parked process produces **no rows** from
-`ps -H` and **ESRCH** from `procstat -kk` — the thread-side door of
-kernel-esrch, reproduced live inside the window. The control on the
-same session's darlingserver works perfectly (SN state, wchan
-`select`/`uwait`) — so the emptiness is a property of the parked
-process, not of the observer.
+Reading: at first sight the guest is ps-visible with one thread row
+(wchan `-`) and `kill -0` returns EPERM (alive). Later in the same run
+the pid yields no `ps -H` rows, `procstat -kk` returns ESRCH, and
+`kill -0` returns ESRCH — the whole process has left the kernel's
+observable process view, while the probe log runs on to `[step 12]`.
+The control darlingserver shows normal waiters (`select`/`uwait`) at
+first sight.
 
-## The door is persistent, not transient
+## Cross-check with kernel-wait (accepted)
 
-The resolved pid at the park was 1474 — a low pid. The same pid was
-still resolving as a live `mldr-real/mldr` match at run 4 (16:49) and
-gone by ~16:52: a process living **at least five minutes** in the
-kern.proc-invisible state (procfs-visible to `pgrep -f`, invisible to
-`ps`/`procstat`), consistent with the ESRCH door being a stable parked
-state rather than a millisecond-wide race. (Its identity could not be
-recovered post-mortem: `ps`/`procstat` cannot see it while it lives,
-and it is gone now.)
-
-## Observer-side corollary (why early runs missed)
-
-Pattern-based pid resolution (`ps`/`pgrep -f` on the argv path) never
-caught the FRESH mldr: the vchroot layer rewrites argv paths, so the
-running process's cmdline does not contain the launcher's view of the
-path (`Running: .../dserver/mldr-real/mldr ...`). Comm-based or
-log-based pid sources are the reliable ones — the same path-rewrite
-that made `/proc/self/maps` ENOENT to the guest.
+kernel-wait (accepted earlier) resolved its pid by the argv pattern
+`mldr-real/mldr` and saw a **main-thread row present** (`wchan -`) with
+only the lane row absent — the *thread*-scope door of kernel-esrch.
+This measurement, on a pid resolved by **parentage** and validated,
+finds the *whole process* absent from `ps -H` — the process-scope door.
+The two are different scopes: kernel-esrch = the process is findable,
+its thread enumeration is not; here the process itself is not in the
+kvm listing. The argv route can land on the wrong mldr (the accepted
+topology note: it is ambiguous between the target and the
+launchd-global), so kernel-wait's "main visible" cannot be assumed to
+be the parked lane's process; the parentage-resolved pid measured here
+is.
 
 ## Verdict (one line, per the order)
 
-На уровне ядра (a)-лейн в парке **не отдаётся**: ps -H пуст,
-procstat -kk = ESRCH (дверь на стороне нити, та же, что названа в
-kernel-esrch) — wchan и верхний host-кадр для самого лейна из этого
-шасси недоступны; наблюдатель-контроль (darlingserver той же сессии)
-показывает нормальные wchan (select/uwait), т.е. пустота — свойство
-парка, не наблюдателя.
-
-Держатель rtld-лока (tid + последний маркер) — не назван: маркеры
-требуют гейт, а гейт-прогон умирает штормом до окна (survive-window);
-одиночность из kvm-шасси тоже не доказуема, пока ядро не отдаёт ни
-одной нити процесса. Обе ножки вердикта ждут либо гейт без шторма
-(источник sigqueue(SIGBUS)), либо дверь ESRCH снята.
+On a parentage-resolved, lstart-validated pid the parked lane's process
+yields **no** `ps -H` row at the park (no wchan, no host frame) — it
+leaves the kvm process view, while the pre-park baseline has its thread
+rows; the rtld-lock holder is **not named** (markers need the gate,
+which dies in the sigqueue storm before the window), and singularity is
+not proven from this chassis.
