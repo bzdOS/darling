@@ -22,14 +22,85 @@ def sub_once(old, new, what):
 
 MACRO = (
     '\n/* wlbody: diagnostic stderr markers for the roundtrip park; no\n'
-    ' * behaviour change — see build/wl-debug-copy/README notes. */\n'
+    ' * behaviour change — see build/wl-debug-copy/README notes.\n'
+    ' * roundtrip-wakeup lane: the marker path is LOCALE-FREE — the fault\n'
+    ' * object measured in the survive-window slice was locale data read\n'
+    ' * inside libc vfprintf via localeconv_l, so the markers format with\n'
+    ' * a hand-rolled converter subset (%lu %ld %d %p %s %%) and emit with\n'
+    ' * write(2). No printf/snprintf/fprintf on the marker path. */\n'
+    '#include <stdarg.h>\n'
+    '#include <string.h>\n'
+    '#include <unistd.h>\n'
+    '#include <sys/ioctl.h>\n'
     'static unsigned long wlbody_seq;\n'
-    '#define WLB(...) do { fprintf(stderr, "[wlbody] #%lu ", ++wlbody_seq); \\\n'
-    '\tfprintf(stderr, __VA_ARGS__); fprintf(stderr, "\\n"); } while (0)\n'
+    'static void wlb_out(const char *s, int n) { if (n > 0) (void)!write(2, s, (size_t)n); }\n'
+    'static char *wlb_dec(char *end, long v) {\n'
+    '\tchar t[24]; int n = 0, i; unsigned long u; int neg = 0;\n'
+    '\tif (v < 0) { neg = 1; u = (unsigned long)(-(v + 1)) + 1; } else { u = (unsigned long)v; }\n'
+    '\tdo { t[n++] = (char)(\'0\' + (int)(u %% 10)); u /= 10; } while (u && n < 24);\n'
+    '\tfor (i = 0; i < n; i++) *--end = t[i];\n'
+    '\tif (neg) *--end = \'-\';\n'
+    '\treturn end;\n'
+    '}\n'
+    'static char *wlb_hex(char *end, unsigned long u) {\n'
+    '\tstatic const char d[] = "0123456789abcdef";\n'
+    '\tchar t[20]; int n = 0, i;\n'
+    '\tdo { t[n++] = d[u & 0xf]; u >>= 4; } while (u && n < 20);\n'
+    '\tfor (i = 0; i < n; i++) *--end = t[i];\n'
+    '\treturn end;\n'
+    '}\n'
+    '/* mini-formatter: the marker subset only — %lu %ld %d %p %s %% */\n'
+    'void wlb_log(const char *fmt, ...)\n'
+    '{\n'
+    '\tchar out[256]; char tail[64]; int o = 0;\n'
+    '\tva_list ap; const char *f = fmt;\n'
+    '\tva_start(ap, fmt);\n'
+    '\twhile (*f && o < 200) {\n'
+    '\t\tif (*f != \'%\') { out[o++] = *f++; continue; }\n'
+    '\t\tf++;\n'
+    '\t\tif (*f == \'%\') { out[o++] = \'%\'; f++; continue; }\n'
+    '\t\tif (*f == \'l\' && (f[1] == \'u\' || f[1] == \'d\')) {\n'
+    '\t\t\tunsigned long v = (unsigned long)va_arg(ap, unsigned long);\n'
+    '\t\t\tchar *q = wlb_dec(tail + sizeof(tail),\n'
+    '\t\t\t    (f[1] == \'d\') ? (long)v : (long)v);\n'
+    '\t\t\tint l = (int)((tail + sizeof(tail)) - q);\n'
+    '\t\t\tmemcpy(out + o, q, (size_t)l); o += l; f += 2; continue;\n'
+    '\t\t}\n'
+    '\t\tif (*f == \'d\') {\n'
+    '\t\t\tchar *q = wlb_dec(tail + sizeof(tail), (long)va_arg(ap, int));\n'
+    '\t\t\tint l = (int)((tail + sizeof(tail)) - q);\n'
+    '\t\t\tmemcpy(out + o, q, (size_t)l); o += l; f++; continue;\n'
+    '\t\t}\n'
+    '\t\tif (*f == \'p\') {\n'
+    '\t\t\tunsigned long v = (unsigned long)(uintptr_t)va_arg(ap, void *);\n'
+    '\t\t\tchar *q;\n'
+    '\t\t\tout[o++] = \'0\'; out[o++] = \'x\';\n'
+    '\t\t\tq = wlb_hex(tail + sizeof(tail), v);\n'
+    '\t\t\t{ int l = (int)((tail + sizeof(tail)) - q);\n'
+    '\t\t\t  memcpy(out + o, q, (size_t)l); o += l; }\n'
+    '\t\t\tf++; continue;\n'
+    '\t\t}\n'
+    '\t\tif (*f == \'s\') {\n'
+    '\t\t\tconst char *s = va_arg(ap, const char *);\n'
+    '\t\t\tint l = s ? (int)strlen(s) : 0;\n'
+    '\t\t\tif (l > 40) l = 40;\n'
+    '\t\t\tif (s) { memcpy(out + o, s, (size_t)l); o += l; }\n'
+    '\t\t\tf++; continue;\n'
+    '\t\t}\n'
+    '\t\tout[o++] = *f++;\n'
+    '\t}\n'
+    '\tva_end(ap);\n'
+    '\tout[o++] = \'\\n\';\n'
+    '\twlb_out(out, o);\n'
+    '}\n'
+    '#define WLB(...) do { char _p[32]; char *_e = _p + sizeof(_p); \\\n'
+    '\t_e = wlb_dec(_e, (long)++wlbody_seq); \\\n'
+    '\twlb_log("[wlbody] #%.*s ", (int)((_p + sizeof(_p)) - _e), _e); \\\n'
+    '\twlb_log(__VA_ARGS__); } while (0)\n'
     '/* wrap: entry markers that do NOT consume the #N sequence, so existing\n'
     ' * number-to-site mapping stays comparable across instrumentation rounds. */\n'
-    '#define WLBW(...) do { fprintf(stderr, "[wlbody] wrap "); \\\n'
-    '\tfprintf(stderr, __VA_ARGS__); fprintf(stderr, "\\n"); } while (0)\n'
+    '#define WLBW(...) do { wlb_log("[wlbody] wrap "); \\\n'
+    '\twlb_log(__VA_ARGS__); } while (0)\n'
 )
 
 # 0) macro + counter right after the FIRST include line
@@ -140,7 +211,12 @@ sub_once("\t\tdisplay->reader_count++;\n\t\tret = 0;\n",
 # 10) native ppoll site
 sub_once("\t\tret = ppoll(pfd, 1, remaining_timeout, NULL);\n",
          "\t\tWLB(\"    ppoll ENTER fd=%d events=%d timeout=%s\", pfd[0].fd,\n"
-         "\t\t    pfd[0].events, remaining_timeout ? \"set\" : \"NULL(infinite)\");\n"
+         "\t\t    pfd[0].events, remaining_timeout ? \"set\" : \"NULL\");\n"
+         "\t\t{\n"
+         "\t\t\tint _qn = -1;\n"
+         "\t\t\tif (ioctl(pfd[0].fd, FIONREAD, &_qn) < 0) _qn = -errno;\n"
+         "\t\t\tWLB(\"    fd-state fd=%d fionread=%d\", pfd[0].fd, _qn);\n"
+         "\t\t}\n"
          "\t\tret = ppoll(pfd, 1, remaining_timeout, NULL);\n"
          "\t\tWLB(\"    ppoll LEAVE ret=%d errno=%d\", ret, errno);\n",
          "ppoll site")
@@ -165,3 +241,48 @@ sub_once("\t\tret = wl_display_read_events(display);\n",
 
 open(PATH, "w").write(src)
 print("written:", PATH)
+
+# ── connection.c phase (roundtrip-wakeup lane): when do the request
+# bytes actually leave for the compositor — the client-side "post" of
+# the wakeup contract. wlb_log is global (defined above); connection.c
+# only needs the declaration.
+CPATH = "src/connection.c"
+csrc = open(CPATH).read()
+
+def sub_once_c(old, new, what):
+    global csrc
+    n = csrc.count(old)
+    if n != 1:
+        print(f"FATAL: anchor for {what}: count={n}")
+        sys.exit(1)
+    csrc = csrc.replace(old, new, 1)
+    print(f"ok(c): {what}")
+
+# c0) declaration after the first include
+_clines = csrc.split("\n")
+for _i, _ln in enumerate(_clines):
+    if _ln.startswith("#include"):
+        _clines.insert(_i + 1, "void wlb_log(const char *fmt, ...);")
+        break
+else:
+    print("FATAL: no #include line in connection.c")
+    sys.exit(1)
+csrc = "\n".join(_clines)
+print("ok(c): wlb_log declaration")
+
+# c1) the flush site — bytes to the compositor
+sub_once_c("\t\t} while (len == -1 && errno == EINTR);\n"
+           "\n"
+           "\t\tif (len == -1)\n"
+           "\t\t\treturn -1;\n",
+           "\t\t} while (len == -1 && errno == EINTR);\n"
+           "\n"
+           "\t\twlb_log(\"flush: sendmsg fd=%d -> %ld\",\n"
+           "\t\t    connection->fd, (long)len);\n"
+           "\n"
+           "\t\tif (len == -1)\n"
+           "\t\t\treturn -1;\n",
+           "flush sendmsg")
+
+open(CPATH, "w").write(csrc)
+print("written:", CPATH)
