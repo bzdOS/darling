@@ -1,7 +1,7 @@
 /*
  * trap_log.h — locale-free, async-signal-safe trap/bridge markers.
  *
- * Prepared for the traplog-nolocale lane (task bsdos-x86-29): the fault
+ * Prepared for the traplog-nolocale lane: the fault
  * object measured in SURVIVE-WINDOW.md is the thread's LOCALE data read
  * inside libc's vfprintf (vfprintf.c:463, decimal_point =
  * localeconv_l(locale)->decimal_point), so ANY stdio formatting on the
