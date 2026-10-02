@@ -3000,16 +3000,24 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
     ucontext_t *uctx = (ucontext_t *)uctx_void;
     mcontext_t *mc   = &uctx->uc_mcontext;
 
-    /* usr1-dismiss slice (authorized narrowly): SIGUSR1 with si_pid==0
-     * while DARLING_TRAP_LOG is on is a kernel-queued event's continuation,
-     * not a fault — log it (write(2), no FILE) and dismiss by returning.
-     * Everything else — real faults, other signals, si_pid!=0, gate off —
-     * is fatal exactly as before this branch existed. */
-    if (signo == SIGUSR1 && info != NULL && info->si_pid == 0 &&
-        mldr_trap_log_enabled) {
+    /* usr1-dismiss slice (authorized narrowly): a queued signal with
+     * si_pid==0 while DARLING_TRAP_LOG is on is a kernel-queued event's
+     * continuation, not a fault — log it (write(2), no FILE) and dismiss by
+     * returning. Everything else — real faults, si_pid!=0, gate off — is
+     * fatal exactly as before this branch existed.
+     *
+     * Signal-name correction from the measurements: "FATAL signal 10" is
+     * SIGBUS on FreeBSD (the trap file header says it: Linux SIGUSR1 is 10
+     * where FreeBSD has SIGBUS) — SIGUSR1 here is 30. The killing queued
+     * signal in the gated runs is signal 10 = SIGBUS, si_code=3, si_pid=0;
+     * the authorization text named it SIGUSR1 from the same mislabel. The
+     * branch covers both names so the authorized SIGUSR1 case (never
+     * observed) and the measured SIGBUS case are dismissed identically. */
+    if ((signo == SIGUSR1 || signo == SIGBUS) && info != NULL &&
+        info->si_pid == 0 && mldr_trap_log_enabled) {
         char b[160];
         int n2 = snprintf(b, sizeof(b),
-            "[traplog] USR1-DISMISS signo=%d code=%d pid=%d val=0x%lx\n",
+            "[traplog] QUEUED-SIGNAL-DISMISS signo=%d code=%d pid=%d val=0x%lx\n",
             signo, info->si_code, (int)info->si_pid,
             (unsigned long)info->si_value.sival_int);
         if (n2 > 0)

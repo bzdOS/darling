@@ -50,3 +50,37 @@ arrives in UNinstrumented runs and drives teardown (a candidate
 mechanism for the earlier P_WEXIT flip), the dismiss version may change
 the park itself — such a change is a result, to be reported as an
 observation.
+
+## Dismiss verification run: signal-name correction and the storm
+
+With the dismiss branch built in, the gated run (DARLING_TRAP_LOG=1,
+the previously dying configuration) shows:
+
+```
+[traplog] QUEUED-SIGNAL-DISMISS signo=10 code=3 pid=0 val=0x0
+```
+
+— the dismiss FIRES, the process survives the signal... and the log
+exploded to ~97 million lines in under seven minutes before the run was
+killed: **the queued signal is not a one-shot event — it re-queues
+continuously while the guest's event path runs.** Dismissing by return
+converts the fatal death into a livelock: the handler returns, the
+kernel delivers the next queued copy, the handler returns again — the
+process makes no progress toward the (a) window. Disk pressure from the
+marker flood forced the kill (the run log was removed).
+
+**Signal-name correction:** "FATAL signal 10" is **SIGBUS** on FreeBSD,
+not SIGUSR1 — the trap file's own header says it ("Linux SIGUSR1 is 10
+where FreeBSD has SIGBUS"); SIGUSR1 here is 30 and was never observed.
+The authorization text carried the same mislabel; the dismiss branch
+covers both names (SIGUSR1||SIGBUS, si_pid==0, gate on) so the letter
+of the authorization and the measured reality are handled identically.
+
+**Verdict update:** the queued-signal hazard is a CONTINUOUS queue, not
+a timing artifact. A trap-side dismiss cannot open the window — it
+trades death for livelock. The real lever is upstream: find who
+`sigqueue`s SIGBUS continuously in the guest's event path
+(libkqueue/libepoll-shim fault delivery is the standing candidate) and
+stop the source; the dlsym/exit-caller window measurements stay
+deferred until then.
+
