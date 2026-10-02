@@ -7,6 +7,9 @@
 #include <locale.h>
 #include <unistd.h>
 #include <execinfo.h> /* backtrace — exit-caller logging slice */
+#include <time.h>     /* clock_gettime — dlsym-window ticks */
+#include <sys/thr.h>  /* thr_self — dlsym-window lwpid */
+#include <pthread.h>  /* pthread_self — dlsym-window pt id */
 #include "elfcalls.h"
 #include "threads.h"
 #include "trap_log.h"
@@ -43,17 +46,36 @@ static void* dlsym_fatal(void* handle, const char* sym)
 {
 	void* addr;
 
-	/* exit-caller logging slice: the prime suspect for the (a) park —
-	 * a failed dlsym on a guest-created thread must show entry, result
-	 * and tid before the fatal path runs. */
-	if (mldr_trap_log_enabled_elf())
-		mldr_tlogx("elf-dlsym ENTER", (const void*)sym,
-			   (long)(uintptr_t)handle);
+	/* dlsym-window lane: ENTER/RETURN carry the symbol name, the
+	 * monotonic tick in ms and the host lwpid; a meta line adds the
+	 * pthread id and the handle — both id spaces, one run. */
+	if (mldr_trap_log_enabled_elf()) {
+		struct timespec _ts;
+		long _lwp = 0;
+
+		clock_gettime(CLOCK_MONOTONIC, &_ts);
+		thr_self(&_lwp);
+		mldr_tlogn("elf-dlsym ENTER", sym,
+		           (long)(_ts.tv_sec * 1000 + _ts.tv_nsec / 1000000),
+		           _lwp);
+		mldr_tlog("elf-dlsym-meta", (long)pthread_self(),
+		          (long)(uintptr_t)handle);
+	}
 
 	addr = dlsym(handle, sym);
 
-	if (mldr_trap_log_enabled_elf())
-		mldr_tlogx("elf-dlsym RETURN", addr, addr == NULL);
+	if (mldr_trap_log_enabled_elf()) {
+		struct timespec _ts;
+		long _lwp = 0;
+
+		clock_gettime(CLOCK_MONOTONIC, &_ts);
+		thr_self(&_lwp);
+		mldr_tlogn("elf-dlsym RETURN", sym,
+		           (long)(_ts.tv_sec * 1000 + _ts.tv_nsec / 1000000),
+		           _lwp);
+		mldr_tlog("elf-dlsym-addr", (long)(uintptr_t)addr,
+		          addr == NULL);
+	}
 
 	if (!addr)
 	{
