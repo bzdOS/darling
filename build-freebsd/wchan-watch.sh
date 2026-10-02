@@ -82,10 +82,12 @@ while [ "${n}" -lt 3000 ]; do
 	fi
 	if [ -n "${G}" ]; then
 		if [ "${base}" -eq 0 ]; then
-			# first sight of the guest: dump the baseline right away
-			snap "T1 pre-park baseline (first sight)" "${G}"
+			# first moment the guest is ps-visible: baseline, once
 			ST0=$(ps -p "${G}" -o stat= 2>/dev/null | tr -d ' ')
-			[ -n "${ST0}" ] && base=1
+			if [ -n "${ST0}" ]; then
+				snap "T1 pre-park baseline (first sight)" "${G}"
+				base=1
+			fi
 		fi
 		if [ "${base}" -eq 1 ] && [ "${win}" -eq 0 ]; then
 			ST=$(ps -p "${G}" -o stat= 2>/dev/null | tr -d ' ')
@@ -99,6 +101,10 @@ while [ "${n}" -lt 3000 ]; do
 				snap "T3 confirm (stable)" "${G}"; break
 			fi
 		fi
+	fi
+	if [ "${base}" -eq 0 ] && [ "${n}" -ge 400 ]; then
+		echo "gave up: no baseline captured (resolution landed after the guest left ps)" >> "${DUMP}"
+		break
 	fi
 	n=$((n + 1))
 	sleep 0.1
