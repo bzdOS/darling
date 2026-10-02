@@ -53,6 +53,8 @@ components tried before `search_library_pathfds`?
 | 5   | local overlay cache dumped before the run     | yes                     | NO                  |
 | 6   | local overlay cache rebuilt from scratch      | yes                     | NO                  |
 | 7   | `LD_LIBRARY_PATH=<dir with instrumented copy>`| yes                     | **YES**             |
+| 8   | `LD_LIBRARY_PATH=<empty dir, 19 chars>`       | yes                     | YES (first entry "orks") |
+| 9   | `LD_LIBRARY_PATH=<empty dir, 17 chars>`       | yes                     | YES (first entry "ks")   |
 
 pins 1-2 cannot reach the criterion at all: with a thin staging list the
 guest dies before the backend fonts load, so "no candidates" there is not
@@ -62,11 +64,33 @@ absolute-only walk.
 ## Condition
 
 **ON if and only if `LD_LIBRARY_PATH` is non-empty in mldr's environment at
-exec.** The value itself is not special-cased in the observed data (the one
-ON run used the instrumented-copy directory); `LD_DEBUG` does not form the
-phase, it only makes the walk visible in the log (the baseline control has
+exec.** The value itself is not special-cased: pins 8 and 9 used empty
+directories and the phase still formed. `LD_DEBUG` does not form the phase,
+it only makes the walk visible in the log (the baseline control has
 `LD_DEBUG` set and shows no phase). Staging-list value, element order, run
 CWD, and local-overlay cache state do not form it.
+
+## The first entry's strip is a function of LD_LIBRARY_PATH's length
+
+Pins 7-9 vary only `LD_LIBRARY_PATH`; the phase's first component is the
+first staging entry minus `40 - strlen(LD_LIBRARY_PATH)` bytes:
+
+| `LD_LIBRARY_PATH`                       | len | strip | first component tried          |
+|-----------------------------------------|-----|-------|--------------------------------|
+| `<dir with instrumented copy>` (32 ch)  | 32  | 8     | `ibrary/Frameworks`            |
+| `<empty dir>` (19 ch)                   | 19  | 21    | `orks`                         |
+| `<empty dir>` (17 ch)                   | 17  | 23    | `ks`                           |
+
+All three = `"System/Library/Frameworks"` with exactly that many leading
+bytes removed; the second and third components
+(`System/Library/PrivateFrameworks`, `usr/lib`) are never stripped. So the
+mangled shape seen in any given run is predicted by the length of that run's
+`LD_LIBRARY_PATH` — the producer reads the staging list out of a fixed
+40-byte window at offset `40 - strlen(LD_LIBRARY_PATH)`. A historical
+`F-8/...` component from an earlier slice is consistent with the same
+mechanism under a different environment length (that run's exact
+environment was not recorded; treat as unverified).
+
 
 Excerpt, ON run (`LD_LIBRARY_PATH` set):
 
