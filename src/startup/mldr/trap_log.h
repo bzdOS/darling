@@ -23,6 +23,12 @@
 /* 1 when DARLING_TRAP_LOG was set at trap setup; handler-safe to read. */
 extern int mldr_trap_log_enabled;
 
+/* survive-window slice: second gate for the HANDLER-side markers.
+ * 1 = handlers log (default when the main gate is on); 0 = set with
+ * DARLING_TRAP_LOG_HANDLERS=0 to silence only the in-handler writes
+ * while keeping the elfcalls-side markers. Handler-safe to read. */
+extern int mldr_trap_log_handlers;
+
 static inline void
 mldr_tlog(const char *tag, long a, long b)
 {
