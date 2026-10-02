@@ -187,4 +187,63 @@ mldr_tlogx(const char *tag, const void *pv, long b)
 		(void)!write(2, buf, (size_t)n);
 }
 
+/* "[traplog] <tag> str=<s> a=<dec> b=<dec>\n" — dlsym-window lane:
+ * the symbol name plus two long fields (ticks, ids) in one marker. */
+static inline int
+mldr_tlogn_build(char *buf, int cap, const char *tag, const char *s,
+                 long a, long b)
+{
+	char out[192];
+	char tail[64];
+	char *w;
+	int o = 0;
+	int tlen, slen;
+	long tid = 0;
+
+	thr_self(&tid);
+
+	tlen = (int)strlen(tag);
+	if (tlen > 60)
+		tlen = 60;
+	memcpy(out, "[traplog] ", 10);
+	o = 10;
+	memcpy(out + o, tag, (size_t)tlen);
+	o += tlen;
+	memcpy(out + o, " str=", 5);
+	o += 5;
+	slen = s ? (int)strlen(s) : 0;
+	if (slen > 24)
+		slen = 24;
+	if (s != NULL) {
+		memcpy(out + o, s, (size_t)slen);
+		o += slen;
+	}
+	memcpy(out + o, " a=", 3);
+	o += 3;
+	w = mldr_fmt_dec(tail + sizeof(tail), a);
+	memcpy(out + o, w, (size_t)((tail + sizeof(tail)) - w));
+	o += (int)((tail + sizeof(tail)) - w);
+	out[o++] = ' ';
+	out[o++] = 'b';
+	out[o++] = '=';
+	w = mldr_fmt_dec(tail + sizeof(tail), b);
+	memcpy(out + o, w, (size_t)((tail + sizeof(tail)) - w));
+	o += (int)((tail + sizeof(tail)) - w);
+	out[o++] = '\n';
+	if (o > cap)
+		o = cap;
+	memcpy(buf, out, (size_t)o);
+	return o;
+}
+
+static inline void
+mldr_tlogn(const char *tag, const char *s, long a, long b)
+{
+	char buf[192];
+	int n = mldr_tlogn_build(buf, (int)sizeof(buf), tag, s, a, b);
+
+	if (n > 0)
+		(void)!write(2, buf, (size_t)n);
+}
+
 #endif /* MLDR_TRAP_LOG_H */
