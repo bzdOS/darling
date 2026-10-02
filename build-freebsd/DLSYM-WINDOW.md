@@ -44,3 +44,30 @@ alone or with company.
   reading of the call path after `dlsym_fatal` returns.
 - The rtld-side question the order named ("виснет и в одиночку") is
   answered for the dlsym itself: it never hangs — the hang is past it.
+
+## Follow-up reading: the stall point is even EARLIER — before the
+lane's first elf-dlsym ENTER
+
+A per-tid pass over the same three logs sharpens the location. The
+(a) lane's own markers (identified by its altstack OK tid — run 1:
+tid 189575) show **altstack registration and then NOTHING**: no
+`elf-dlsym ENTER` for that tid anywhere before the DID print, while
+the only dlsym in the window belongs to the main thread
+(`str=wl_display_get_error`, lwp=103167, its xdg-era resolution). The
+wrap-ENTER content lines (recovered despite their two-write format)
+exist for main (x3), the (d) lane and the (c) cycles — **none for the
+(a) lane**.
+
+So in these runs the (a) lane stalls between its thread start (altstack
+OK) and the elfcalls `dlsym_fatal` ENTRY — inside the vendored
+wrapper's `__lazy` entry region (the wrapper's prologue through the
+indirect call into the elfcalls table). Combined with the
+ENTER/RETURN parity (no dlsym ever blocks) the gate is now pinned to
+**the vendored dylib's __lazy pre-dlsym instructions, state-dependent**
+— it can catch the lane at thread start, inside the bridge, after the
+bridge, or inside the native body, and the ×3 runs show the earliest
+form dominating. The dylib remains untouchable; the probe-side
+(d)-note lane and rtld/elfcalls-side observation (the dlsym_fatal
+ENTER marker's ABSENCE on the parked lane is itself the proof the
+stall precedes it) are the levers that remain.
+
