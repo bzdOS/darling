@@ -1,7 +1,7 @@
 # traplog-nolocale: the locale-free marker path opens the window — and
 # names the park
 
-Lane bsdos-x86-31. The marker path of mldr (`mldr_tlog`/`mldr_tlogx`
+Lane traplog-nolocale. The marker path of mldr (`mldr_tlog`/`mldr_tlogx`
 and the gate-gated SIGSYS/SIGILL narration) now formats with
 hand-rolled decimal/hex converters and emits with `write(2)` — no
 stdio on the marker path at all (the fault object of the
