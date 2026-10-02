@@ -26,6 +26,10 @@ MACRO = (
     'static unsigned long wlbody_seq;\n'
     '#define WLB(...) do { fprintf(stderr, "[wlbody] #%lu ", ++wlbody_seq); \\\n'
     '\tfprintf(stderr, __VA_ARGS__); fprintf(stderr, "\\n"); } while (0)\n'
+    '/* wrap: entry markers that do NOT consume the #N sequence, so existing\n'
+    ' * number-to-site mapping stays comparable across instrumentation rounds. */\n'
+    '#define WLBW(...) do { fprintf(stderr, "[wlbody] wrap "); \\\n'
+    '\tfprintf(stderr, __VA_ARGS__); fprintf(stderr, "\\n"); } while (0)\n'
 )
 
 # 0) macro + counter right after the FIRST include line
@@ -46,6 +50,20 @@ sub_once("\tint done, ret = 0;\n",
          "\tWLB(\"roundtrip_queue ENTER tid=%lu display=%p queue=%p\",\n"
          "\t    (unsigned long)pthread_self(), (void *)display, (void *)queue);\n",
          "roundtrip entry")
+
+# 1b) wl_display_roundtrip: the one-line wrapper's entry — the first
+# reachable point of the native library after the guest-side bind and the
+# shim's forwarding. Its absence on a parked lane places the park ABOVE
+# libwayland (guest bind / shim export / thread bookkeeping).
+sub_once("wl_display_roundtrip(struct wl_display *display)\n"
+         "{\n"
+         "\treturn wl_display_roundtrip_queue(display, &display->default_queue);\n",
+         "wl_display_roundtrip(struct wl_display *display)\n"
+         "{\n"
+         "\tWLBW(\"ENTER tid=%lu display=%p\",\n"
+         "\t    (unsigned long)pthread_self(), (void *)display);\n"
+         "\treturn wl_display_roundtrip_queue(display, &display->default_queue);\n",
+         "roundtrip wrapper entry")
 
 # 2) set_queue
 sub_once("\twl_proxy_set_queue((struct wl_proxy *) display_wrapper, queue);\n",
