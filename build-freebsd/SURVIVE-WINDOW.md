@@ -114,4 +114,43 @@ queue.
 Sweep negatives (recorded): no `sigqueue`/`pthread_kill`/`EVFILT_SIGNAL`
 anywhere in mldr's own sources — mldr never queues signals itself.
 
+## Follow-up reading 2: where the queued signal lands — inside libc's vfprintf
+
+The storm runs leave the interrupted RIP measurable. From
+`wl-body-survive-c.log`:
+
+```
+[darling-mldr] DEBUG pre-start: mh=0x8253ca000 ...     <- guest binary
+  0x8211c8000 .. 0x8214e0fff: /lib/libc.so.7           <- libc in the run
+[darling-mldr] FATAL signal 10 (code=3) at addr=0x8212f4674
+```
+
+0x8212f4674 − 0x8211c8000 = offset **0x12C674** into libc; resolving it
+against the host libc debug info names the site exactly:
+
+```
+__vfprintf
+/usr/src/lib/libc/stdio/vfprintf.c:463
+```
+
+So the queued signal lands while the main thread is inside host libc's
+`__vfprintf` — a formatted stderr print. The chain fits the timeline:
+the gated instrumentation and the shim's own narration print via
+`fprintf(stderr)` (the `[wayland_shim] ...` lines are vfprintf calls),
+and the run-c log shows the elf-dlsym markers immediately before the
+FATAL line. Two consequences:
+
+1. The storm's target window is the runs' own stderr traffic — the
+   more the gate prints, the more surface the queued signal has to land
+   in, which tightens the correlation between the gate and the death.
+2. A queued signal landing mid-`vfprintf` holds the stdio stderr lock;
+   any handler that formatted with FILE streams would deadlock on it —
+   the write(2)-only design of the trap markers and of the dismiss
+   branch is what keeps the dismissal path lock-free (the dismiss fires
+   and the process survives, as measured).
+
+The sender itself is still the kernel (si_pid=0, SI_QUEUE) and stays
+unnamed; the landing site is now named.
+
+
 
