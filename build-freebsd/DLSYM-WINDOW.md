@@ -71,3 +71,23 @@ form dominating. The dylib remains untouchable; the probe-side
 ENTER marker's ABSENCE on the parked lane is itself the proof the
 stall precedes it) are the levers that remain.
 
+## Follow-up reading 2: the lane is SILENT — no syscalls, no handlers
+
+The ENOSYS-loop hypothesis for the stalled lane is refuted from the
+same logs: the `linux-unhandled` markers carry the MAIN thread's lwpid
+in all three runs (103167 / 101146 / 101114) and never the (a)
+lane's — the "unhandled Linux syscall 99" noise is main's libc
+activity, not the lane retrying anything.
+
+So between its altstack registration and the stall the (a) lane
+executes NOTHING observable: no syscalls (no trap noise), no signal
+handlers, no dlsym, no native markers. The wait is invisible to every
+marker class — consistent with a deschedule/kernel-wait state rather
+than a userspace lock (a userspace lock would show the holder's
+markers; a syscall wait would show the syscall). The discriminating
+instrument is finally usable: `procstat -kk <real pid>` AT the (a)
+window of a markers-on run — the pid resolved at the harness's
+`Running:` line (the recipe from the word-at-park slice) — which names
+the kernel-side wait state of the parked lane directly.
+
+
