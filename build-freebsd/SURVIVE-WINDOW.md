@@ -182,6 +182,34 @@ stderr write/read path, and naming that object (the FILE buffer? a
 file-backed mapping that was replaced under the run? the log target
 filesystem at high occupancy?) is the next narrowing.
 
+## Follow-up reading 3: the faulting object is the locale data
+
+The faulting libc line names the object precisely. The interrupted RIP
+resolves to `/usr/src/lib/libc/stdio/vfprintf.c:463`, which is:
+
+```c
+decimal_point = localeconv_l(locale)->decimal_point;
+```
+
+A SIGBUS/BUS_OBJERR AT that line is a failed read of the object
+`localeconv_l()` hands back — **the thread's locale data**. On FreeBSD
+that data is file-backed (per-locale objects under /usr/share/locale,
+the locale archive), so a stale/unmapped/replaced locale object
+produces exactly BUS_OBJERR on the page-in — and a concurrent
+`setlocale`/`uselocale`/`newlocale` on another thread that swaps the
+locale while this thread is inside `localeconv_l` is the classic shape
+of that fault.
+
+Sweeps: mldr's own sources contain no `setlocale`/`newlocale`/
+`uselocale` calls at all; the run logs carry ~78 locale mentions that
+come from the guest side — the session build's Foundation/NSLocale
+activity. The gate correlation now has a mechanism: the gated runs'
+extra fprintf traffic multiplies the `localeconv_l` touches, widening
+the window in which a concurrent locale swap from the guest's
+Foundation lands mid-print. The faulting OBJECT is therefore named:
+the locale data; the swap SOURCE is the guest locale machinery during
+the session build.
+
 
 
 
