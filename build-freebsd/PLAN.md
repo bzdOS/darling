@@ -181,9 +181,9 @@ load-wayland-backend: infoDictionary NSPrincipalClass=WaylandDisplay
 
 **Предыдущий блокер решён:** `opendir()`/`readdir()` работают, `Info.plist` читается, `NSPrincipalClass=WaylandDisplay` определяется.
 
-**Новый блокер:** `[bundle load]` падает с `Symbol not found: _OBJC_METACLASS_$_NSObject`. Dyld загружает Wayland/AppKit/CoreGraphics и тут же выгружает.
+**Задача 2.3.1 ЗАКРЫТА:** `_OBJC_METACLASS_$_NSObject` резолвится из `libobjc.A.dylib` штатным биндом dyld (1333 сайта, ненулевое значение; только `DYLD_PRINT_BINDINGS` его показывает) — `build-freebsd/DYLD-BINDINGS.md`.
 
-**Следующий шаг:** Диагностировать binding `_OBJC_METACLASS_$_NSObject` через `DYLD_PRINT_BINDINGS=1` и проверить гипотезы из раздела 2.2.
+**Следующий шаг (стена №6):** dyld падает в `ImageLoader::trieWalk+0xa4` (разд. 9.9); фронтир — пересборка dyld с лог-патчем и gate (`build-freebsd/DYLD-REBUILD.md`).
 
 **Запуск для проверки:**
 ```sh
