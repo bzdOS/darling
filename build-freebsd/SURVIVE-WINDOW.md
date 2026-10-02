@@ -152,5 +152,36 @@ FATAL line. Two consequences:
 The sender itself is still the kernel (si_pid=0, SI_QUEUE) and stays
 unnamed; the landing site is now named.
 
+## Correction by measurement: it is NOT a queued signal — it is BUS_OBJERR
+
+A host-side probe settled what class of signal the "code=3" actually
+is. A real `sigqueue(getpid(), SIGUSR1, SI_QUEUE)` from a second thread
+of the same process delivers, read with the same siginfo fields the
+crash handler uses:
+
+```
+host-probe: si_code=65538 si_pid=27362 si_uid=1001 sival=0x1234
+```
+
+`si_code=65538 = 0x10002` — FreeBSD's SI_QUEUE. The guest runs show
+`code=3`, which is a completely different class: on FreeBSD, SIGBUS
+with si_code 3 is **BUS_OBJERR** — a genuine bus fault on a memory
+object (POSIX bus codes: 1=BUS_ADRALN, 2=BUS_ADRERR, 3=BUS_OBJERR).
+`si_pid`/`si_uid`/`si_value` are simply **not filled** for a fault-class
+siginfo — reading them yields the measured zeros.
+
+So the chain corrects itself: "FATAL signal 10 (code=3)" is a **real
+SIGBUS hardware fault** (memory-object error) that lands while the main
+thread is inside libc's `__vfprintf` during an stderr print — not a
+kernel-queued event, not a kill from any process, and the
+dismiss branch (built for the queued reading) fires on a fault it
+should arguably not dismiss. The gate correlation survives the
+correction: the gated runs' extra stderr traffic is exactly the code
+being executed when the fault hits — the faulting object is on the
+stderr write/read path, and naming that object (the FILE buffer? a
+file-backed mapping that was replaced under the run? the log target
+filesystem at high occupancy?) is the next narrowing.
+
+
 
 
