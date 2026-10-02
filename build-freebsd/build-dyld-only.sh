@@ -20,13 +20,6 @@ DST="${SRC}/src/external/dyld"
 # in src/external/darling-dmg on a missing `fuse` pkg-config module.
 BUILDDIR="${BD}/dyld-only"
 
-# Diagnostic rebuild: tolerate the glue.c fallbacks duplicating the static
-# libs. The dyld CMakeLists overwrites CMAKE_EXE_LINKER_FLAGS with
-# "${CMAKE_EXE_LINKER_FLAGS_SAVED} -nostdlib", so the flag must be seeded
-# into _SAVED to survive. The first definition in the link line (glue.c.o)
-# wins; acceptable for a diagnostic dyld — the live overlay is not touched.
-MULDEFS="-Wl,--allow-multiple-definition"
-
 echo "== applying salvage files to ${DST}"
 cp -p "${SALV}/src/dyld2.cpp"            "${DST}/src/dyld2.cpp"
 cp -p "${SALV}/src/dyldFreeBSDRebase.c"  "${DST}/src/dyldFreeBSDRebase.c"
@@ -34,10 +27,55 @@ cp -p "${SALV}/src/dyldInitialization.cpp" "${DST}/src/dyldInitialization.cpp"
 cp -p "${SALV}/darling/src/sandbox-dummy.c" "${DST}/darling/src/sandbox-dummy.c"
 cp -p "${SALV}/CMakeLists.txt"           "${DST}/CMakeLists.txt"
 
+echo "== dedup: strip glue.c fallbacks that duplicate the static libs"
+# The worktree copy only (the salvage and the superproject are untouched).
+# The list is the ld64.lld duplicate set; extend it per iteration.
+python3 - "${DST}/src/glue.c" \
+	memset __stderrp uuid_unparse_upper \
+	_Block_object_assign _Block_object_dispose \
+	_NSConcreteGlobalBlock _NSConcreteStackBlock <<'PY'
+import re, sys
+path = sys.argv[1]
+syms = sys.argv[2:]
+src = open(path).read()
+lines = src.split("\n")
+out = []
+i = 0
+removed = []
+def is_def(l, s):
+    return re.match(r'^(?:[A-Za-z_][\w \t\*]*\s+)?%s\s*[\(\[]' % re.escape(s), l) or \
+           re.match(r'^[A-Za-z_][\w \t\*]*\s+%s\s*(=|\[)' % re.escape(s), l)
+while i < len(lines):
+    l = lines[i]
+    hit = next((s for s in syms if is_def(l, s)), None)
+    if not hit:
+        out.append(l); i += 1; continue
+    start = i
+    # include a directly-preceding preprocessor guard line
+    if out and re.match(r'^\s*#\s*(ifdef|ifndef|else)\b', out[-1]):
+        out.pop(); start -= 0
+    j = i
+    if '(' in l:
+        depth = 0
+        while j < len(lines):
+            depth += lines[j].count('{') - lines[j].count('}')
+            if lines[j].rstrip() == '}' and depth == 0:
+                j += 1; break
+            j += 1
+    else:
+        while j < len(lines) and not lines[j].rstrip().endswith(';'):
+            j += 1
+        j += 1
+    removed.append(hit)
+    i = j
+open(path, "w").write("\n".join(out))
+print("removed:", " ".join(removed) if removed else "(none)")
+PY
+
 echo "== cmake configure"
+# -U clears any cached linker flags from an earlier muldefs attempt.
 cmake -G Ninja -B "${BUILDDIR}" \
-	-DCMAKE_EXE_LINKER_FLAGS="${MULDEFS}" \
-	-DCMAKE_EXE_LINKER_FLAGS_SAVED="${MULDEFS}" \
+	-UCMAKE_EXE_LINKER_FLAGS -UCMAKE_EXE_LINKER_FLAGS_SAVED \
 	"${SRC}" || exit 2
 
 echo "== ninja system_loader"
