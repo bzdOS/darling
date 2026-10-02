@@ -291,8 +291,13 @@ sub_once_c("\t\tdo {\n"
            "\t\tdo {\n"
            "\t\t\tlen = wl_os_recvmsg_cloexec(connection->fd, &msg, MSG_DONTWAIT);\n"
            "\t\t} while (len < 0 && errno == EINTR);\n"
-           "\t\twlb_log(\"read: fd=%d -> %ld tid=%lu\", connection->fd,\n"
-           "\t\t    (long)len, (unsigned long)thr_self());\n",
+           "\t\twlb_log(\"read: fd=%d -> %ld\", connection->fd, (long)len);\n"
+           "\t\t{\n"
+           "\t\t\tlong _tid = 0;\n"
+           "\t\t\tthr_self(&_tid);\n"
+           "\t\t\twlb_log(\"read-tid fd=%d tid=%lu\", connection->fd,\n"
+           "\t\t\t    (unsigned long)_tid);\n"
+           "\t\t}\n",
            "read site")
 
 open(CPATH, "w").write(csrc)
