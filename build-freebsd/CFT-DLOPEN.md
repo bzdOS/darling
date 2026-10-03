@@ -2152,3 +2152,62 @@ sh cft96-run.sh f1
 #   -> log: cft96-f1.log (24188 lines), planted MSL md5 39d3003953ac49a5ead4659dbe419963
 #   -> Segmentation fault; crash block at line 24096, initializer at line 24082
 ```
+
+## Control #26 step B — symbolization of rip=0x351ef690c482
+
+### Image attribution (from the load addresses in cft96-f1.log)
+
+The log's `dyld: Mapping` / `__TEXT at` lines give the load base of every
+image. The crash rip=0x351ef690c482 falls inside the __TEXT range of
+`/usr/lib/system/libsystem_malloc.dylib`:
+
+```
+dyld: loaded: <4C4C446A-5555-3144-A1B2-F57C46954BD1> /usr/lib/system/libsystem_malloc.dylib
+            __TEXT at 0x351EF68DF000->0x351EF692EFFF with permissions r.x
+```
+
+- image base = 0x351ef68df000
+- rip = 0x351ef690c482
+- offset = rip − base = 0x351ef690c482 − 0x351ef68df000 = **0x2d482**
+
+### Disassembly (llvm-objdump, 32 bytes at 0x2d482)
+
+```sh
+llvm-objdump -d --macho --arch=x86_64 "$DARLING_OVERLAY"/usr/lib/system/libsystem_malloc.dylib | grep -A 10 "2d482:"
+```
+
+```
+   2d482:	e8 d9 3d fd ff	callq	_bitarray_size
+   2d487:	8b bd 5c ee ff ff	movl	-0x11a4(%rbp), %edi
+   2d48d:	48 8b b5 60 ee ff ff	movq	-0x11a0(%rbp), %rsi
+   2d494:	48 89 c2	movq	%rax, %rdx
+   2d497:	48 8b 85 68 ee ff ff	movq	-0x1198(%rbp), %rax
+   2d49e:	48 8d 8d 28 ef ff ff	leaq	-0x10d8(%rbp), %rcx
+   2d4a5:	ff d0	callq	*%rax
+   2d4a7:	89 85 a4 ef ff ff	movl	%eax, -0x105c(%rbp)
+   2d4ad:	83 bd a4 ef ff ff 00	cmpl	$0x0, -0x105c(%rbp)
+   2d4b4:	0f 84 11 00 00 00	je	0x2d4cb
+   2d4ba:	8b 85 a4 ef ff ff	movl	-0x105c(%rbp), %eax
+```
+
+### Symbol (llvm-nm, nearest to 0x2d482)
+
+```
+000000000002d10 t _word_zap_bit_go_down
+000000000002d80 t _word_zap_bit_simple
+```
+
+0x2d482 sits inside `_word_zap_bit_go_down` (0x2d10 .. 0x2d80), 0x372 bytes
+past its start.
+
+### Fault line
+
+```
+fault = libsystem_malloc.dylib!_word_zap_bit_go_down+0x372: callq _bitarray_size
+```
+
+### Verdict (control #26 step B, one line)
+
+rip=0x351ef690c482 = libsystem_malloc.dylib+0x2d482, внутри функции
+`_word_zap_bit_go_down` (+0x372); инструкция в точке краша — `callq
+_bitarray_size`; пересборка/патч MSL не выполнялись (шаг 96-В).
