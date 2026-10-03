@@ -1111,3 +1111,76 @@ ld64.lld -dylib … -install_name /usr/lib/system/libsystem_malloc.dylib \
 # plant via the early-sync poller (marker "cached locally: <stage>/usr/lib"),
 # run tests/zone-vtable-probe-macho per the control #14 recipe
 ```
+
+## Control #16 — the garbage reader: dyld's ObjC-init notification reads a computed pointer to an unmapped slide
+
+### (1) the bytes: absent everywhere → a formula
+
+Static search for the low bytes `55 f5 4d` (the stable …4df555 part of
+the fault address) across all crash-time candidates — the built MSL dylib
+(0x5e3e0), the overlay dyld (0x4fad50), libSystem.B, libsystem_c — **0
+hits in every file**; the same for the overlay's libobjc. The value is
+not a baked constant anywhere. Formula: the faulting value = a
+16MB-aligned slide base + 0x4df555 (run E 0x18ac354df555 → base
+0x18ac30a00000; run F 0x3251754df555 → base 0x325175000000), and the
+fault address is covered by NONE of the run's 646 mmap records — the
+pointer targets an address where nothing is mapped: a runtime-computed
+pointer into a slide where no image loaded.
+
+### (2) the reader: dyld's ObjC-init notification phase
+
+`dyld2.cpp:1104-1115` — at `dyld_image_state_dependents_initialized`,
+for images with `notifyObjC()`, dyld calls
+`(*sNotifyObjCInit)(image->getRealPath(), image->machHeader())` — the
+hook into libobjc's initialization — wrapped in `mach_absolute_time`
+timing (the ktrace's `clock_gettime` records are that guest timing). The
+crash sequence in the ktrace — `mmap(__TEXT 0x59000)`,
+`mprotect RWX→RX` (fixups), `clock_gettime`, `PSIG SIGSEGV
+SEGV_MAPERR` — places the fault in the code that hook runs: libobjc's
+init reading through the computed pointer.
+
+### (3) the trigger: what the MSL plant changes
+
+The fault correlates with planting the faithful MSL: my link carries a
+different dependency set (only `-lSystem` vs the original's
+kernel/platform/dyld/compiler_rt/c), which shifts the closure's image
+order and slides; the objc-init notification then computes a pointer onto
+a slide where nothing is mapped. Discrimination: «в поле уже мусор» vs
+«dyld читает по испорченному указателю» — the field holds NO static
+garbage (the byte search is empty across all images) → the reader
+computes the pointer at runtime and dereferences the unmapped result.
+
+### (4) whose layer → STOPPED
+
+The faulting reader = dyld's ObjC-init notification + libobjc's init
+code — the guest dyld (June) and the overlay's libobjc, NOT the MSL
+layout: no pattern in my dylib, its vmaddrs (__TEXT base, __DATA 0x4f000)
+are comparable to the original's (__DATA 0x52000). Per the dispatch's
+clause the fix is outside my layer — measured and stopped; the foreign
+layer (dyld's slide attribution for computed pointers under a
+replaced-libsystem_malloc load order) is not blindly fixed.
+
+### Verdict (control #16, one line)
+
+читатель = фаза ObjC-init-уведомления dyld (dyld2.cpp:1104-1115,
+sNotifyObjCInit → init-код libobjc); байты = шаблон …4df555 ОТСУТСТВУЕТ
+во всех образах (поиск 0 hits: MSL dylib, dyld, libSystem.B, libsystem_c,
+libobjc) → формула: значение = 16MB-выровненный слайд-база + 0x4df555, fault
+не покрыт ни одним из 646 mmap-записей; слой = guest dyld + overlay
+libobjc (ВНЕ MSL layout — vmaddr сопоставимы с оригиналом); фикс = ВНЕ
+слоя — измерено и остановлено; слот-карта = блокирована; Control #15
+dlopen = не достигнут; `_mach_task_self_` = не дошло; остаток = разбор
+атрибуции слайдов в dyld-окружении с заменённым libsystem_malloc (область
+загрузчика) или изоляция триггера возвратом оригинального MSL.
+
+### Repro
+
+```sh
+# ktrace of the early-plant probe run (control #15 recipe); kdump:
+#   the PSIG SIGSEGV record + the mmap list (the fault address is
+#   covered by none of them)
+# byte search: python over the crash-time images for 55 f5 4d — 0 hits
+# the reader phase: dyld2.cpp:1104-1115 (sNotifyObjCInit at
+#   dyld_image_state_dependents_initialized; the mach_absolute_time
+#   timing around it = the ktrace's clock_gettime records)
+```
