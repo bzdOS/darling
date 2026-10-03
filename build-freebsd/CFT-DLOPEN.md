@@ -1881,3 +1881,110 @@ routing itself stays out of layer — measurement only.
 #   LC-area slack 0x7c8..0x7f0 is 40 zero bytes, __text at 0x7f0 untouched,
 #   LC_UUID unchanged (98444C4C-5555-4431-A176-95CC70A42E3B)
 ```
+
+## Control #24 — the exports-trie class is CLOSED (stock-geometry trie-LC, deterministic build); the refusal MOVES to the link's segment vm geometry
+
+### Step 0 — base and premise check (measured before any experiment)
+
+Base: pr-arm64 tip 122a69490 (lane 93 accepted, FF). The dispatch's premise —
+"the rebuild has no LC_DYLD_EXPORTS_TRIE" — measures FALSE for the current
+artifact: the zone-contract thin build (386120 B) already carries LC[15]
+cmd=0x80000023 cmdsize=64 dataoff=0x18 datasize=0x2 — the EXACT stock
+x86_64-slice geometry (stock LC[15]: identical cmd/cmdsize/dataoff/datasize;
+trie bytes at file [0x18:0x1a] = 85 00 in both; header flags = 0x110085 in
+both). Its LC_DYLD_INFO_ONLY (LC[3], cmdsize 48) streams are sane and inside
+__LINKEDIT (rebase=0x54040/0x30, bind=0x54070/0xe0, lazy=0x54150/0x20,
+export=0x54898/0x928, end 0x551C0 < __LINKEDIT end 0x5e448) — the Control #23
+"garbage fixups" premise also measures false for this build. The Control
+#23-era artifact (392944 B, no trie LC) is gone; the export-list filter (the
+Control #15 build: the original's export list intersected with the objects'
+global symbols) changed the link — ld64.lld now emits the stock-form empty
+trie LC.
+
+### Step 1 — the fix is robust in the script (the (3а) clause, executed)
+
+A fresh rebuild from the current build-freebsd/zone-contract/
+build-libmalloc-zone.sh is BYTE-IDENTICAL to the artifact under test (md5
+b6e459c3179227a7bed7d246d4e8d722 before and after the rebuild; LC_UUID
+4C4C446A-5555-3144-A1B2-F57C46954BD1; the stock-geometry trie LC at LC[15];
+[0x18:0x1a]=85 00) — the trie-LC geometry is a DETERMINISTIC product of the
+link. The dispatch's literal (1) transplant (rewrite the 48-byte fixups LC
+into a trie LC with non-stock cmdsize) was NOT executed: its precondition (no
+trie LC present) measures false, and on this artifact it would duplicate the
+trie LC at LC[15] and destroy the well-formed LC_DYLD_INFO_ONLY streams — a
+third experiment beyond the ladder, forbidden by (3б).
+
+### Step 2 — the pair (the #22 recipe, fresh overlay copy, 3+3 runs)
+
+Fresh writable copy of the overlay (cp -R, 620 MB) as DARLING_OVERLAY; the
+poller patches the 57-provider version list after the staging marker
+(cft69-patchlist.txt, unchanged); control BEFORE reading outcomes = the
+"dyld: loaded: <UUID> /usr/lib/system/libsystem_malloc.dylib" line == the
+planted artifact's LC_UUID.
+
+Stock side 3/3: control OK (loaded UUID == planted 1FA0731B-F0EA-310E-8808-
+B4118C4E62D8, md5 521c6983…); outcome identical to Controls #22/#23 (M=1):
+symbol wall `Symbol not found: _kCGColorSpaceITUR_2100_PQ`, rc=132.
+
+Thin side 3/3 (planted md5 b6e459c3…, UUID 4C4C446A-5555-3144-A1B2-
+F57C46954BD1): loaded line ABSENT (control MISMATCH — outputs void past the
+load by the lane's criterion) and the refusal class MOVED, verbatim 3/3:
+
+```
+/usr/lib/system/libsystem_malloc.dylib: malformed mach-o image: segment __DATA
+vm overlaps segment __TEXT
+```
+
+The Control #23 class ("dyld export info overruns __LINKEDIT") is GONE — the
+stock-geometry trie LC closed it.
+
+### Step 3 — the new class, named statically (no third guest experiment)
+
+The thin's segment vm map from its LC table: __TEXT vmaddr=0x0 vmsize=0x4f040
+→ [0x0, 0x4f040); __DATA vmaddr=0x4f000 vmsize=0x6000 → [0x4f000, 0x55000) —
+__DATA's vmaddr sits 0x40 bytes INSIDE __TEXT's vm range (overlap =
+0x4f040 − 0x4f000 = 0x40). Stock: __TEXT [0x0, 0x52000), __DATA
+[0x52000, 0x58000), __LINKEDIT [0x58000, 0x62948) — contiguous,
+page-aligned, no overlap. The defect is the link's segment vm geometry:
+__TEXT vmsize 0x4f040 is not a page multiple and ld64.lld places __DATA at
+vmaddr align_down(0x4f040) instead of align_up — build-libmalloc-zone.sh
+(my layer) territory.
+
+### Verdict (control #24, one line)
+
+пересборка = сток-геометрия trie-LC (cmd 0x80000023, cmdsize 64, dataoff 0x18,
+datasize 2; байты [0x18:0x1a]=85 00 = сток; LC_DYLD_INFO_ONLY-строки валидны
+внутри __LINKEDIT), сборка побайтово воспроизводима (md5 b6e459c3… до/после,
+UUID 4C4C446A-…); пара: сток 3/3 ctrl OK (символьная стена
+_kCGColorSpaceITUR_2100_PQ), пересборка 3/3 MISMATCH (loaded line отсутствует)
++ отказ СМЕСТИЛСЯ: "malformed mach-o image: segment __DATA vm overlaps
+segment __TEXT" — экспорт-трие-класс (#23) ЗАКРЫТ; корень = vm-геометрия
+сегментов линковки (__TEXT vmsize 0x4f040 перекрывает __DATA vmaddr 0x4f000
+на 0x40 байт; сток 0x52000/0x52000 — без перекрытий) — слой
+build-libmalloc-zone.sh; фикс = СТОП по (3б) — третий эксперимент не
+выполнялся; слот-карта = блокирована; Control #15 dlopen = не достигнут
+(отказ до open); остаток = следующий лейн: выровнять сегментную vm-геометрию
+линковки (__TEXT vmsize кратно странице / __DATA vmaddr = align_up) и
+повторить пару.
+
+### Repro
+
+```sh
+# build: sh build-freebsd/zone-contract/build-libmalloc-zone.sh
+#   -> md5 b6e459c3179227a7bed7d246d4e8d722 (byte-identical rebuild); LC dump:
+#      LC[15] 0x80000023/64/0x18/2 (stock geometry), LC[3] 0x80000022/48
+#      export=0x54898/0x928 (inside __LINKEDIT 0x54040..0x5e448)
+# pair (the #22 recipe; driver kept in the session scratchpad as
+#   cft94-matrix.sh, summary cft94-summary.txt): fresh overlay copy as
+#   DARLING_OVERLAY, plant per side, poller patches cft69-patchlist.txt after
+#   the staging marker ("cached locally: /tmp/darling-local-overlay/
+#   System/Library/PrivateFrameworks"), 3 runs/side; control = the
+#   "dyld: loaded: <UUID> /usr/lib/system/libsystem_malloc.dylib" line
+#   stock: ctrl OK 3/3 (symbol wall _kCGColorSpaceITUR_2100_PQ, rc=132)
+#   thin:  no loaded line 3/3, rc=132, verbatim:
+#     "malformed mach-o image: segment __DATA vm overlaps segment __TEXT"
+# static map: segment vm ranges from the LC table (python, little-endian
+#   walk at header+32): __TEXT [0x0,0x4f040) vs __DATA [0x4f000,0x55000)
+#   overlap 0x40; stock [0x0,0x52000)/[0x52000,0x58000)/[0x58000,0x62948)
+#   contiguous
+```
