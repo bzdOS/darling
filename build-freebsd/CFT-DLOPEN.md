@@ -360,3 +360,80 @@ Result: probe [0]/FWMACHO → `Incompatible library version: … libcups.2.dylib
 provides version 1.0.0` (Foundation wall gone); launcher dlopen
 `//Frameworks/…` → same libcups refusal after mapping the dep tree; RC=132
 (SIGILL) after the dlerror.
+
+## Control #7 — version class across the cascade: 57/57 patched; the next refusal is dyld-internal
+
+### Step 1 — generalized batch patch
+
+`stage-patch.py` gained a `--paths-file` mode (exact LC walk, thin + fat
+selected by raw magic bytes, per-file read-back). The patch set = the
+distinct staged providers the previous run's dlopen cascade opened (ktrace
+`openat … RET openat 3` list — 57 paths: the System/Library/Frameworks
+stubs + libcups; the 267 MB Chrome framework excluded — nothing
+version-requires it). A dry-run found a fat-parse bug (endianness decided
+by a LE-read magic; SystemConfiguration is a 2-slice fat) — fixed to raw
+bytes. Poller synced on `Chrome framework staged:` patches the fresh stage
+copy only; read-backs `0xffffffff/0xffffffff` on all 57.
+
+### Step 2 — Run C (56-patch, default staging trees)
+
+The libcups wall is gone; the cascade loads deeper (unloaded tail:
+libbsm, libpmenergy, libpmsample, libsandbox, libbz2, libicucore) and the
+refusal moves to a missing image:
+
+```
+Library not loaded: /System/Library/PrivateFrameworks/Onyx2D.framework/Versions/A/Onyx2D
+  Referenced from: /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+  Reason: image not found.
+```
+
+Onyx2D exists in the live overlay, but `System/Library/PrivateFrameworks` is
+not among the harness's default staging trees. ktrace: the fanout ENOENTs
+(`…/System/Library/Frameworks/Onyx2D.framework RET -1 errno 2`, ×N).
+
+### Step 3 — Run D (57-patch incl. Onyx2D, staging trees extended)
+
+`DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:
+System/Library/PrivateFrameworks` — the harness stages PrivateFrameworks,
+Onyx2D lands staged + patched (57/57). The cascade loads the framework,
+Foundation, CoreFoundation, CoreGraphics, CoreText — then aborts:
+
+```
+Library not loaded: /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+  Referenced from: //Frameworks/…/Google Chrome for Testing Framework
+  Reason: Incompatible library version: … requires 300.0.0 … Foundation provides 0.0.0.
+```
+
+— on the file dyld itself opened: ktrace
+`openat(AT_FDCWD,…,O_RDONLY) NAMI "…/local-overlay/System/Library/
+Frameworks/Foundation.framework/Versions/C/Foundation" RET openat 3 →
+pread(0x3,…,0x1000,0)` with the patched header in the GIO dump (cffa edfe,
+filetype=6, ncmds=17); host-side read-back after the run: LC_ID
+cur=compat=0xffffffff at file-offs 2896/2900. Run C passed the same check on
+the same patched file, so the re-refusal correlates with PrivateFrameworks
+being staged; the report "provides 0.0.0" is dyld's no-ID branch
+(`doGetLibraryInfo`: minVersion=0 when `fDylibIDOffset==0`). Unwind:
+Foundation, `//Frameworks/…`, CoreFoundation, CoreGraphics, CoreText
+unloaded; RC=132 (SIGILL).
+
+### Verdict (control #7, one line)
+
+version walls = removed 57/57 in the stage copy (read-backs ffffffff); the
+chrome framework's dlopen = new refusal — `Incompatible library version:
+Foundation provides 0.0.0` on the patched file dyld opened (Run C passed the
+same check; the regression correlates with PrivateFrameworks staged); next =
+dyld-internal — why the Foundation ImageLoader reports minVersion 0 for a
+file whose LC_ID compatibility_version is 0xffffffff.
+
+### Repro
+
+```sh
+# cascade provider list: kdump -f kt.bin | awk of NAMI/RET openat pairs
+#   (distinct staged paths with "RET openat 3" in the dlopen phase)
+python3 build-freebsd/stage-patch.py --paths-file <list>   # read-backs ffffffff
+# poller after the harness's "Chrome framework staged:" line; runs under
+# ktrace -f -i; Run D adds
+#   DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks
+# kdump -f kt.bin | grep -B1 "RET openat" — the last openat before the
+# dlerror is the artifact line
+```
