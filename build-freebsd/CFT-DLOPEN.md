@@ -437,3 +437,69 @@ python3 build-freebsd/stage-patch.py --paths-file <list>   # read-backs ffffffff
 # kdump -f kt.bin | grep -B1 "RET openat" — the last openat before the
 # dlerror is the artifact line
 ```
+
+## Control #8 — "0.0.0" = patch race, not a dyld parse quirk; early sync moves the dlopen to the symbol wall
+
+### Step 1 — identify the exact image (candidates refuted)
+
+`find` over the stage tree: exactly ONE Foundation copy
+(`System/Library/Frameworks/Foundation.framework/Versions/C/Foundation`) —
+no PrivateFrameworks shadow (candidate (a) refuted). The file dyld opened
+(ktrace `openat … RET openat 3` on that path) is thin (magic cffaedfe), one
+LC_ID_DYLIB at file-off 0xb40, cur=compat=0xffffffff, bytes
+`ff ff ff ff ff ff ff ff` @2896–2903 — the patched values (candidate (b)
+refuted: no slices). Source check: `ImageLoaderMachO::parseLoadCommands`
+sets `fDylibIDOffset` unconditionally on any `LC_ID_DYLIB` (ImageLoaderMachO
+.cpp:819–822); `doGetLibraryInfo` returns minVersion 0 only when
+`fDylibIDOffset==0` (1472–1482) — a no-ID report can only come from an
+image dyld never parsed from that file.
+
+### Step 2 — the mechanism: when the patch lands relative to dyld's read
+
+Run D's poller synced on `Chrome framework staged:` — i.e. it patched the
+stage copy at/after the moment dyld's cascade reached Foundation; dyld read
+compat=0.0.0 and reported the no-ID-shaped value. Run E moved the sync
+earlier — the poller fires on `cached locally: …/System/Library/
+PrivateFrameworks` (right after ALL trees are staged, ~20 s before mldr
+execs, while the 267 MB chrome pax still runs):
+
+```
+POLLER70 EARLY fired iter=6 03:50:41
+SUMMARY: patched=57/57 (read-backs must be 0xffffffff/0xffffffff)
+```
+
+Same env as Run D otherwise (PrivateFrameworks staged, same 57-path list,
+template-patched launcher). Result — the Foundation refusal is GONE; the
+dlopen moves a full stage deeper and fails at BIND time on a missing
+symbol:
+
+```
+dlopen //Frameworks/…/Google Chrome for Testing Framework: Symbol not found: _kCGColorSpaceITUR_2100_PQ
+  Referenced from: //Frameworks/… (which was built for Mac OS X 13.0)
+  Expected in: /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+```
+
+ktrace: the cascade opens the framework and CoreGraphics
+(`openat … RET openat 3` on both), the whole dep tree binds (~8 k records),
+then the dlerror — the last openat before the failure is CoreGraphics.
+
+### Verdict (control #8, one line)
+
+0.0.0 = patch race (the late-sync poller rewrote the stage copy after dyld
+had read it; shadow-copy and slice-bug refuted by measurement — one thin
+copy, LC_ID ffffffff @0xb40); fix = early poller sync on the
+`cached locally: …PrivateFrameworks` line (~20 s before mldr); dlopen =
+further — new refusal, a symbol wall: `_kCGColorSpaceITUR_2100_PQ` missing
+in the CoreGraphics stub (built for Mac OS X 13.0); next = the dylib-symbol
+class (the extras track), not versions.
+
+### Repro
+
+```sh
+# poller sync point: grep RUNLOG for "cached locally: <stage>/System/
+#   Library/PrivateFrameworks" (NOT "Chrome framework staged:" — too late)
+# then stage-patch.py --paths-file <list>; run under ktrace -f -i with
+#   DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:
+#   System/Library/PrivateFrameworks
+# Run D (late sync) vs Run E (early sync) is the A/B: 0.0.0 vs symbol wall
+```
