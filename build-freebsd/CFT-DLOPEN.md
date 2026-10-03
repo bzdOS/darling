@@ -278,3 +278,85 @@ open("<probe-patched>", "wb").write(data)
 Run the chrome probe harness with the patched binary as the test binary
 (`DARLING_SMOKE_REFRESH=1`, `ktrace -f -i`); plant `$LOCAL/FWMACHO` after
 the `Chrome framework staged:` log line; `kdump | grep FWMACHO`.
+
+## Control #6 — version wall removed; the launcher's own dlopen moves past "//../"
+
+### Step 1 — Foundation version wall (stage-copy patch)
+
+dyld's version check (`ImageLoader.cpp`): fails when the found dylib's
+`compatibility_version` is below the requirer's required version
+(`0xFFFFFFFF` on the REQUIRED side is the wildcard; `ImageLoaderMachO::
+doGetLibraryInfo` reports `compatibility_version` as minVersion). The staged
+Foundation carried `LC_ID_DYLIB cur=0x00000000 compat=0x00000000` — the
+"provides 0.0.0" wall. Fix, runtime stage-copy only (the live overlay is
+read-only): a poller synced on the harness's `Chrome framework staged:` line
+patches the staged `$LOCAL/System/Library/Frameworks/Foundation.framework/
+Versions/C/Foundation` LC_ID fields (file-offs 2896/2900) → 0xFFFFFFFF via an
+exact load-command walk (`build-freebsd/stage-patch.py`, thin + fat, all
+slices); read-back `ff ff ff ff`.
+
+After the patch, both non-"//../" candidates move one wall deeper:
+
+```
+[0] /Frameworks/…  → Library not loaded: /usr/lib/libcups.2.dylib
+                      (Incompatible library version: requires 2.0.0, provides 1.0.0)
+[3] /FWMACHO       → same libcups refusal
+[1]/[2]            → image not found (unchanged — the "//../" drop)
+```
+
+### Step 2 — chrome-macho path-template rewrite
+
+chrome-macho (the launcher) holds the cstring `"../Frameworks/Google Chrome
+for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for
+Testing Framework"` (offset 10928). Its code joins `dirname + "/" +
+template`; with the guest binary at `/chrome-macho` dirname = `/`, which
+produced the dying spelling `//../Frameworks/…`. Dropping the leading `"../"`
+(slot 118 → 115 bytes + 3 NUL pad, in place, string-boundary asserted;
+`build-freebsd/chrome-template-patch.py`) makes the constructed path
+`//Frameworks/…` (kernel-normalized `/Frameworks/…`). This is a cstring edit,
+not an LC edit: chrome-macho's only dylib LC is `/usr/lib/libSystem.B.dylib`
+— load commands are byte-identical before/after (`cur=0x054c0000
+compat=0x00010000`).
+
+Run B — template-patched launcher + the same stage-copy patch, under ktrace:
+
+```
+dlopen //Frameworks/…/Google Chrome for Testing Framework: Library not loaded: /usr/lib/libcups.2.dylib
+  Referenced from: //Frameworks/…
+  Reason: Incompatible library version: requires version 2.0.0 or later, but libcups.2.dylib provides version 1.0.0.
+```
+
+— the launcher's OWN dlopen now opens and maps the framework; its dependency
+tree loads (`openat … RET openat 3` cascade: CoreWLAN, CoreLocation, Vision,
+CoreML, SafariServices, UserNotifications, LocalAuthenticationEmbeddedUI,
+DiskArbitration, ServiceManagement — dyld then unloads them when the libcups
+check fails) and the run ends SIGILL after the dlerror. Last syscall before
+the dlerror: `openat(AT_FDCWD, …, O_RDONLY) NAMI "…/local-overlay/usr/lib/
+libcups.2.dylib" RET openat 3`.
+
+### Verdict (control #6, one line)
+
+version wall = removed (Foundation stage-copy → 0xFFFFFFFF, read-back `ff ff
+ff ff`; the refusal moved to libcups.2 2.0.0 vs 1.0.0 — same class, next
+dylib); LC/template rewrite = yes (exact-slot, LCs byte-identical);
+chrome-macho's own dlopen = further — `//Frameworks/…` opens, maps, and the
+framework's dependency tree loads; next = the dylib-version class, systemic
+(real compat values below the framework's requirements).
+
+### Repro
+
+```sh
+# stage-copy version patch (poller after "Chrome framework staged:")
+python3 build-freebsd/stage-patch.py \
+  $LOCAL/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation \
+  0xFFFFFFFF 0xFFFFFFFF          # read-back: ff ff ff ff
+# launcher template rewrite (exact-slot, LCs verified unchanged)
+python3 build-freebsd/chrome-template-patch.py <launcher> <launcher-patched>
+# then: chrome probe harness (patched probe as test binary) and the
+# template-patched launcher, each with ktrace -f -i; kdump -f kt.bin
+# grep -B1 "RET openat" — the libcups openat is the last before the dlerror
+```
+Result: probe [0]/FWMACHO → `Incompatible library version: … libcups.2.dylib
+provides version 1.0.0` (Foundation wall gone); launcher dlopen
+`//Frameworks/…` → same libcups refusal after mapping the dep tree; RC=132
+(SIGILL) after the dlerror.
