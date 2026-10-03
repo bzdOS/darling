@@ -586,3 +586,85 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
 # tree's usr/lib via the early-sync poller; run per the Control #8 recipe
 # with CHROME_APP pointing at the patched app copy
 ```
+
+## Control #10 — the symbol-wall map: 25 providers, 335 symbols; one union supplement; the failure moves to init-time runtime semantics
+
+### Step 1 — the map (one pass)
+
+`sym-wall-map.py` walks every dylib ordinal of the Chrome framework and
+its `Libraries/*.dylib` (chained-fixups imports, validated layout), diffs
+each provider's imports against the overlay stub's exports, and classifies
+symbols. One correction en route: `libSystem.B.dylib` is a reexport
+umbrella — its own table lists 350 exports while `/usr/lib/system/*`
+carries 12724 (pthread_mutex_lock etc. included); diffing against the
+umbrella alone manufactured 931 fake walls. With the reexport-aware diff:
+
+```
+Карта стен: 25 провайдеров, 335 символов — топ-3 класса:
+  ObjC class-refs (OBJC_CLASS_$×97 + OBJC_METACLASS_$×5, 12 провайдеров)
+  IOKit IO* (×74, +SCDynamicStore×4, kIOMainPortDisplay×1)
+  CoreText CTFont* (×59)
++ CoreGraphics 37, AppKit 26, Metal 23, Foundation 21, QuartzCore 17+1,
+  ScreenCaptureKit 13, AuthenticationServices 14, AVFoundation 10,
+  CoreFoundation 7, SystemConfiguration 5, … ; libSystem 8 (real),
+  libsandbox 1; UNSTAGED провайдеров: 0 (PrivateFrameworks в стейджинге)
+```
+
+### Step 2 — one union supplement, three exact-length surgeries
+
+`gen-cg-supl.py` generalized (install_name parameter, link recipe echoed;
+types: kCG*/kCA* constants + `_OBJC_CLASS_$`/`_OBJC_METACLASS_$`/`___*` →
+data zero objects — the first run emitted ObjC class-refs as TEXT stubs and
+the crash came back as garbage-at-0x4031c3c031c0, the stub's `xor eax,eax;
+ret` bytes read as a data pointer). The 335-symbol union links into three
+supplement copies — the per-binary header slack dictates the install name
+(48/40/32 B → `/usr/lib/suppl.dylib`, `/s.dylib`, `/s.d`):
+
+```
+suppl.dylib (335 exp) → /usr/lib/suppl.dylib   framework   ordinal 67, 334/335
+s.dylib     (335 exp) → /s.dylib               libaperitif ordinal  3,   1/335
+s.d         (335 exp) → /s.d                   libvk_swiftshader ordinal 8, 1/335
+```
+
+`cg-supl-patch.py` generalized (`--suppl-name`, adaptive cmdsize-vs-slack,
+verify counts list entries not imported by the binary honestly) — the
+Control #8/9 recipe on SOURCE copies (race-free), ncmds+sizeofcmds grown
+together, exact-length byte patches on the imports table.
+
+### Run B result
+
+No `Symbol not found … Expected in <mapped provider>` sounds — every
+mapped wall's binds resolve through the supplements. The dlopen proceeds
+into the framework's initializers and dies on runtime semantics:
+
+```
+[darling-mldr] FATAL signal 11 (code=1) at addr=0x0
+```
+
+— a NULL dereference through a zero-data stub (the framework reads a
+class-ref/constant the stubs deliberately carry no value for; run A with
+text-typed class-refs crashed at 0x4031c3c031c0 instead, the code bytes
+read as a pointer — the type fix moved the crash address to the honest
+0x0). The wall class has changed: from binds to implementations.
+
+### Verdict (control #10, one line)
+
+Карта стен: 25 провайдеров, 335 символов (топ-3 класса: ObjC class-refs
+×102, IOKit IO* ×74, CoreText CTFont* ×59); supplements = 3 копии
+union-стаба (335 экспортов: 218 text + 117 data; per-slack install names);
+dlopen = новый класс отказа — init-time NULL-deref (FATAL signal 11 at
+addr=0x0) через нулевые стабы: символы биндятся, реализаций нет; след:
+`[darling-mldr] FATAL signal 11 (code=1) at addr=0x0`.
+
+### Repro
+
+```sh
+python3 build-freebsd/sym-wall-map.py <overlay> <missing.txt> <framework> <libs...>
+python3 build-freebsd/gen-cg-supl.py <missing.txt> suppl.s <install_name>
+clang -target x86_64-apple-macos10.12 -c suppl.s -o suppl.o
+ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
+  -install_name <install_name> -o <suppl> suppl.o     # per-slack names
+# cg-supl-patch.py on the SOURCE copies (framework + the two small libs),
+# plant the supplement copies in the stage tree via the early-sync poller,
+# run per the Control #8 recipe with CHROME_APP at the patched app copy
+```
