@@ -136,3 +136,76 @@ guest); the read layer itself works (known files read, `cafebabe` /
 text); host-openat = **not captured** — `truss -f` aborts on its own
 assertion (`find_exit_thread`, setup.c:422); failure layer = undetermined
 (guest-resolve vs emu-open vs dyld).
+
+## Control #4 — guest root pinned, presence confirmed; ktrace localizes the drop inside dyld
+
+### Step 0 — config pin (harness source, verified against the trace)
+
+Per `tests/launch-dynamic-smoke.c`: staging writes into `$LOCAL`
+(`/tmp/darling-local-overlay`, `#define LOCAL_OVERLAY`); the Chrome
+staging target is `$LOCAL/Frameworks/...`. After staging, the harness
+reassigns `od = LOCAL_OVERLAY` and passes that same directory to the
+guest twice: as `DARLING_VCHROOT_PATH` (darlingserver) and as
+`__mldr_DYLD_ROOT_PATH` (mldr rewrites it to `DYLD_ROOT_PATH` for dyld
+and prefixes LC_LOAD_DYLINKER with it). So:
+
+```
+гостевой корень = /tmp/darling-local-overlay
+стейджинг       = /tmp/darling-local-overlay/Frameworks
+совпадают       = да
+```
+
+ktrace confirms this at runtime: every guest-side path lookup in the
+probe resolves under `/tmp/darling-local-overlay` (kernel `NAMI`
+records); the root prepend is userspace-lexical — no kernel re-rooting
+in this flow. (A host-side `/Frameworks -> /tmp/…/Frameworks` symlink
+exists from an old staging session, but dyld never issues the raw
+un-prefixed spelling.)
+
+### Step 1 — presence (host-side, chrome-macho run with `DARLING_SMOKE_REFRESH=1`)
+
+```
+$LOCAL/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+  = 267024384 bytes, MH_MAGIC_64 x86_64 (cf fa ed fe)  — staged, present
+chain dirs (real entries): framework root 14, Versions 11, 154.0.8029.0 13 — padded ≥9
+```
+
+Presence in the guest root = **yes**. The previous turn's "staging
+misroute" reading is refuted: its guest-read probes never ran (the read
+tools were ELF — mldr answered `Unknown file format`), and the probe's
+`stat=` column is meaningless — it prints `0` even for paths that exist
+nowhere.
+
+### Step 2 — the same run under ktrace: what dyld actually does
+
+The guest's `fstatat(AT_SYMLINK_NOFOLLOW)` walked the **entire staged
+chain** — `Frameworks` → `…framework` → `Versions` → `154.0.8029.0` →
+the Mach-O — every component RET 0; the Mach-O itself came back
+`mode=0100755 size=267024384 ino=24720025`, RET 0. The emu stat layer
+reads the staged tree fine. dyld's dlopen fanout (fallback framework
+paths `$HOME/Library`, `/Library`, `/Network`, `/System/Library` — all
+ENOENT — then the root-prefixed raw `/Frameworks/...` path) reached the
+staged file and stat-ed it repeatedly — **and then issued no `open()`
+at all**: after the last successful fstatat the trace goes
+`mmap(anon)`/`munmap` → `write(2)` of the dlerror text →
+`image not found` (bare — thrown with an empty exception list at the end
+of dyld2 `load()`). No FOLLOW `dyld3::stat` and no `openat` ever touched
+the staged framework path; every guest syscall maps 1:1 to a host
+syscall in this trace, so an open that never appears was never issued.
+
+### Verdict (control #4, one line)
+
+guest root = `/tmp/darling-local-overlay`; framework in it = **yes**
+(267 MB Mach-O at the probed path, chain padded 14/11/13, guest
+fstatat RET 0); dlopen refusal = **dyld layer** — the candidate is
+stat-successful but dyld never opens it; probe unchanged: 41 images,
+same `image not found`.
+
+### Next measurement (for the dyld layer)
+
+Dlopen the same staged Mach-O through a space-free path with no
+`.framework/` in it (e.g. `$LOCAL/FWMACHO` as a relative symlink inside
+the guest root): success ⇒ the silent drop is specific to dyld's
+`.framework` path handling; the same refusal ⇒ the drop is upstream of
+the framework logic, between a successful stat and `loadPhase5open` in
+dyld2.
