@@ -1695,3 +1695,81 @@ MSL-init смерти (путь libsystem_c-init → MSL в chrome-закрыт�
 # rebuild side: log ends at "calling initializer … /usr/lib/libSystem.B.dylib",
 #   RC=132; stock side: dlopen refusal text (Foundation version wall)
 ```
+
+## Control #22 — delivery via a writable overlay copy lands (stock UUID-proven x3); the pin-rebuild is refused by dyld BEFORE open (its own reproducible class)
+
+### Step 1 — the pair (UUID-controlled, >=3 runs per side)
+
+Writable copy of the overlay (cp -R, no hardlinks) at a scratch path;
+DARLING_OVERLAY pointed at the copy; the copy's MSL slice replaced by the
+pin-rebuild for the second side only. Per run the criterion BEFORE reading
+any output: the `dyld: loaded: <UUID> /usr/lib/system/libsystem_malloc.dylib`
+line must equal the UUID of the artifact planted on that side (LC_UUID of
+the x86_64 slice, extracted host-side). Same probe recipe on both sides
+(Control #12 stack: chrome-launcher dlopen, early-sync poller plants ONLY
+the 57-provider version patch, DYLD_PRINT_INITIALIZERS=1; no ktrace for the
+variance runs).
+
+Stock side (artifact md5 521c6983…, slice LC_UUID 1FA0731B-F0EA-310E-8808-
+B4118C4E62D8):
+- 3/3 runs: loaded UUID == planted UUID (control OK) — the Control #18/#20
+  "plant never reaches dyld" failure mode is GONE; the guest reads the MSL
+  from the overlay copy.
+- Outcome identical 3/3 (variance M=1): `Symbol not found:
+  _kCGColorSpaceITUR_2100_PQ` — the deep symbol wall, rc=132 (the
+  launcher's normal teardown SIGILL); the poller patched 57/57 every run.
+
+Rebuild side (planted artifact md5 24933b2a… = the Control #20 rebuild,
+LC_UUID 4C4C4498-5555-3144-A176-95CC70A42E3B):
+- 3/3 runs: NO loaded line for the MSL at all (control MISMATCH, outputs
+  void by the lane's own criterion) and the run dies at startup:
+  `dyld: Library not loaded: /usr/lib/system/libsystem_malloc.dylib` +
+  `abort_with_payload: reason: …`, rc=132.
+
+### Step 2 — localization: the refusal is BEFORE open
+
+One ktrace run of the rebuild side: the staged path is walked
+component-by-component with fstatat(AT_SYMLINK_NOFOLLOW) — usr, usr/lib,
+usr/lib/system, the file — all RET 0, final stat size=392944 (the
+rebuild) — and then NO openat of the MSL ever happens; the refusal
+follows. The throw sits in dyld between path canonicalization/stat and
+file open (the /usr/lib/system route goes through dyld3's shared-cache
+machinery: dyld2.cpp loadPhase2/loadPhase5 call
+dyld3::findInSharedCacheImage on these paths).
+
+Host-side structural deltas between the stock x86_64 slice (loads) and the
+rebuild (refused) — the candidates for the pre-open rejection:
+- stock = FAT container (x86_64 @0x1000 size=403784 + i386 @0x64000
+  size=259112); rebuild = thin x86_64, 392944 bytes
+- ncmds 19 vs 15; LC_BUILD_VERSION(0x32) vs LC_VERSION_MIN_IPHONEOS(0x24,
+  ver=0xa0c00)
+- stock-only load commands: LC_REEXPORT_DYLIB (0x8000001c, size=312),
+  LC_DYLD_EXPORTS_TRIE (0x80000023), cmds 0x2a/0x1e
+- LC_ID_DYLIB cur/compat: 0x2e3/0x63 (stock) vs 0x2e6/0x5f (rebuild);
+  both carry an ad-hoc LC_CODE_SIG (datasize=0x30)
+
+### Verdict (control #22, one line)
+
+Delivery via the overlay copy works — stock: LOADED UUID == planted artifact
+x3, variance M=1 (symbol wall); the rebuild has its own reproducible class
+3/3: dyld refuses it BEFORE open (stat-walk OK, size=392944, "Library not
+loaded: /usr/lib/system/libsystem_malloc.dylib", loaded UUID absent) —
+candidates: FAT/thin container, LC-set deltas (REEXPORT/EXPORTS_TRIE only
+in stock), version-cmd class; the Control #20 SIGILL attribution is now
+fully withdrawn — the rebuild has never loaded under any plant; next =
+wrap the thin rebuild in a FAT container matching the stock layout (the
+cheapest discriminator), or chase dyld3's /usr/lib/system cache routing
+that rejects before open.
+
+### Repro
+
+```sh
+# cp -R the overlay to a scratch path; DARLING_OVERLAY=<copy>; stock side:
+#   run the Control #12 probe 3x, compare
+#   dyld: loaded: <UUID> /usr/lib/system/libsystem_malloc.dylib against
+#   the x86_64-slice LC_UUID of <copy>/usr/lib/system/libsystem_malloc.dylib
+# rebuild side: cp the pin-rebuild over that path (md5 24933b2a…), run 3x:
+#   loaded line absent, "dyld: Library not loaded: /usr/lib/system/
+#   libsystem_malloc.dylib", rc=132; ktrace -i shows the fstatat component
+#   walk (RET 0, size=392944) and NO openat before the refusal
+```
