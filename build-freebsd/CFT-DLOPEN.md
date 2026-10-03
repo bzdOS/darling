@@ -796,3 +796,68 @@ libobjc+0x24746 не звучит; dlopen = СЛЕДУЮЩАЯ ФАЗА — init
 #   combined dylib via the early-sync poller, run per Control #11 recipe
 #   with DYLD_PRINT_INITIALIZERS=1
 ```
+
+## Control #13 — stub-behavior blame: the wild jump is malloc-zone semantics, not a supplement stub
+
+### Marker (blame, not a fix)
+
+All 233 supplement text stubs were rebuilt with `int3` bodies (the real
+ObjC classes and data stubs untouched) and planted as the per-slack
+copies. The run crashed with the IDENTICAL signature as control #12 —
+`FATAL signal 11 (code=2) at addr=0x7fffffdfda68, rip=rsp=stack` — **no
+int3 trap fired**: the wild jump never entered a supplement stub. The
+registers are stable across runs (rcx=rdx=rdi=0x307, rsi=0x50000).
+
+### Import resolution at the call point
+
+The Chrome framework's initializer at offset 0x212A4C0 (mh
+0x1579dda4c000, the last `calling initializer … in //Frameworks/…`
+print) starts with four stub calls. The imports behind them resolve from
+the file itself: un-bound chained-fixup slots carry the import ordinal in
+their own bytes (ordinal = slot value & 0xFFFFFF;
+`llvm-objdump21 --macho --chained-fixups` confirms the table):
+
+```
+slot __DATA_CONST+0x1fd8 -> import[1209] _malloc_get_all_zones         <- libSystem
+slot __DATA_CONST+0x80   -> import[15]   _strlen                      <- libSystem
+slot __DATA_CONST+0x29f0 -> import[1539] _malloc_default_zone         <- libSystem
+slot __DATA_CONST+0x29d8 -> import[1536] _malloc_default_purgeable_zone <- libSystem
+```
+
+The disasm around the initializer shows the zone-API pattern: call
+`_malloc_get_all_zones` → test → out-params from stack locals → later
+`callq *(%rax)` / `lock decl 0x8(%rbx)` / `callq *0x18(%rax)` — zone
+retain/release/method dispatch through the returned zone object. The
+overlay's libsystem_malloc exports all three zone symbols (fat slices at
+0x24d40/0x211a0 etc.), so the binds resolved to the overlay's libmalloc —
+and its zone objects do not carry the macOS method-table layout this
+macOS-13 CFT build dispatches through; the dispatch jumped to a stack
+address.
+
+### Verdict (control #13, one line)
+
+Вызов: Chrome framework initializer fw+0x212A4C0 (dyld-trace print);
+стаб: `_malloc_get_all_zones` + `_malloc_default_zone` +
+`_malloc_default_purgeable_zone` (libSystem ordinal 66 → overlay
+libsystem_malloc.dylib, text, реализованы, но не по macOS-контракту зон);
+вызыватель ждёт: malloc-zone объект с рабочей метод-таблицей (диспатч по
+vtable-слотам 0x0/0x18 через возвращённую зону); реализация в дереве:
+ЕСТЬ — `src/external/libmalloc/src/malloc.c:2293` +
+`malloc_get_all_zones(task_t, memory_reader_t, vm_address_t**, unsigned*)`
+и собранный libsystem_malloc.dylib экспортирует все три символа; фикс =
+класс: привести реализацию зон libmalloc к macOS-контракту
+(layout/vtable сигнатуры), стабы не при чём — int3-маркеры 233 стабов
+отработали без единой ловушки.
+
+### Repro
+
+```sh
+# marker: sed the supplement stub bodies to int3 (real classes/data kept),
+#   relink, plant via the early-sync poller, run per control #12 — the
+#   crash signature is unchanged => no supplement stub was called
+# import resolution: the GOT slot's own 8 bytes hold the unbound fixup
+#   entry (ordinal = value & 0xFFFFFF); cross-check with
+#   llvm-objdump21 --macho --chained-fixups (imports table)
+# nm -gU <overlay libsystem_malloc.dylib> -> the three zone symbols
+# grep -n "malloc_get_all_zones" src/external/libmalloc/src/malloc.c
+```
