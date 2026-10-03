@@ -861,3 +861,95 @@ vtable-слотам 0x0/0x18 через возвращённую зону); ре
 # nm -gU <overlay libsystem_malloc.dylib> -> the three zone symbols
 # grep -n "malloc_get_all_zones" src/external/libmalloc/src/malloc.c
 ```
+
+## Control #14 — zone vtable: the measured layout delta (and a second export defect)
+
+### The probe (blame, not a fix)
+
+`tests/zone-vtable-probe.c` (built per the build-crash-probe.sh recipe;
+the SDK flat tarball lacks stdbool.h so dlfcn.h is replaced by direct
+declarations) dumps `malloc_default_zone()`'s object the way the chrome
+framework's initializer consumes it — the first eight qwords, each
+resolved through `dladdr`. Run under the harness as the test binary —
+no chrome staging involved.
+
+### The dump (slide-stable, one run)
+
+```
+default_zone=0x2d4b5b133000
+vtable[0]=0x0                dladdr=0 sym=-          ← reserved1: NULL
+vtable[1]=0x0                dladdr=0 sym=-          ← reserved2: NULL
+vtable[2]=default_zone_size      (valid code)
+vtable[3]=default_zone_malloc    (valid code)
+vtable[4]=default_zone_calloc    (valid code)
+vtable[5]=default_zone_valloc    (valid code)
+vtable[6]=default_zone_free      (valid code)
+vtable[7]=default_zone_realloc   (valid code)
+```
+
+The runtime layout matches the pinned header exactly: the Darling
+libmalloc's `struct _malloc_zone_t` (submodule
+`src/external/libmalloc` @4f2a808d — see the submodule note below) leads
+with `void *reserved1; void *reserved2;` (include/malloc/malloc.h:67-68)
+before `size/malloc/calloc/valloc/free/realloc`. macOS-13 — the layout
+the chrome framework was BUILT against — has no reserved pair: slot0 is
+the `size` callback, slot1 `free`, slot2 `realloc`, slot3 `destroy`,
+slot4 `zone_name`, slot5 `batch_malloc`, slot6 `batch_free`, slot7
+`introspect`. Every macOS-13 slot sits +2 (16 bytes) later in the
+overlay's zone.
+
+### The dispatch site (control #13 disasm) vs the measured slots
+
+`callq *(%rax)` reads slot0; `callq *0x18(%rax)` reads slot3. Under
+macOS-13 those are `size` and `destroy` — valid callbacks. Under the
+overlay: slot0 = NULL (a call through a NULL slot — the control #13 wild
+jump) and slot3 = `malloc` (a wrong-semantic callback). The whole
+method-table dispatch is misaligned by the two reserved fields.
+
+### Second measured defect (same era class)
+
+`_mach_task_self_` in the overlay's `libsystem_kernel.dylib` is a **BSS
+symbol (type B @0x9bf7c)** — the probe's first runs called it and died
+with `FATAL 11 code=2 rip=<the symbol address>` (NX on a data page,
+reproduced slide-stable: …bf7c twice). macOS-13 binaries CALL this
+symbol; the overlay exports it as a variable — the old-SDK semantics vs
+the modern callable contract. `malloc_get_all_zones(task=NULL)` also
+faults (addr=0x8, an unguarded NULL+8 read in the remote-zones path).
+
+### Submodule note (step 3 of the dispatch)
+
+The actual path: `src/external/libmalloc` — the superproject submodule
+entry `src/external/libmalloc`, physically nested under the tree root's
+own `src/` directory (repo-relative: `<tree-root>/src/external/libmalloc`).
+Before this lane its checkout was `a57991e` (update_sources_11.5) while
+the superproject pins `4f2a808d`; the pin object was absent locally and
+was fetched from the submodule remote this turn, and the checkout now
+sits AT the pin (`git rev-parse HEAD` →
+4f2a808dfc675356c509bc54a8ee530cdcfc4c4f). Control #13's path claim was
+relative-correct but at the wrong commit — corrected here.
+
+### Verdict (control #14, one line)
+
+zone ptr=default_zone (слайд-стабилен); vtable[0..7] = NULL, NULL,
+default_zone_size, default_zone_malloc, default_zone_calloc,
+default_zone_valloc, default_zone_free, default_zone_realloc; слот
+`callq *(%rax)` = vtable[0] = NULL (мусор под macOS-13-слот `size`);
+дельта layout vs macOS-13 = два ведущих `reserved1/reserved2`
+(include/malloc/malloc.h:67-68 пина 4f2a808d) — весь macOS-13-слоты
+сдвинуты на +2 (+16 Б); фикс-мишень = `struct _malloc_zone_t` +
+все инициализаторы зон в src/malloc.c того же пина (слоты записи
+сдвигаются вместе с layout); второй независимый дефект той же эпохи =
+`_mach_task_self_` в overlay libsystem_kernel (B @0x9bf7c, вызов NX-fault,
+замер дважды).
+
+### Repro
+
+```sh
+# build tests/zone-vtable-probe.c per build-crash-probe.sh (SDK flat +
+#   staged overlay libSystem; no dlfcn.h — stdbool.h missing in the flat)
+# run via the harness as DARLING_TEST_BINARY=zone-vtable-probe-macho
+#   (no chrome staging needed); the probe never calls mach_task_self_
+# nm -gU/libsystem_kernel: _mach_task_self_ -> B @0x9bf7c (type B)
+# the pinned layout: src/external/libmalloc (at 4f2a808d)
+#   include/malloc/malloc.h:64-93
+```
