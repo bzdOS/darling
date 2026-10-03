@@ -1773,3 +1773,111 @@ that rejects before open.
 #   libsystem_malloc.dylib", rc=132; ktrace -i shows the fstatat component
 #   walk (RET 0, size=392944) and NO openat before the refusal
 ```
+
+## Control #23 — FAT wrapper matches the stock layout; the refusal is unchanged but now NAMED: "dyld export info overruns __LINKEDIT" (exports-tie class)
+
+### Step 1 — the wrap (layout vs stock)
+
+`build-freebsd/fat-wrap.py`: the stock arch table is reproduced exactly —
+x86_64 @0x1000 (cputype 0x1000007, subtype 3, align 12) holds the thin
+rebuild slice (392944 B, LC_UUID 98444C4C-5555-4431-A176-95CC70A42E3B =
+the rebuild's own UUID), i386 @0x64000 (cputype 0x7, subtype 3, align 12,
+259112 B) copied byte-for-byte from the stock container (its slice
+LC_UUID 098A0C35-C830-5137-8679-2F4E8AEC6E3E). Container size 668712 ==
+stock; the x86_64 slot ends 0x60ef0 < i386 offset 0x64000 (no overlap);
+wrap artifact md5 d330dc2486e5b63276b1b4ba0735d464.
+
+### Step 2 — the pair (UUID-controlled, 3+3 runs, the #22 recipe)
+
+Stock side 3/3: control OK (loaded UUID == planted 1FA0731B-F0EA-310E-
+8808-B4118C4E62D8); outcome = symbol wall `Symbol not found:
+_kCGColorSpaceITUR_2100_PQ`, rc=132 (M=1, identical to #22).
+
+Wrap side 3/3: NO loaded line for the MSL (control mismatch by the lane's
+criterion), `dyld: Library not loaded: /usr/lib/system/
+libsystem_malloc.dylib` + abort_with_payload, rc=132 — the refusal class
+is IDENTICAL to the thin rebuild's (#22); it did not shift.
+
+ktrace of the wrap side names the defect verbatim (abort_with_payload fd-1
+write; the fd-2 message stream): `Reason: no suitable image found.  Did
+find:\n  /usr/lib/system/libsystem_malloc.dylib: malformed mach-o image:
+dyld export info overruns __LINKEDIT; code: 7` — Referenced from
+/usr/lib/libSystem.B.dylib. No dyld shared cache exists in the overlay
+(find: 0 hits), so the #22 "dyld3 cache routing pre-open" attribution is
+disproven as the mechanism: dyld parses the file and rejects it
+structurally.
+
+### Step 3 — host-side map (what actually differs, measured)
+
+- LC_ID_DYLIB: BOTH artifacts carry cur=0x0, compat=0x10000 (cmdsize 64)
+  — the #22 doc's 0x2e3/0x63 vs 0x2e6/0x5f figures do not match the files
+  under test; ID-version is eliminated by measurement.
+- The stock x86_64 slice has LC_DYLD_EXPORTS_TRIE (cmdsize=64, dataoff=0x18,
+  datasize=2; the 2 trie bytes at file offset 0x18 = 85 00 — the flags
+  field bytes, flags=0x00110085 in both files). The rebuild has NO
+  LC_DYLD_EXPORTS_TRIE.
+- Both carry LC_DYLD_CHAINED_FIXUPS (cmdsize 48, dataoff = __LINKEDIT
+  start, datasize=0x30) whose "header" fields are string garbage (rebuild
+  symbols_offset=0x59107044; stock 0x445d4153). Stock survives because
+  its exports-trie LC short-circuits dyld's export derivation; the
+  rebuild, with no trie LC, sends dyld into the fixups-derived fallback,
+  whose region overruns __LINKEDIT.
+- SYMTAB regions fit exactly in both (rebuild strings end 0x5e3b0 ==
+  __LINKEDIT end 0x5e3b0; stock 0x62948 == its end).
+
+### Step 4 — the two authorized in-place experiments (both refused)
+
+EXP-1 (+LC_DYLD_EXPORTS_TRIE, cmdsize=16, appended at the LC-area end
+0x7c8, dataoff=0x7d8 inside the verified-zero slack 0x7c8..0x7f0, trie
+bytes 00 00; ncmds 15→16, sizeofcmds 1960→1976; __text at 0x7f0
+untouched; LC_UUID unchanged): 3/3 refused — the reason moved to
+`malformed mach-o image: dylib load command #15 has offset (2008) outside
+its size (16); code: 7` — dyld applies a dylib-name-offset check
+(offset < cmdsize) to the trie LC; stock passes it via cmdsize=64
+(0x18=24 < 64).
+
+EXP-2 (dataoff 0x7d8→0x0d — the 2 zero bytes at file 0x0d..0x0f inside
+the mach header; 13 < 16 passes the offset<size check; same cmdsize 16;
+wrap md5 efeee5fbeacbfb5eef17ba85a70a32e7): 3/3 refused — back to
+`dyld export info overruns __LINKEDIT; code: 7`. A 16-byte trie LC is not
+honored as the export source; the garbage fixups fallback re-enters. The
+rebuild's header flags bytes [0x18:0x1a] = 85 00, identical to stock's —
+a faithful stock-geometry transplant needs no byte writes beyond the LC
+header itself.
+
+### Verdict (control #23, one line)
+
+FAT wrapper = stock layout exact (arch table, i386 byte-identical, size
+668712); pair #23: rebuild = refusal same 3/3 (no loaded line, rc=132)
+but the reason is now named verbatim — `malformed mach-o image: dyld
+export info overruns __LINKEDIT; code: 7`; root = named — not FAT
+(eliminated by the identical-layout wrap), not LC_ID (measured identical
+0x0/0x10000), but the exports-tie class: the rebuild lacks
+LC_DYLD_EXPORTS_TRIE (stock: cmdsize=64, dataoff=0x18, datasize=2) while
+its LC_DYLD_CHAINED_FIXUPS is garbage-fed; both authorized experiments
+(16-byte trie LC at dataoff 0x7d8 and 0x0d) refused — dyld demands the
+stock geometry; remainder = next phase, same method: transplant the stock
+trie-LC geometry exactly (rewrite the 48-byte bogus fixups LC in place:
+cmd 0x80000022→0x80000023, dataoff=0x18, datasize=2 — the bytes at
+[0x18:0x1a] are already 85 00, no other writes) or fix the link step in
+build-libmalloc-zone.sh to emit the stock-style empty trie LC; dyld3
+routing itself stays out of layer — measurement only.
+
+### Repro
+
+```sh
+# wrap: python3 build-freebsd/fat-wrap.py <stock-msl> <rebuild-thin> <out>
+#   -> arch table == stock (cputype/offset/align), i386 slice byte-identical,
+#      x86_64 slice UUID == the rebuild's
+# pair: the #22 recipe — overlay copy as DARLING_OVERLAY, plant per side,
+#   poller patches the 57-provider version list after the staging marker,
+#   3 runs/side; control = "dyld: loaded: <UUID> /usr/lib/system/
+#   libsystem_malloc.dylib" == the planted slice's LC_UUID
+#   stock: ctrl OK 3/3 (symbol wall); wrap: no loaded line 3/3, rc=132
+# ktrace -f -i on the wrap side: the abort_with_payload fd-1 write carries
+#   the full reason ("...malformed mach-o image: dyld export info
+#   overruns __LINKEDIT; code: 7")
+# EXP-1/EXP-2: in-place LC insert/patch per Step 4 — exact-length discipline:
+#   LC-area slack 0x7c8..0x7f0 is 40 zero bytes, __text at 0x7f0 untouched,
+#   LC_UUID unchanged (98444C4C-5555-4431-A176-95CC70A42E3B)
+```
