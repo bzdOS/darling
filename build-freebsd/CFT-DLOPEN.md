@@ -728,3 +728,71 @@ reexport-списками (zero-data class-refs — тупик Run B, задок
 # nm -gU <overlay CFNetwork/Foundation> -> absence of the class
 # grep -n "@implementation NSURLProtocol" src/external/cfnetwork/src/URL/NSURLProtocol.m
 ```
+
+## Control #12 — real ObjC classes in the supplement: the libobjc crash falls, initializers run, the wall moves to stub behavior
+
+### Mechanism (choice: compiled classes, no in-place overlay writes)
+
+A generated `objc-suppl.m` carries an empty `@interface/@implementation`
+pair for each of the 97 class-refs from the Control #10 map — compiled
+`-fobjc-runtime=macosx-10.12` against the committed SDK flat tarball, so
+each class becomes a REAL `objc_class`/`objc_metaclass` in `__DATA` with a
+`__objc_classlist` entry that libobjc registers when the image loads (the
+same per-image processing that crashed on the zero quads now registers
+valid classes). The class/metaclass names leave the stub part (no
+duplicate exports); the combined dylib links stubs + classes and depends
+on `/usr/lib/libobjc.A.dylib` (`__objc_empty_cache` resolves there):
+
+```
+suppl.dylib: 427 exports = 233 stubs + 97 classes x 2
+  _OBJC_CLASS_$_NSURLProtocol      D @0x3a18
+  _OBJC_METACLASS_$_NSURLProtocol  D @0x3a40
+```
+
+The same bytes are planted as the per-slack copies (`/usr/lib/suppl.dylib`,
+`/s.dylib`, `/s.d`); the stage tree carries them (nm -gU of the staged
+file reproduces the pair, 427 exports). The Control #11 surgeries on the
+SOURCE copies re-point the 335-name list — the 102 class-ref imports
+included — to the supplement ordinal.
+
+### Run A result
+
+`libobjc+0x24746` does not sound. `DYLD_PRINT_INITIALIZERS=1` now shows
+38 initializer calls (Control #11: 14, all startup) — the cascade runs
+its initializers: libgif, libGL ×2, CoreGraphics ×2, and the Chrome
+framework's own (`calling initializer function 0x1579dfb764c0 in
+//Frameworks/…/Google Chrome for Testing Framework`). The failure moved:
+
+```
+[darling-mldr] FATAL signal 11 (code=2) at addr=0x7fffffdfda68
+  rip=0x7fffffdfda68  (the stack — a wild jump), rsp=0x7fffffdfda68
+```
+
+— an init-time wild jump through a behaviorally-empty stub (a stub that
+returns 0 used as a function pointer/callback inside the framework's
+initializer). The wall class changes again: from class-structure to stub
+*behavior* — the102 class-refs are structurally real now; the 233 text
+stubs remain0-returning.
+
+### Verdict (control #12, one line)
+
+NSURLProtocol реален в overlay (nm -gU staged suppl.dylib: 2 символа —
+`_OBJC_CLASS_$_`+`_OBJC_METACLASS_$_` @0x3a18/0x3a40, 427 экспортов);
+libobjc+0x24746 не звучит; dlopen = СЛЕДУЮЩАЯ ФАЗА — init-time wild jump
+(FATAL 11 code=2, rip=стек) после вызова инициализатора Chrome framework
+— стена сменилась на поведение стабов (функции-стабы возвращают 0 и
+используются как указатели); покрыто class-ref'ов: 102 (97 классов ×2,
+все class-ref'ы из карты Control #10).
+
+### Repro
+
+```sh
+# gen objc-suppl.m (empty @interface/@implementation per class-ref name),
+# clang -target x86_64-apple-macos10.12 -fobjc-runtime=macosx-10.12
+#   -nostdinc -I<unpacked-sdk>/usr/include -c objc-suppl.m
+# ld64.lld -dylib ... -install_name /usr/lib/suppl.dylib
+#   -o suppl.dylib stub.o objc-suppl.o <overlay libobjc.A.dylib>
+# cg-supl-patch.py on the source app copies (335-name list), plant the
+#   combined dylib via the early-sync poller, run per Control #11 recipe
+#   with DYLD_PRINT_INITIALIZERS=1
+```
