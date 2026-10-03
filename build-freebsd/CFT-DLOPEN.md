@@ -503,3 +503,86 @@ class (the extras track), not versions.
 #   System/Library/PrivateFrameworks
 # Run D (late sync) vs Run E (early sync) is the A/B: 0.0.0 vs symbol wall
 ```
+
+## Control #9 — the CoreGraphics symbol wall: 37 symbols, supplement + ordinal surgery; the wall moves to CoreFoundation
+
+### Step 1 — inventory (one pass)
+
+`nm -u` alone carries no ordinals on this binary; the ordinal map comes
+from the chained-fixups imports table
+(`build-freebsd/chrome-imports-by-ordinal.py` — lib_ordinal bits 0-7, flag
+at bit 8, name_offset from bit 9; validated: 2696/2696 imports resolve to
+names in the binary's `nm -u` set). Ordinal 3 = CoreGraphics; 162 imports;
+diffed against the overlay stub's exports (`nm -gU`, 583 symbols):
+
+```
+CG-стена: 37 символов — CGColor(2), kCGColorSpace*/CGDisplayColorSpace(7),
+CGDirectDisplay/CGDisplay* (7), CGDisplayStream*(5), CGEventSource*(2),
+CGFontRendering*(1), CGPDFPage*(1), CGScreenCapture*(2), CGRegion*(1),
+CGSSetWindow*(4), CGWindowList*(3), kCGDisplayStream* constants(4)
+```
+
+The current `darling-extras.dylib` already exports
+`_kCGColorSpaceITUR_2100_PQ` (measured: 969 exports, the symbol present)
+yet Run E still failed — dyld's two-level binds resolve only in the dylib
+the ordinal names, so an injected extras cannot satisfy them. The symbols
+must live in a dylib the framework's own load commands reference.
+
+### Step 2 — supplement + exact-length ordinal surgery
+
+`gen-cg-supl.py` emits a stub .s (kCG* constants -> data zero objects,
+the rest -> text stubs); clang `-target x86_64-apple-macos10.12` +
+`ld64.lld -dylib -install_name /usr/lib/cg-supl.dylib` produce the
+supplement (37 exports, 10904 B). `cg-supl-patch.py` then, on the file to
+be staged:
+
+- appends one LC_LOAD_DYLIB (48 B, name `/usr/lib/cg-supl.dylib`) in the
+  header-page slack (exactly 48 B of zero padding before `__text`);
+- grows `ncmds` 78->79 **and `sizeofcmds` 0x27f0->0x2820** — without the
+  sizeofcmds bump dyld rejects the command ("malformed load command #78 of
+  79 … size too large", Run G); the grown area still ends exactly at
+  `__text` (0x2840);
+- rewrites lib_ordinal 3->67 for exactly the 37 listed imports in the
+  chained-fixups imports table (bit-exact byte patches; verify: 37/37 at
+  ordinal 67, the other 125 ordinal-3 imports untouched).
+
+Run F (stage-copy surgery raced dyld's read — dyld bound the unpatched
+imports, same symbol wall) vs Run G (patched source app staged race-free —
+dyld read the patched file: the sizeofcmds bug surfaced as the malformed-DC
+error) vs Run H (fixed): the CG wall falls.
+
+### Run H result
+
+```
+dyld: unloaded: … /usr/lib/cg-supl.dylib          ← the supplement loaded
+dlopen //Frameworks/…/Google Chrome for Testing Framework: Symbol not found: ___NSArray0__struct
+  Referenced from: //Frameworks/… (which was built for Mac OS X 13.0)
+  Expected in: /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+```
+
+`_kCGColorSpaceITUR_2100_PQ` no longer sounds; the refusal moved to the
+next provider — CoreFoundation, symbol `___NSArray0__struct`.
+
+### Verdict (control #9, one line)
+
+CG-стена: 37 символов (CGColorSpace/Display/DisplayStream/CGS/WindowList
+classes; kCG* constants as data, the rest text); dlopen = новый отказ —
+`Symbol not found: ___NSArray0__struct`, Expected in CoreFoundation (the
+supplement loaded and the CG binds resolved; the class of wall repeats on
+the next stub provider); след: dlerror
+`Symbol not found: ___NSArray0__struct … Expected in: …/CoreFoundation.
+framework/Versions/A/CoreFoundation`.
+
+### Repro
+
+```sh
+python3 build-freebsd/chrome-imports-by-ordinal.py <framework> --missing <ordinal> <nm-gU-exports.txt>
+python3 build-freebsd/gen-cg-supl.py <missing.txt> cg-supl.s
+clang -target x86_64-apple-macos10.12 -c cg-supl.s -o cg-supl.o
+ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
+  -install_name /usr/lib/cg-supl.dylib -o cg-supl.dylib cg-supl.o
+# patch the framework SOURCE copy (race-free; the stage copy raced dyld's
+# read in Run F) with cg-supl-patch.py; plant cg-supl.dylib in the stage
+# tree's usr/lib via the early-sync poller; run per the Control #8 recipe
+# with CHROME_APP pointing at the patched app copy
+```
