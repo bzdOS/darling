@@ -131,10 +131,17 @@ for f in "${BUILD}"/src-fixed/*.c; do
 done
 echo "compiled $(wc -l < "${BUILD}/objs.txt") objects"
 
-# 7. export set = the original overlay dylib's (same contract)
+# 7. export set = the original overlay dylib's (same contract), filtered
+#    to the symbols the objects actually export globally: ld64.lld cannot
+#    force MALLOC_NOEXPORT-hidden symbols out (the unfiltered list produced
+#    181 "cannot export hidden symbol" warnings and a malformed export
+#    trie — measured: dyld faults while binding libobjc's malloc imports
+#    against that trie)
 nm -gU "${OVERLAY}/usr/lib/system/libsystem_malloc.dylib" 2>/dev/null \
-    | awk 'NF >= 3 { print $3 }' | sort -u > "${BUILD}/exports.txt"
-echo "exports from the original: $(wc -l < "${BUILD}/exports.txt")"
+    | awk 'NF >= 3 { print $3 }' | sort -u > "${BUILD}/exports-orig.txt"
+nm "${BUILD}"/obj/*.o 2>/dev/null | awk '$2 ~ /^[TDBR]$/ { print $3 }' | sort -u > "${BUILD}/exports-visible.txt"
+comm -12 "${BUILD}/exports-orig.txt" "${BUILD}/exports-visible.txt" > "${BUILD}/exports.txt"
+echo "exports: original $(wc -l < "${BUILD}/exports-orig.txt"), visible $(wc -l < "${BUILD}/exports-visible.txt"), final $(wc -l < "${BUILD}/exports.txt")"
 
 # 8. link: original install name + versions + export list; imports stay
 #    undefined exactly like the original overlay dylib carries them
