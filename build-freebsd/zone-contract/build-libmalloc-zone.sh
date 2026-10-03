@@ -147,6 +147,12 @@ echo "exports: original $(wc -l < "${BUILD}/exports-orig.txt"), visible $(wc -l 
 #    undefined exactly like the original overlay dylib carries them
 #    (the closure does not export the $UNIX2003 variants of mprotect/
 #    write/sleep/kill — the original links them as imports)
+# ld64.lld in this toolchain has no -segalign (silently ignored —
+# measured: geometry unchanged) and does not round a segment's vmsize up
+# to a page boundary, so __TEXT's raw end overlaps __DATA's vmaddr; the
+# residual is fixed post-link by fixup-segment-vm.py (exact-length LC
+# field surgery — vmaddrs only, file offsets untouched; the fixup
+# streams in __LINKEDIT are segment-relative, so nothing is rewritten)
 ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
     -undefined dynamic_lookup \
     -install_name /usr/lib/system/libsystem_malloc.dylib \
@@ -168,6 +174,11 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${BUILD}/libsystem_malloc.dylib" \
     "${DARLING_OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
     "/usr/lib/system/libsystem_c.dylib"
+
+# segment vm geometry: __DATA vmaddr moves to align_up(__TEXT end),
+# every __DATA section addr follows, __LINKEDIT vmaddr stays contiguous
+python3 "${SCRIPT_DIR}/fixup-segment-vm.py" \
+    "${BUILD}/libsystem_malloc.dylib"
 
 echo "=== built dylib ==="
 ls -la "${BUILD}/libsystem_malloc.dylib"

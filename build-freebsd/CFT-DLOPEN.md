@@ -1988,3 +1988,96 @@ build-libmalloc-zone.sh; фикс = СТОП по (3б) — третий экс�
 #   overlap 0x40; stock [0x0,0x52000)/[0x52000,0x58000)/[0x58000,0x62948)
 #   contiguous
 ```
+
+## Control #25 — vm-geometry: the rebuild PASSES dyld3's image checks and loads; the refusal class moves to runtime init
+
+Task lane #95, branch task/cft-vm-geometry (from pr-arm64 after the
+89ad3a444 merge). The #94 refusal `malformed mach-o image: segment
+__DATA vm overlaps segment __TEXT` (overlap 0x40, ld64.lld does not
+round __TEXT's vmsize up to a page and has no -segalign) is closed by a
+post-link fixup; the delivery layer — dyld3 pre-open image checks — now
+PASSES and the rebuilt MSL LOADS in the guest.
+
+### Link variants (two, both measured dead ends; no third)
+
+- `-segalign 0x1000`: silently ignored — this ld64.lld has no such
+  option (`--help` has only -pagezero_size/-sectalign/-sectorder);
+  artifact byte-identical (md5 b6e459c3 unchanged), geometry unchanged;
+- `-add_empty_section __TEXT __zpad` + `-sectalign __TEXT __zpad
+  0x1000`: __TEXT grew +0x1000 but its end stayed `...040` (unaligned),
+  __DATA still overlapped by 0x40.
+
+### The fix: fixup-segment-vm.py (build-freebsd/zone-contract/, exact-length LC field surgery + one zero-pad insertion)
+
+Three measured revisions, each refusal class recorded verbatim:
+
+- r1 (vmaddrs only, __TEXT vmsize page-rounded): refusal `segment
+  __TEXT has vmsize != filesize and is executable` (3/3) — dyld checks
+  executable segments for vmsize == filesize (stock __TEXT: both
+  0x52000);
+- r2 (+0xfc0 zero-pad at __TEXT's file end so filesize == vmsize;
+  __DATA fileoff +7 section offsets + LC offset fields — LC_SYMTAB
+  symoff/stroff, LC_DYSYMTAB tocoff/modtaboff/extrefsymoff/
+  indirectsymoff/extreloff/locreloff, LC_DYLD_INFO_ONLY rebase/bind/
+  weak/lazy/export offs, LC_DATA_IN_CODE, LC_SEGMENT_SPLIT_INFO —
+  shifted +0xfc0; fixup streams are segment-relative, none rewritten):
+  __LINKEDIT vmaddr was left at 0x55000 while __DATA moved to
+  [0x50000,0x56000) → refusal `segment __LINKEDIT vm overlaps segment
+  __DATA` (3/3);
+- r3 (+ __LINKEDIT vmaddr follows __DATA's new end): static criterion
+  MET — segments contiguous and page-aligned, no overlaps,
+  __TEXT vmsize == filesize (0x50000), trie/upward record LC[15]
+  preserved (cmd 0x80000023, cmdsize 64, name offset 0x18,
+  /usr/lib/system/libsystem_c.dylib — byte-identical to stock;
+  the `85 00` at file offset 0x18 are the mach-header flags bytes, as
+  in stock), LC_UUID linker-computed (4C4C446A-5555-3144-A1B2-
+  F57C46954BD1), artifact 390152 B (+0xfc0), md5 39d30039, symtab
+  parses (283 exports, zone symbols at sane addresses).
+
+### The pair (#22 recipe: fresh 620M overlay copy, poller on the
+PrivateFrameworks staging marker, control = loaded UUID == planted
+UUID read BEFORE any outcome, 3 runs per side)
+
+- stock 3/3: ctrl OK (loaded 1FA0731B-F0EA-310E-8808-B4118C4E62D8),
+  outcome = the reference wall `Symbol not found:
+  _kCGColorSpaceITUR_2100_PQ` (delivery-layer success reference);
+- fixed 3/3: ctrl OK — `dyld: loaded:
+  <4C4C446A-5555-3144-A1B2-F57C46954BD1> /usr/lib/system/
+  libsystem_malloc.dylib` — all three `malformed mach-o image`
+  classes are GONE; the refusal moved to RUNTIME: `FATAL signal 11
+  (code=1) at addr=0xffffffffffffff8c` (NULL-0x74 deref), rip inside
+  libSystem.B's initializer region (preceded by `calling initializer
+  function 0xddc12a8f110 in /usr/lib/libSystem.B.dylib`), handler
+  frames: mldr crash_debug_handler ← libthr _pthread_sigmask ←
+  pthread_signals_unblock_np. The Chrome dlopen is NOT reached on the
+  fixed side (stock reaches the CG wall); the runtime init-cascade
+  class of the rebuilt MSL (Controls #18/#20/#21 lineage) is the next
+  lane's subject.
+
+### Verdict (control #25, one line)
+
+Зависимости = 5/5 (4×LC_LOAD kernel/platform/dyld/compiler_rt +
+LC_UPWARD system_c; LC[15] байт-в-байт со стоком, совпал); probe =
+загрузка — все три класса `malformed mach-o image` сняты (новая
+подпись = runtime SIGSEGV addr=0xffffffffffffff8c, NULL+0x74 deref в
+инициализаторе libSystem.B); слот-карта = блокирована runtime
+init-cascade классом (падение до пробы); Control #15 dlopen = фаза: MSL
+загружен (UUID посаженный, ctrl OK 3/3), стена _kCGColorSpaceITUR_2100_PQ
+НЕ достигнута (сток side её достигает 3/3); остаток = guest-side
+трейсинг инициализатора пересобранного MSL (NULL+0x74 deref в init-цепи
+libSystem.B).
+
+### Repro
+
+```sh
+# static geometry + build (fixup wired into the script):
+sh build-freebsd/zone-contract/build-libmalloc-zone.sh
+#   -> GEOMETRY_OK, artifact 390152 B, md5 39d30039, 283 exports
+python3 build-freebsd/zone-contract/fixup-segment-vm.py <dylib>  # alone:
+#   GEOMETRY_OK, prints vm/file ranges per segment
+# the pair: fresh overlay copy + poller + UUID control per #22 recipe
+#   (cft95-matrix.sh pattern: stock 3 runs, plant fixed artifact,
+#    fixed 3 runs; control = loaded UUID read before outcomes)
+#   fixed side: dyld: loaded <4C4C446A-...> libsystem_malloc.dylib
+#   then FATAL signal 11 addr=0xffffffffffffff8c in libSystem init
+```
