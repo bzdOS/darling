@@ -25,7 +25,7 @@ import sys
 LC_LOAD_DYLIB = 0xC
 LC_SEGMENT_64 = 0x19
 LC_DYLD_CHAINED_FIXUPS = 0x80000034
-SUPPL = b"/usr/lib/cg-supl.dylib"
+DEF_SUPPL = b"/usr/lib/suppl.dylib"
 SLACK_EXPECT = 48
 
 
@@ -71,22 +71,31 @@ def import_entries(d, cf):
 
 
 def main():
-    path, missing_path = sys.argv[1], sys.argv[2]
+    args = sys.argv[1:]
+    suppl = DEF_SUPPL
+    if "--suppl-name" in args:
+        k = args.index("--suppl-name")
+        suppl = args[k + 1].encode()
+        del args[k:k + 2]
+    path, missing_path = args[0], args[1]
     missing = set(l.strip() for l in open(missing_path) if l.strip())
     d = bytearray(open(path, "rb").read())
     ncmds, sizeofcmds, first_sect, cf, dylib_count = parse(d)
     assert cf is not None, "no LC_DYLD_CHAINED_FIXUPS"
     slack = first_sect - (32 + sizeofcmds)
-    assert slack >= SLACK_EXPECT, f"slack {slack} < needed {SLACK_EXPECT}"
     for b in d[32 + sizeofcmds:first_sect]:
         assert b == 0, "slack is not zero padding"
     print(f"ncmds={ncmds} dylib_count={dylib_count} slack={slack} (need {SLACK_EXPECT})")
 
     # 1. append LC_LOAD_DYLIB in the slack
     name_off = 24
-    payload = SUPPL + b"\0"
+    payload = suppl + b"\0"
     cmdsize = (24 + len(payload) + 7) & ~7
-    assert cmdsize == SLACK_EXPECT, f"cmdsize {cmdsize} != slack budget"
+    if cmdsize > slack:
+        max_len = slack - 24 - 1
+        raise SystemExit(
+            f"cmdsize {cmdsize} > slack {slack}: install_name must be "
+            f"<= {max_len} chars for this binary (got {len(suppl)})")
     lc = struct.pack("<IIIIII", LC_LOAD_DYLIB, cmdsize, name_off,
                      0, 0xFFFFFFFF, 0xFFFFFFFF) + payload
     lc += b"\0" * (cmdsize - len(lc))
@@ -100,7 +109,7 @@ def main():
     struct.pack_into("<I", d, 20, sizeofcmds + cmdsize)
     new_ordinal = dylib_count + 1
     print(f"appended LC_LOAD_DYLIB @ {at:#x} cmdsize={cmdsize} "
-          f"install_name={SUPPL.decode()} -> ordinal {new_ordinal}")
+          f"install_name={suppl.decode()} -> ordinal {new_ordinal}")
 
     # 2. patch import ordinals for the missing symbols
     patched = 0
@@ -110,7 +119,7 @@ def main():
             v = (v & ~0xFF) | (new_ordinal & 0xFF)
             struct.pack_into("<I", d, p, v)
             patched += 1
-    print(f"import ordinals patched 3 -> {new_ordinal}: {patched}/{len(missing)}")
+    print(f"import ordinals patched -> {new_ordinal}: {patched}/{len(missing)}")
 
     open(path, "wb").write(d)
 
@@ -120,16 +129,21 @@ def main():
     assert ncmds2 == ncmds + 1 and dl2 == dylib_count + 1
     bad = []
     seen = 0
+    orig_ord = {}
     for p, lo, name in import_entries(d2, cf2):
+        orig_ord.setdefault(name, lo)
         if name in missing:
             seen += 1
             if lo != new_ordinal:
                 bad.append((name, lo))
-    others = [n for _p, lo, n in import_entries(d2, cf2) if n not in missing and lo == 3]
+    untouched = sum(1 for _p, lo, n in import_entries(d2, cf2)
+                    if n not in missing)
+    not_here = len(missing) - seen
     print(f"verify: missing-symbol imports now at ordinal {new_ordinal}: "
           f"{seen}/{len(missing)}; stragglers: {bad[:5]}; "
-          f"other ordinal-3 imports unchanged: {len(others)}")
-    assert not bad and seen == len(missing), "verification failed"
+          f"non-missing imports untouched: {untouched}; "
+          f"list entries not imported by this binary: {not_here}")
+    assert not bad and seen == patched, "verification failed"
 
 
 if __name__ == "__main__":
