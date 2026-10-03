@@ -209,3 +209,72 @@ the guest root): success ⇒ the silent drop is specific to dyld's
 `.framework` path handling; the same refusal ⇒ the drop is upstream of
 the framework logic, between a successful stat and `loadPhase5open` in
 dyld2.
+
+## Control #5 — FWMACHO: a non-"//../" candidate opens the staged Mach-O; the drop is the "//../" spelling
+
+### Setup
+
+Probe = `chrome-dlopen-probe-macho` with candidate [3] byte-patched to
+`/FWMACHO` (36-byte string slot, see repro). Executed as
+`TEST_BIN=chrome-macho` so the Chrome staging runs — same staged tree as
+Control #4. `$LOCAL/FWMACHO` is planted by a poller that waits for the
+harness to announce `Chrome framework staged:` — a plant made before the
+harness's startup `rm -rf $LOCAL` is wiped with it (the first attempt hit
+exactly that and is recorded below as not-data). Relative symlink inside
+the guest root, no hardlinks:
+
+```
+$LOCAL/FWMACHO -> Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+host-side od -N8 through the link = cf fa ed fe 07 00 00 01   (MH_MAGIC_64 x86_64)
+```
+
+### Probe results (one run, all four candidates)
+
+```
+[0] /Frameworks/…/Versions/154.0.8029.0/Google Chrome for Testing Framework
+    → Library not loaded: /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+      (Incompatible library version: requires 300.0.0, Foundation provides 0.0.0)
+[1] /tmp/Frameworks/…          → image not found
+[2] //../Frameworks/…          → image not found      ← Control #4 drop reproduces
+[3] /FWMACHO                   → Library not loaded: …/Foundation… (same as [0])
+```
+
+### ktrace of the FWMACHO attempt
+
+```
+readlink("$LOCAL/FWMACHO")   RET 114
+fstatat(NOFOLLOW) chain: Frameworks → …framework → Versions → 154.0.8029.0 → Mach-O   RET 0
+openat(AT_FDCWD, …, O_RDONLY)  NAMI "…/local-overlay/Frameworks/…/Google Chrome for Testing Framework"  RET openat 3
+pread(0x3, …, 0x1000, 0)       ← header read, then the map
+```
+
+The dlopen opened and mapped the 267 MB Mach-O through FWMACHO; the failure
+moved from "image not found" (never opened) to the framework's own dependency
+wall. For reference, the invalid pre-cleanup attempt shows the opposite
+signature: `fstatat("…/local-overlay/FWMACHO") RET -1 errno 2`, no openat,
+bare `image not found`.
+
+### Verdict (control #5, one line)
+
+FWMACHO: dlopen = success past the stat→open boundary (openat RET 3 → pread;
+refusal moved deeper to the Foundation dylib-version wall, 300.0.0 required
+vs 0.0.0 provided); layer = dyld path logic — the Control #4 drop is specific
+to the `//../` spelling (candidate [2] still bare `image not found` in the
+same run), while both non-`//../` spellings ([0] a `.framework` path, [3]
+FWMACHO) reach openat; next = bisect dyld's `//../` path handling
+(loadPhase0 root-path block), and the Foundation version wall is a separate
+blocker on the framework's dependency chain.
+
+### Repro (probe patch)
+
+```python
+data = bytearray(open("<probe>", "rb").read())
+old = b"/Google Chrome for Testing Framework\x00"       # 36 bytes
+i = data.rfind(old); assert data[i-1:i] == b"\x00"     # standalone candidate [3]
+data[i:i+len(old)] = b"/FWMACHO\x00" + b"\x00" * (len(old) - 9)
+open("<probe-patched>", "wb").write(data)
+```
+
+Run the chrome probe harness with the patched binary as the test binary
+(`DARLING_SMOKE_REFRESH=1`, `ktrace -f -i`); plant `$LOCAL/FWMACHO` after
+the `Chrome framework staged:` log line; `kdump | grep FWMACHO`.
