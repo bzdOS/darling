@@ -1026,6 +1026,42 @@ beyond the static zone — the next measurement is guest-side tracing of
 the MSL init (which field feeds the syscall) — stopped here per the
 dispatch's cascade rule.
 
+### Init-cascade trace (lane 82): the fault is in the loader's processing of libobjc, not in libmalloc
+
+The ktrace of the failing run (the run E trace) names the faulting
+sequence: the guest loads an image — `mmap(__TEXT 0x59000)`,
+`mprotect RWX → RX` (the fixup pass), `clock_gettime` — then
+`PSIG SIGSEGV SEGV_MAPERR` with rcx=rsi=rdx = a garbage pointer. The
+segment sizes identify the image: `libobjc.A.dylib` (TEXT size 0x59000,
+LINKEDIT fileoff 0x5e000 — otool of the overlay's copy matches the
+ktrace's mmap offsets exactly). The garbage signature recurs across
+slides with stable low bytes: run E 0x18ac354df555, run F
+0x3251754df555 (…4df555) — a fixed-offset value read during dyld's load
+of the stock libobjc, triggered by the faithful MSL being planted.
+
+Discriminating measurements:
+
+- my built dylib's fixup format = `LC_DYLD_INFO_ONLY` (classic), the
+  same as the original overlay dylib; `llvm-objdump21 --macho --bind`
+  parses its bind table cleanly (__DATA.__got entries → libSystem);
+- the export filter (intersecting the original's export list with the
+  objects' global symbols) does NOT change the crash: the link still
+  emits the hidden-export warnings (nm's type column cannot see
+  visibility — the filter needs `nm -m` private-external detection, a
+  refinement) and the probe run faults with the identical …4df555
+  signature;
+- the MSL's own code never runs: the fault precedes its initializer —
+  the garbage is not read from the MSL's data.
+
+Verdict (init-cascade trace, one line): сисколл = mmap/mprotect-проход
+фиксапов (dyld грузит libobjc — размеры сегментов матчат libobjc.A.dylib);
+мусор = rcx=rsi=rdx=…4df555 (стабильные младшие байты через слайды);
+источник = loader-слой (dyld-загрузчик обрабатывает фиксапы/бинды
+стокового libobjc при посадке верного MSL; код MSL ещё не выполнялся);
+слот-карта = НЕ ДОСТИГНУТА; Control #15 dlopen = НЕ ДОСТИГНУТ;
+`_mach_task_self_` = не дошло; остаток = чужой слой (dyld-загрузчик) — по
+правилу не чиню вслепую; фильтр экспорт-списка подпись краша не меняет.
+
 ### (3) — the narrow path (allowed by the dispatch): a zone-contract dylib
 
 `gen-zone-contract.py` + `zone-contract.c` produce a dylib at the
