@@ -2081,3 +2081,74 @@ python3 build-freebsd/zone-contract/fixup-segment-vm.py <dylib>  # alone:
 #   fixed side: dyld: loaded <4C4C446A-...> libsystem_malloc.dylib
 #   then FATAL signal 11 addr=0xffffffffffffff8c in libSystem init
 ```
+
+## Control #26 (шаг А) — сырое краш-свидетельство init-cascade
+
+Источник лога: `cft96-f1.log` (прогон пробы по рецепту Control #25,
+`sh cft96-run.sh f1`; 24188 строк; завершение — Segmentation fault).
+
+### Краш-блок (дословно из лога)
+
+```
+[darling-mldr] FATAL signal 11 (code=1) at addr=0xffffffffffffff8c
+  si_pid=0 si_uid=0 si_value=0x0 sival_ptr=0x0
+  rip=0x0000351ef690c482  rax=0x0000000000000001  rbx=0x00007fffffdffde0
+  rcx=0x0000000000000000  rdx=0x0000000000000000  rsi=0x0000000000000004
+  rdi=0x00007fffffdfff38  rbp=0x00007fffffdfdc30  rsp=0x00007fffffdfdba8
+  r8 =0x0000000000000000  r9 =0x0000000000000000  r10=0x0000000000000000
+  r11=0x00007fffffdfda30  r12=0x0000000000000026  r13=0x0000000000000018
+  r14=0x0000000000000020  r15=0x00000008205d60df
+  backtrace (3 frames):
+    #00 0x2227e3  0x2227e3 <crash_debug_handler+0xc3> at <ROOT>/build/dserver/mldr-real/mldr
+    #01 0x82347c45a  0x82347c45a <_pthread_sigmask+0x50a> at /lib/libthr.so.3
+    #02 0x82347ba5b  0x82347ba5b <pthread_signals_unblock_np+0x5bb> at /lib/libthr.so.3
+  guest stack dump at rsp=0x00007fffffdfdba8:
+  [gstack+   0] 0x0000351ef6874214
+  [gstack+   8] 0x1f070000ffdfdbe0
+  [gstack+  16] 0x0000000000000000
+  [gstack+  24] 0x0000000000000000
+  [gstack+  32] 0x0000000000000000
+  [gstack+  40] 0x0000000000000000
+  [gstack+  48] 0x0000000000000000
+  [gstack+  56] 0x0000000000000000
+  [gstack+  64] 0x00007fffffdfdda8
+  [gstack+  72] 0x00007fffffdfdc10
+  [gstack+  80] 0x000000082702a795
+  [gstack+  88] 0x1f070000f6874110
+  [gstack+  96] 0x0000000827164850
+  [gstack+ 104] 0x00007fffffdfff38
+  [gstack+ 112] 0x00007fffffdffe00
+  [gstack+ 120] 0x00007fffffdffdf0
+  [gstack+ 128] 0x00000001ffdfdda8
+  [gstack+ 136] 0x00007fffffdfdea0
+  [gstack+ 144] 0x0000000827068bae
+  [gstack+ 152] 0x0000000000000000
+  [gstack+ 160] 0x0000000000000000
+  [gstack+ 168] 0x000000082716db50
+  [gstack+ 176] 0x0000003200000000
+  [gstack+ 184] 0x00000307ffdfdc90
+  [gstack+ 192] 0x000000082704e73d
+  [gstack+ 200] 0x0000351ef6874110
+  [gstack+ 208] 0x0000351ef68655c0
+```
+
+### Строки «calling initializer function …» из лога (все)
+
+```
+dyld: calling initializer function 0x351ef6874110 in /usr/lib/libSystem.B.dylib
+```
+
+### Verdict (control #26 step A, one line)
+
+Сырое краш-свидетельство init-cascade зафиксировано: SIGSEGV
+addr=0xffffffffffffff8c (NULL-0x74 deref), rip=0x351ef690c482, единственный
+инициализатор перед крашем — libSystem.B.dylib (0x351ef6874110); символизация
+и диф инициализатор-цепей — шаги 96-Б/96-В.
+
+### Repro
+
+```sh
+sh cft96-run.sh f1
+#   -> log: cft96-f1.log (24188 lines), planted MSL md5 39d3003953ac49a5ead4659dbe419963
+#   -> Segmentation fault; crash block at line 24096, initializer at line 24082
+```
