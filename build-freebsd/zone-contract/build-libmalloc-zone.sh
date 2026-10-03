@@ -153,8 +153,21 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
     -current_version 0.0.0 -compatibility_version 1.0.0 \
     -exported_symbols_list "${BUILD}/exports.txt" \
     -L"${BUILD}/staged/usr/lib" -L"${BUILD}/staged/usr/lib/system" \
-    -lSystem \
+    -lsystem_kernel \
+    -lsystem_platform \
+    -ldyld \
+    -lcompiler_rt \
+    -upward-lsystem_c \
     -o "${BUILD}/libsystem_malloc.dylib" $(cat "${BUILD}/objs.txt")
+
+# ld64.lld does not implement -upward-l / -upward_library -- the upward
+# edge to libsystem_c is added post-link, byte-cloned from the original
+# overlay dylib's own LC record (exact-length surgery, ncmds+sizeofcmds
+# and every file offset shifted together)
+python3 "${SCRIPT_DIR}/add-upward-lc.py" \
+    "${BUILD}/libsystem_malloc.dylib" \
+    "${DARLING_OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
+    "/usr/lib/system/libsystem_c.dylib"
 
 echo "=== built dylib ==="
 ls -la "${BUILD}/libsystem_malloc.dylib"

@@ -1184,3 +1184,90 @@ dlopen = не достигнут; `_mach_task_self_` = не дошло; оста
 #   dyld_image_state_dependents_initialized; the mach_absolute_time
 #   timing around it = the ktrace's clock_gettime records)
 ```
+
+## Control #17 — slides: the rebuild's dependency set now equals the original's; the probe-run crash class is measured unchanged (the dep set is not its root)
+
+### (1) — align the LC_LOAD_DYLIB set with the original
+
+The pin's CMakeLists (`add_circular(system_malloc FAT …)`) declares the
+dep targets: SIBLINGS `system_kernel platform system_dyld compiler_rt`,
+UPWARD `system_c`. The original overlay dylib's load commands (python LC
+parser; `llvm-objdump21 --macho --load` does not exist in this llvm —
+its macho section only offers `--private-headers`) are exactly:
+
+```
+LC_LOAD    /usr/lib/system/libsystem_kernel.dylib
+LC_LOAD    /usr/lib/system/libsystem_platform.dylib
+LC_LOAD    /usr/lib/system/libdyld.dylib        (the system_dyld target installs under this name)
+LC_LOAD    /usr/lib/system/libcompiler_rt.dylib
+LC_UPWARD  /usr/lib/system/libsystem_c.dylib
+```
+
+The rebuild linked `-lSystem` only — one umbrella dep — which re-solves
+kernel/platform/dyld/compiler_rt/c through the umbrella at runtime and
+shifts the closure's order/slides. The link now passes the four sibling
+dylibs explicitly (`-lsystem_kernel -lsystem_platform -ldyld
+-lcompiler_rt`, lowercase — `-lSystem_kernel` is not found on this
+filesystem), and ld64.lld does not implement `-upward-l` /
+`-upward_library` ("not yet implemented"), so the UPWARD edge is added
+post-link by `add-upward-lc.py`: the LC record is **byte-cloned from the
+original dylib's own record** (cmd/name-offset/timestamp/versions copied
+verbatim, cmd=0x80000023), inserted after the last LC with exact-length
+surgery — `ncmds 15→16`, `sizeofcmds 1960→2024`, `__TEXT`
+filesize/vmsize +=64, and every file-offset field pointing at or past the
+insertion shifted by +64 (LC_SEGMENT_64 fileoff, section offsets, symtab/
+dysymtab, dyld_info, linkedit_data). Self-check after rebuild: the
+dependency set of the built dylib equals the original's five commands
+(one-to-one, same order, same spellings; `MATCH: True` on the parsed
+lists).
+
+### (2)+(3) — the probe re-run with the dep-aligned dylib
+
+Early-plant recipe (#14/#15, poller on `cached locally: …/usr/lib`),
+zone-vtable-probe:
+
+```
+FATAL signal 11 (code=1) at addr=0x320484dc99d
+  rip=0x824f374d2  rax=0x2f  rcx=rsi=rdx=0x320484dc99d
+  rdi=0x31f805cf4d0  backtrace: crash_debug_handler at mldr
+```
+
+Measured: the `…4df555` signature does **not** appear in the probe run
+(absent — it belongs to the framework-initializer context of the earlier
+chrome runs); the crash is the SAME MSL-init wild-pointer class as the
+pre-alignment runs (lane 81 run E: SIGSEGV, rcx/rsi/rdx wild string-scan,
+rip `…4d2` in mldr's host range; run P post-alignment: identical class,
+different slide). The dep alignment therefore does **not** change the
+probe-run crash class — the alignment is ruled out as the root of this
+class by measurement (two runs, before/after).
+
+Consequences for the standing criterion: the slot map (vtable[0]=size,
+vtable[3]=destroy) stays BLOCKED — the probe dies in MSL-init before its
+first printf; Control #15 dlopen not reached (startup crash);
+`_mach_task_self_` not sounded.
+
+### Verdict (control #17, one line)
+
+зависимости = 5/5 (4 LC_LOAD + 1 LC_UPWARD) — совпали с оригиналом (запись
+UPWARD байт-клонирована из оригинала, ncmds 15→16, self-check MATCH);
+probe = …4df555 ушла (в контексте пробы отсутствует), но краш-класс НЕ
+изменился — та же MSL-init wild-pointer сигнатура (SIGSEGV rcx/rsi/rdx,
+rip=…4d2, совпал с run E до выравнивания) → зависимостный набор НЕ является
+корнем этого класса (замерено на двух прогонах до/после); слот-карта =
+заблокирована (проба падает в MSL-init до первого printf); Control #15
+dlopen = отказ (старт раньше пробы); остаток = guest-side трейс MSL-init
+(какое runtime-поле кормит syscall мусором) + chrome-контекст …4df555
+(chrome-app-objc пересборка — артефактов лейнов #11–#16 в дереве нет).
+
+### Repro
+
+```sh
+# dependency-set alignment is inside the build (link flags + surgery):
+sh build-freebsd/zone-contract/build-libmalloc-zone.sh
+# after BUILD_OK:
+python3 build-freebsd/zone-contract/add-upward-lc.py  # (invoked by the script)
+# probe per the control #14 recipe, plant via the early-sync poller
+# (marker "cached locally: <stage>/usr/lib"):
+#   the LC dump: python over the dylib load commands (cmd 0xC/0x80000023)
+#   the crash class: the run log's FATAL block (addr/rip/rcx/rsi/rdx)
+```
