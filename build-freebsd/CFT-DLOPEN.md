@@ -584,7 +584,135 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
 # patch the framework SOURCE copy (race-free; the stage copy raced dyld's
 # read in Run F) with cg-supl-patch.py; plant cg-supl.dylib in the stage
 # tree's usr/lib via the early-sync poller; run per the Control #8 recipe
-# with CHROME_APP pointing at the patched app copy
+#   with CHROME_APP pointing at the patched app copy
+```
+
+## Control #21 — who calls MSL at init: the umbrella cascade; the Control #20 plant never reaches dyld (UUID-proven), so the SIGILL class could not be re-localized
+
+### (1) static — the umbrella cascade and its call sites
+
+The overlay `libSystem.B.dylib` has a single `__DATA,__mod_init_func`
+entry: `_libSystem_initializer` (vmaddr 0xf110; the runs print its
+runtime address, e.g. `…8f110`). Disassembly names the cascade and the
+MSL entry points (offsets are the umbrella's vmaddrs):
+
+```
+0xf159  ___libkernel_init        0xf278  ___pthread_late_init
+0xf188  ___libplatform_init      0xf27d  _libdispatch_init
+0xf1ba  ___pthread_init          0xf29c  __libxpc_initializer
+0xf1ec  __libc_initializer       0xf2bb  __libtrace_init
+0xf20f  ___malloc_init           0xf2da  ___libdarwin_init
+0xf22e  ___keymgr_initializer    0xf31e  _os_variant_has_internal_diagnostics
+0xf24d  __dyld_initializer       0xf32c  ___malloc_late_init
+        … getenv/strtol (env parsing), 0xf48b ___libkernel_init_late, ret
+```
+
+`__libc_initializer` (libsystem_c, stock) runs BEFORE `___malloc_init`
+and `___malloc_late_init` — the umbrella reaches MSL only after
+libsystem_c's init, so any malloc-family call inside `__libc_initializer`
+hits the MSL with its zone not yet initialized. The pin source's zone
+path (`_malloc_zone_malloc`, malloc.c:1559) derefs `zone->malloc`
+without an init guard; the stock's internal path (slice 0x25b70) is
+structurally different (pointer-indirection select, no simple NULL guard
+either).
+
+### (2) dynamic — the plant does not reach dyld; the loaded image is the live overlay's
+
+Three runs of the Control #20 recipe with the poller planting the pin
+build (md5-verified in the stage tree after firing — the Control #18/#20
+verification step) at both candidate paths:
+
+| run | plant path                                   | planted md5    | dyld `loaded:` UUID                              |
+|-----|----------------------------------------------|----------------|--------------------------------------------------|
+| M   | stage `usr/lib/system/` (marked build)       | 20520a4e…      | 1FA0731B… (live overlay FAT slice)               |
+| D   | doubled `…/tmp/darling-local-overlay/usr/lib/system/` | eb0ae578… | 1FA0731B… (live overlay FAT slice)           |
+
+1FA0731B-F0EA-310E-8808-B4118C4E62D8 is the x86_64 slice UUID of the
+LIVE overlay's FAT `libsystem_malloc.dylib` (668712 B) — the planted
+thin builds (UUID 4C4C4402…) never loaded. ktrace shows why:
+`launch-dynamic` fstats `$DARLING_OVERLAY/usr/lib/system/
+libsystem_malloc.dylib` during closure computation, and mldr re-roots
+the manifest's host path (probing the doubled
+`/tmp/darling-local-overlay/tmp/darling-local-overlay/usr/lib/…`
+component-wise — ENOENT — in run M before the plant existed, and again
+in run D), then falls back to the manifest path itself — the live
+overlay. The stage-tree copy of this image is never read.
+
+Consequences measured this turn:
+
+- the Control #20 SIGILL class could NOT be re-localized — the planted
+  rebuild never executed; no first-fatal-SIGILL PC exists to name;
+- with the stock MSL actually loaded, the startup is nondeterministic in
+  this configuration: run D completed to the Foundation version wall
+  (1905 lines, the Control #20 stock baseline), while run M (marked
+  build planted, stock loaded) died mid-startup with a crash block —
+  `FATAL signal 11 (code=1) at addr=0x270, rip=…92076e` (inside the
+  loaded MSL image at offset 0x2676e; rax=rdi=0, rcx=0xfcf50) — a
+  NULL-zone `zone->malloc`-slot deref, the pre-init-call class;
+- the marker build itself is sound: the four once-only `write(2)`
+  markers (`inject-init-markers.py`, gated by `MSL_MARKERS=1` in
+  `build-libmalloc-pin.sh`, applied to the BUILD COPY only — the
+  submodule is never edited) compiled in and planted; none fired because
+  the planted image never loaded.
+
+### (3) difference at the point + fix scope
+
+The builds are deterministic (unmarked eb0ae5789a2b2b77a8ba68ae4f6e34de,
+marked 20520a4e0127845dc8d5c1644b80f262) — the difference at the failing
+point is NOT in `build-libmalloc-pin.sh` / `fix-export-trie.py`. It is
+in the PLANT REACH: `launch-dynamic` computes the image closure from
+`DARLING_OVERLAY` (the live overlay) and mldr resolves this image to
+that host path; the re-root probe doubles it and the fallback lands on
+the manifest path. The poller-side fix was tried (plant at the doubled
+path mldr probes) and measured ineffective (run D). Making mldr read
+the stage copy belongs to mldr/launch-dynamic path resolution — outside
+this lane's layer — measured and stopped per the cascade rule. A
+plant-through-a-copied-overlay (DARLING_OVERLAY → a writable copy with
+the MSL swapped) is available to the head if the pair must be re-run.
+
+### Method rule gained (applies to every future plant lane)
+
+`md5`-in-the-stage-tree after firing is NOT proof that dyld loaded the
+planted file. The authoritative check is the LOADED UUID from the run
+log's `dyld: loaded: <UUID> <path>` line, compared against the planted
+artifact's UUID (thin build) or its slice UUID (fat file). Control #20's
+pair side-difference (151-line init death vs 1905-line wall) is NOT
+explained by the current resolution behavior (both sides load the live
+stock here) — the #20 class attribution should be re-verified with the
+UUID check enforced before any fix is designed on top of it.
+
+### Verdict (control #21, one line)
+
+кто зовёт = зонт `_libSystem_initializer`: `__libc_initializer` (0xf1ec)
+ДО `___malloc_init` (0xf20f) / `___malloc_late_init` (0xf32c) —
+libsystem_c-init идёт с непроинициализированной MSL-зоной; первый
+фатальный SIGILL = НЕ ЛОКАЛИЗОВАН — посадка пересборки не доходит до
+dyld (UUID-замер: при любой посадке грузится стоковый срез живого
+overlay 1FA0731B; стейдж-копия этой картинки не читается); отличие от
+стока в точке = не в MSL-сборке (детерминирована) а в доставке посадки
+(launch-dynamic строит closure из живого overlay, mldr резолвит туда,
+пере-корневой пробел удваивает путь); фикс = ВНЕ СЛОЯ — mldr/
+launch-dynamic резолюция — замерено и остановлено (по правилу);
+пара #20 = НЕ ПЕРЕГОНАЛАСЬ (A/B неэффективен без доехавшей посадки —
+класс #20 не подтверждён и не опровергнут); остаток = починка доставки
+посадки (вне слоя) либо посадка через копию overlay под
+DARLING_OVERLAY; контроль посадки = LOADED UUID из лога прогона.
+
+### Repro
+
+```sh
+# static: llvm-objdump -d the overlay libSystem.B.dylib around the
+#   mod_init_func target (_libSystem_initializer @ 0xf110); the callq
+#   sequence names the cascade (see offsets above)
+# dynamic: the Control #20 recipe (cft90-poller.sh plant at the early
+#   "cached locally: …/usr/lib" marker; ktrace -i; DYLD_PRINT_INITIALIZERS=1);
+#   plant variants: stage usr/lib/system (cft91-runM) and the doubled
+#   path (cft91-poller-doubled.sh, cft91-runD);
+#   check: `grep "loaded.*libsystem_malloc" <run log>` — the UUID must
+#   match the planted artifact's slice, or the run measured the overlay
+# stock slice UUID: llvm-otool/fat-walk of the live overlay's MSL
+# markers: MSL_MARKERS=1 sh build-freebsd/zone-contract/build-libmalloc-pin.sh
+#   (inject-init-markers.py patches the BUILD COPY only)
 ```
 
 ## Control #10 — the symbol-wall map: 25 providers, 335 symbols; one union supplement; the failure moves to init-time runtime semantics

@@ -43,6 +43,12 @@ rm -rf "${BUILD}/src-pin"
 cp -R "${M}/src" "${BUILD}/src-pin"
 echo "pin sources copied: $(ls "${BUILD}/src-pin"/*.c | wc -l) .c files"
 
+# 3b. optional once-only init markers (diagnosis builds only; the sources
+#     touched are the BUILD COPY — the submodule itself is never edited)
+if [ -n "${MSL_MARKERS:-}" ]; then
+    python3 "${SCRIPT_DIR}/inject-init-markers.py" "${BUILD}/src-pin"
+fi
+
 # 4. include alias for <System/...>
 ln -sfn "${SDK}/usr/include" "${BUILD}/System"
 
