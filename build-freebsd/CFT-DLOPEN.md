@@ -1271,3 +1271,123 @@ python3 build-freebsd/zone-contract/add-upward-lc.py  # (invoked by the script)
 #   the LC dump: python over the dylib load commands (cmd 0xC/0x80000023)
 #   the crash class: the run log's FATAL block (addr/rip/rcx/rsi/rdx)
 ```
+
+## Control #18 — diff: rebuild vs original (the stock baseline and the static delta)
+
+### (1) — the stock baseline: the same probe with the original overlay dylib
+
+The probe = tests/zone-vtable-probe-macho (control #14's recipe), run
+via the harness with the ORIGINAL overlay libsystem_malloc explicitly
+planted into the staged tree by an early-plant poller (marker:
+`cached locally: …/usr/lib`; both-side md5 confirmed:
+521c6983b531c2e71122e784981d3f89 — the live overlay's stock).
+
+Measured: the probe STARTS, `malloc_default_zone()` returns a valid
+zone object, and the full vtable[0..7] dump completes —
+NULL, NULL, default_zone_size, default_zone_malloc, default_zone_calloc,
+default_zone_valloc, default_zone_free, default_zone_realloc — the
+pin-era layout exactly as control #14 recorded. **No SIGBUS, no wild
+pointer, no MSL-init fault.** The run's only fault is the probe's own
+task=NULL `malloc_get_all_zones` call (FATAL addr=0x8 — the unguarded
+NULL+8 read in the remote-zones path, the same probe-logic artifact as
+control #14).
+
+The rebuild, by contrast, faults during MSL initialization in the same
+probe with the same plant mechanism (lane 81, runs D/E): run D SIGBUS
+at addr=…edf018 with rax=__v_zone's runtime address (vmaddr 0x50000 —
+the REBUILD's __v_zone); run E SIGSEGV with rcx=rsi=rdx=…4df555 (the
+wild pointer scanned like a string, the control #16 garbage-reader
+class).
+
+→ Branch (2а) of the dispatch: the stock PASSES the probe; the crash
+class is carried by the rebuild → the static diff.
+
+### (2а) — the static diff (build-freebsd/msl-diff.py, x86-64 slice)
+
+Section table (iv): the rebuild's whole data layout is shifted −0x4000
+vmaddr versus the original (__v_zone 0x54000→0x50000, __bss
+0x58210→0x54210, __common 0x58000→0x54000, __data 0x52620→0x4f600, …);
+__TEXT starts lower too (0x1260→0x7f0). Only-original section:
+`__DATA.__nl_symbol_ptr` (vmaddr 0x52000, size 8) — the non-lazy
+symbol-pointer anchor is ABSENT in the rebuild. Only-rebuild sections:
+`__TEXT.__eh_frame`, `__TEXT.__literals`. Size deltas: __const 0x338 vs
+0x328, __data 0x220 vs 0x218, __la_symbol_ptr 0x290 vs 0x280,
+__unwind_info 0x70 vs 0x1040.
+
+The zone object itself (i) — `__DATA.__v_zone` (both 0x4000 at their
+segment base), first six qwords:
+
+```
+original: 0x0        0x0        0x29e30    0x29e90    0x29ef0    0x29f60
+          reserved1  reserved2  size       malloc     calloc     valloc
+rebuild : 0x32ee0    0x32f40    0x32fa0    0x33000    0x33060    0x330c0
+          size       malloc     calloc     valloc     free       realloc
+```
+
+The stock carries the pin-era layout (reserved pair leading, method
+table from slot 2); the rebuild carries the post-removal macOS-13
+layout (method table from slot 0) — a 16-byte shift between the two
+tables inside the SAME section name.
+
+Streams (ii): the rebase opcode mix matches (do_imm 97 vs 121 — the
+rebuild rebases 24 more pointers individually); the bind stream 0xf8
+vs 0xe0 bytes (the missing non-lazy anchor + fewer imports); the
+export stream 0x9b8 vs 0x928 bytes.
+
+Export set (iii): the original exports 95 names, the rebuild 44 —
+**51 exports are missing, all in the zone-management API**
+(_malloc_default_zone, _malloc_get_all_zones, _malloc_create_zone,
+_malloc_destroy_zone, _malloc_get_zone_name, _malloc_num_zones, … the
+full list in the diff output). The rebuild's export trie lost exactly
+the API the chrome framework's initializer binds (control #13's wall).
+
+### (3) — the candidate, the fix target, the stop point
+
+Candidate (in my layer, two objects):
+- the `malloc_zone_t` layout divergence INSIDE the rebuild — the
+  rebuilt zone object follows the post-removal (macOS-13) layout while
+  the in-tree consumers read the pin-era offsets (the tree's header
+  still leads with reserved1/reserved2 — src/external/libmalloc at the
+  pin, include/malloc/malloc.h:67-68); every zone-method access on the
+  rebuild is shifted by −16 bytes, which is the connection to the
+  control #16 reader's path (the garbage fed to the syscall);
+- the 51-name export loss in the same rebuild (the export trie of the
+  zone-contract build dropped the zone-management API).
+
+Both fixes are source/build-script changes in my layer, but executing
+them means re-entering the zone-contract rebuild — the #81 gate chain
+is on the do-not-repeat list — so the fix is NOT executed in this
+control; the measurement and the exact fix-targets are handed up.
+
+### Verdict (control #18, one line)
+
+сток в пробе = проходит (vtable[0..7] дампится, только probe task=NULL
+NULL-deref @0x8); дифф = DATA-сегмент сдвинут −0x4000, __v_zone: сток
+reserved1/2 + метод-таблица с слота 2, пересборка — таблица с слота 0
+(сдвиг −16 Б), __nl_symbol_ptr отсутствует, exports 95→44 (51 lost:
+весь zone-management API); кандидат = divergence приватного/публичного
+malloc_zone_t внутри пересборки + экспорт-потеря 51 (оба — мой слой,
+связь с путём читателя Control #16: смещённые слоты кормят syscall
+мусором); фикс = не выполнен (в моём слое, но требует пересборки
+зон-контракта — гейты #81 под запретом повтора) — измерено и сдано;
+слот-карта = блокирована (пересборка падает в MSL-init до любого дампа;
+стоковая замерена в Control #14); Control #15 dlopen = достигнута в
+обоих прогонах, отказ = Foundation version wall (рецепт без stage-patch
+— чистая пара для сравнения классов); остаток = санкционировать пересборку
+зон-контракта с единым layout по всем TU + экспорт-мапу на 95 имён, затем
+перегнать пробу.
+
+### Repro
+
+```sh
+# baseline: zone-vtable-probe-macho via the harness, poller plants the
+#   ORIGINAL overlay MSL on the "cached locally: …/usr/lib" marker
+#   (both-side md5 521c6983…); the vtable dump completes; the only
+#   fault is the probe's task=NULL get_all_zones (addr=0x8)
+# rebuild side: the same probe + the same plant of the zone-contract
+#   build (b6e459c3…) faults in MSL-init (lane 81 runs D/E: SIGBUS at
+#   __v_zone+0x18 / wild …4df555)
+# static diff: build-freebsd/msl-diff.py <original> <rebuild>
+#   (x86-64 slice; sections, __v_zone blobs, dyld_info streams,
+#   export sets)
+```
