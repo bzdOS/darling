@@ -668,3 +668,63 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
 # plant the supplement copies in the stage tree via the early-sync poller,
 # run per the Control #8 recipe with CHROME_APP at the patched app copy
 ```
+
+## Control #11 — initializer blame: the zero class-ref that trips libobjc
+
+### Localization (event instrumentation, owner's decision 02.10 04:24)
+
+The crash block (registers + guest stack) with the dyld-trace image map
+pins the fault without new probe code — two independent runs give identical
+slide-relative offsets:
+
+```
+Run B: rip=0x25d8c832746  mh(libobjc.A.dylib)=0x25d8c80e000  -> +0x24746
+Run I: rip=0x20bd23432746 mh(libobjc.A.dylib)=0x20bd2340e000  -> +0x24746
+       rax=rbx = suppl.dylib mh + 0x1290   (both runs)
+```
+
+`DYLD_PRINT_INITIALIZERS=1` (Run I) shows all 14 initializer prints are
+startup-phase (libSystem, dyld-trace, libc++, libobjc ×11) — no cascade
+initializer had been called when the fault hit, so the crash sits between
+image load and the initializer phase: libobjc's per-image processing of
+the Chrome framework's ObjC metadata. nm of the supplement at offset
+0x1290 names the zeroed slot: `_OBJC_CLASS_$_NSURLProtocol` (D-type, the
+8-byte range at exactly 0x1290).
+
+### Symbol classification + real implementation
+
+Provider: ordinal 5 = Foundation (`chrome-imports-by-ordinal.py`); type:
+ObjC class-ref. Real implementation in the tree: YES —
+`src/external/cfnetwork/src/URL/NSURLProtocol.m:69`
+`@implementation NSURLProtocol`, and Foundation's
+`reexport_x86_64.exp:117/148` declare
+`_OBJC_CLASS_$_NSURLProtocol`/`_OBJC_METACLASS_$_NSURLProtocol` as
+reexported. In the BUILT overlay stubs: NO — `nm -gU` of the overlay
+CFNetwork → 0 NSURLProtocol symbols; Foundation → 0 (while exporting 356
+OBJC_CLASS symbols overall); the overlay-wide scan finds the symbol in no
+built dylib. The class-ref bind therefore resolved to the supplement's
+zero quad, and libobjc's processing of that "class" dereferenced NULL at
+libobjc+0x24746.
+
+### Verdict (control #11, one line)
+
+Инициализатор: libobjc.A.dylib+0x24746 (стабильно в двух прогонах; контекст
+— загрузка изображения Chrome-фреймворка, каскадные инициализаторы ещё не
+вызывались); символ: `_OBJC_CLASS_$_NSURLProtocol` (Foundation, ordinal 5,
+тип: ObjC class-ref — zero-данные в suppl+0x1290, rax/rbx = suppl+0x1290);
+реальная реализация: ЕСТЬ в дереве — cfnetwork/src/URL/NSURLProtocol.m:69
++ Foundation reexport_x86_64.exp:117/148, но в собранных overlay-стабах
+отсутствует (CFNetwork 0, Foundation 0 из 356); фикс = класс: реальные
+ObjC-классы — пересборка CFNetwork/Foundation из in-tree исходников с их
+reexport-списками (zero-data class-refs — тупик Run B, задокументирован).
+
+### Repro
+
+```sh
+# crash block + dyld-trace image map from the run log; offsets are
+# slide-relative and reproduce across runs (Run B / Run I)
+# DYLD_PRINT_INITIALIZERS=1 in the run env (passed through by the harness)
+# nm -gU <suppl.dylib> sorted -> the symbol at rax - suppl_mh (0x1290)
+# nm -gU <overlay CFNetwork/Foundation> -> absence of the class
+# grep -n "@implementation NSURLProtocol" src/external/cfnetwork/src/URL/NSURLProtocol.m
+```
