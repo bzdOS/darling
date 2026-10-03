@@ -1391,3 +1391,85 @@ malloc_zone_t внутри пересборки + экспорт-потеря 51
 #   (x86-64 slice; sections, __v_zone blobs, dyld_info streams,
 #   export sets)
 ```
+
+## Control #19 — pin-zone exports: the rebuild matches the stock's zone contract
+
+### Mechanism
+
+`build-freebsd/zone-contract/build-libmalloc-pin.sh` compiles the pin's
+`src/external/libmalloc` sources **unmodified** (reserved1/reserved2 kept)
+and links with the original's export trie names (95, extracted from the
+overlay dylib's LC_DYLD_INFO export stream via `msl-diff.py`'s
+`export_set`). ld64.lld's `-exported_symbol` flags put symbols in the
+symtab but not always in the export trie (measured: 44/95 after linking);
+`fix-export-trie.py` post-processes the built dylib, rebuilding the trie
+from the symtab's 95 external defined symbols and updating the
+LC_DYLD_INFO export offset/size (the old stream becomes dead space).
+
+### Static diff (msl-diff.py, x86-64 slice)
+
+```
+export set: original 95, rebuild 95, only-original 0, only-rebuild 0
+__v_zone[0..7]:
+  original: 0x0, 0x0, 0x29e30, 0x29e90, 0x29ef0, 0x29f60, 0x29fc0, 0x2a020
+  rebuild:  0x0, 0x0, 0x32f20, 0x32f80, 0x32fe0, 0x33040, 0x330a0, 0x33100
+  [0]=reserved1=0x0, [1]=reserved2=0x0 — PIN layout matches
+  [2..7] function pointers — values differ (vmaddr), structure identical
+```
+
+Residual benign: DATA vmaddr shifted −0x4000 (__v_zone 0x54000→0x50000,
+__bss 0x58210→0x54210, etc.), __TEXT shifted −0x470 (0x1260→0x7f0);
+`__DATA.__nl_symbol_ptr` absent in the rebuild (ld64.lld vs Apple ld64
+non-lazy binding difference — compensated by lazy binding via
+`__la_symbol_ptr`, same symbols resolved at runtime); `__TEXT.__eh_frame`
+and `__TEXT.__literals` only-rebuild (compiler output differences);
+`__TEXT.__unwind_info` size differs (0x70 vs 0x1040, different unwind
+encoding). None of these affect the zone contract or export resolution.
+
+### Probe (zone-vtable-probe-macho, early-plant recipe)
+
+Planted `libsystem_malloc-fixed.dylib` into the staged tree (poller fires
+at "cached locally" marker, md5 both sides:
+24933b2aada5b329cce7e1dcea7fc13a). Measured:
+
+```
+dlsym malloc_default_zone -> 0x2abb44103c30
+dlsym malloc_get_all_zones -> 0x2abb44106e40
+default_zone=0x2abb44133000  (valid zone object)
+vtable[0]=0x0  vtable[1]=0x0
+vtable[2]=default_zone_size    vtable[3]=default_zone_malloc
+vtable[4]=default_zone_calloc  vtable[5]=default_zone_valloc
+vtable[6]=default_zone_free    vtable[7]=default_zone_realloc
+```
+
+**Stock behavior**: pin layout, full vtable dump, all function pointers
+resolve to named symbols. The only fault is the probe's own task=NULL
+`malloc_get_all_zones` call (FATAL addr=0x8, same artifact as Control
+#14/#18 stock baseline). No MSL-init crash, no SIGBUS, no wild pointer.
+
+### Verdict (control #19, one line)
+
+layout = пин по дампу qwords (reserved1/2=0x0, слоты 2-7 = function
+pointers, структура идентична стоку); exports = 95/95 (trie ∩ visible,
+fix-export-trie.py); дифф = benign (vmaddr −0x4000 DATA / −0x470 TEXT,
+__nl_symbol_ptr отсутствует — компенсируется lazy binding через
+__la_symbol_ptr, __eh_frame/__literals только-rebuild); probe =
+сток-поведение (default_zone валиден, vtable[0..7] полон, только probe
+task=NULL NULL-deref @0x8); Control #15 dlopen = не запускался в этом
+лейне (проба прошла, следующий шаг — dlopen по рецепту Control #12);
+остаток = запустить dlopen с pin-layout rebuild'ом, измерить фазу/отказ.
+
+### Repro
+
+```sh
+# build
+sh build-freebsd/zone-contract/build-libmalloc-pin.sh
+# static diff
+python3 build-freebsd/msl-diff.py \
+  <overlay>/usr/lib/system/libsystem_malloc.dylib \
+  <build>/zone-pin/libsystem_malloc-fixed.dylib
+# probe (early-plant poller at "cached locally" marker)
+#   plant libsystem_malloc-fixed.dylib into staged tree
+#   run harness with DARLING_TEST_BINARY=zone-vtable-probe-macho
+#   expected: vtable[0..7] dump with pin layout, FATAL addr=0x8 (probe artifact)
+```
