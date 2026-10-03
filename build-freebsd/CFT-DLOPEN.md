@@ -953,3 +953,125 @@ default_zone_valloc, default_zone_free, default_zone_realloc; слот
 # the pinned layout: src/external/libmalloc (at 4f2a808d)
 #   include/malloc/malloc.h:64-93
 ```
+
+## Control #15 — zone contract: the layout fix is derived and self-checked; the acceptance criterion is NOT met (two measured blockers)
+
+### (1)+(2) — the layout fix machinery (derived from the pin, submodule untouched)
+
+`build-freebsd/zone-contract/build-libmalloc-zone.sh` derives the fix
+from the pin checkout: a corrected `malloc/malloc.h` (the reserved pair
+dropped) and a src copy with the ten reserved-referencing lines removed
+across pguard/magazine/nano/nanov2/purgeable — every other slot write in
+the sources is by field name, so the layout shifts with the header. The
+script self-checks: `grep reserved` over the fixed copies → zero hits;
+the compile loop is the proven cross recipe (SDK flat + clang resource
+headers + `architecture/byte_order.h` from `src/external` + the fakesdk).
+**The header web is RESOLVED** — the gate chain found and fixed inside
+`build-libmalloc-zone.sh`:
+
+- clang's resource `stdatomic.h` defers via
+  `__has_include_next(<stdatomic.h>)`; the flat SDK ships its own
+  stdatomic.h which is EMPTY under `__clang__` — the shadow silently
+  killed the `memory_order` typedef (13 errors). Fix: move the scratch
+  SDK copy aside (`stdatomic.h.disabled`) so the builtin fallback runs;
+- `i386/cpu_capabilities.h` guards its content in `#ifdef PRIVATE`;
+  fix: `-DPRIVATE` (the pin's CMakeLists echoes it);
+- `nanov2_malloc.c`'s `OS_VARIANT_*` gates need
+  `-DOS_VARIANT_NOTRESOLVED=1 -DOS_VARIANT_RESOLVED=1` (the pin's
+  per-file COMPILE_FLAGS), else the resolver emits no `_nanov2_*`
+  exports and the export list fails at link;
+- `virtual_default_zone`'s POSITIONAL initializer leads with the two
+  reserved placeholders — removed by the script (12 sites in total);
+- `resolver.h` lives in the submodule's `resolver/` dir — added to -I;
+- the link keeps the `$UNIX2003` libc imports undefined
+  (`-undefined dynamic_lookup`) as the original carries them, and drops
+  `-D__DARWIN_UNIX03` because THIS guest's closure exports no `$UNIX2003`
+  variants of mprotect/write/sleep/kill (measured: lazy-bind failure
+  `Symbol not found: _mprotect$UNIX2003 … Expected in: flat namespace`
+  with the UNIX03 build).
+
+Result: the faithful MSL dylib BUILDS (386016 B, 283 exports;
+`_malloc_default_zone` @0x2e360, `_malloc_get_all_zones` @0x31160) and
+LOADS in the guest. **The criterion is still not measured**: with the
+faithful dylib planted early, the zone-vtable probe run dies with
+`FATAL signal 10 (SIGBUS) at addr=0x34a962edf018, rip=0x826a41758,
+rax=0x34a962edf000` — the faulting access sits at zone+0x18 where rax is
+the runtime address of the `__v_zone` section (vmaddr 0x50000, slide
+0x34a962e8f000). otool verifies the built dylib's layout is correct
+(__v_zone addr 0x50000 size 0x4000 align 2^14, fully inside the
+file-backed __DATA range) — the delta is in that section's runtime page
+state under the guest, deeper than the toolchain gates.
+
+### Init-cascade measurements (lane 81, ktrace + crash blocks)
+
+Two independent early-plant runs of the faithful dylib fault during MSL
+initialization, with run-to-run variance that pins the class:
+
+- run D: `FATAL signal 10 (SIGBUS) at addr=0x34a962edf018,
+  rip=0x826a41758, rax=0x34a962edf000` — the faulting access sits at
+  zone+0x18 where rax is the `__v_zone` section's runtime address
+  (vmaddr 0x50000, slide 0x34a962e8f000);
+- run E (ktraced): `FATAL signal 11 (code=1) at addr=0x18ac354df555,
+  rip=0x8268e74d2` with rcx=rsi=rdx=0x18ac354df555 (a wild pointer
+  scanned like a string) and rdi=0x18abac5f5a20 — inside a guest
+  image's __TEXT per the mmap records; the faulting PC falls in NO guest
+  mapping of that run — it sits in mldr's host-side syscall translation,
+  i.e. the guest init passed a garbage pointer to a syscall (mldr's own
+  frames in the block: crash_debug_handler / thr_kill).
+
+The static `virtual_default_zone` initializer is verified correct for
+the pin's post-removal layout (the positional-shift compile errors
+vanished; the named fields realign). The garbage arises in the init path
+beyond the static zone — the next measurement is guest-side tracing of
+the MSL init (which field feeds the syscall) — stopped here per the
+dispatch's cascade rule.
+
+### (3) — the narrow path (allowed by the dispatch): a zone-contract dylib
+
+`gen-zone-contract.py` + `zone-contract.c` produce a dylib at the
+original install name with the full export contract (284 unique exports —
+nm -gU on the fat original lists each once per slice; deduped) and a zone
+object laid out per the macOS-13 contract the head prescribed (slot0=size,
+slot3=destroy). Measured:
+
+- plant late (on `binary cached locally`): the probe still dumped the
+  ORIGINAL overlay zone (vtable[0]=NULL, vtable[2]=default_zone_size at
+  the original's 0x24c30 offset) — the plant lost the startup race;
+- plant early (on `cached locally: …/usr/lib`): the contract dylib loads
+  and the guest dies during libSystem initialization —
+  `FATAL signal 10 (SIGBUS) at addr=0xff374df570`, no probe output. The
+  minimal bump allocator + zero introspect slot is not startup-viable.
+
+### Verdict (control #15, one line)
+
+Слот-карта после фикса = НЕ ДОСТИГНУТА, но путь (а) ПРОЙДЕН ДО конца
+сборки: header-web снят (stdatomic include_next + -DPRIVATE + OS_VARIANT
++ позиционный initializer + dynamic_lookup + без UNIX03 — всё в скрипте),
+пин-фиделити MSL дайблиб СОБРАН (386016 Б, 283 экспортов) и ЗАГРУЖАЕТСЯ
+в госте; критерий упирается в измеренный init-cascade блок класса
+«мусорный указатель в syscall переводе гостя»: run D — SIGBUS на странице
+`__v_zone` (fault zone+0x18, rax = runtime-адрес секции vmaddr 0x50000;
+otool-лейаут корректен), run E — SIGSEGV по wild-указателю 0x18ac354df555
+(rip в host-коде mldr = перевод syscall гостя; статический initializer
+`virtual_default_zone` проверен корректным для пост-removal лейаута пина);
+узкий путь (b) не реанимируется (не startup-viable — замер #15);
+Control #15 dlopen = НЕ ДОСТИГНУТ (гость падает в MSL-init до пробы);
+`_mach_task_self_` (B @0x9bf7c) — не дошло (старт раньше); остаток =
+guest-side трейсинг MSL-init (какое поле кормит syscall мусором) — по
+стоп-правилу каскада остановлено на измеренном.
+
+### Repro
+
+```sh
+# faithful path (derived, self-checked, blocked on the header web):
+sh build-freebsd/zone-contract/build-libmalloc-zone.sh
+# narrow path:
+nm -gU <overlay libsystem_malloc> > orig-nm.txt
+python3 build-freebsd/zone-contract/gen-zone-contract.py orig-nm.txt <dir>
+clang -target x86_64-apple-macos10.12 … zone-contract.c zone-stubs.s
+ld64.lld -dylib … -install_name /usr/lib/system/libsystem_malloc.dylib \
+  -current_version 0.0.0 -compatibility_version 1.0.0 \
+  -exported_symbols_list exports.txt -o libsystem_malloc.dylib …
+# plant via the early-sync poller (marker "cached locally: <stage>/usr/lib"),
+# run tests/zone-vtable-probe-macho per the control #14 recipe
+```
