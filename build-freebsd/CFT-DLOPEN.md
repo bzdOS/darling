@@ -1473,3 +1473,97 @@ python3 build-freebsd/msl-diff.py \
 #   run harness with DARLING_TEST_BINARY=zone-vtable-probe-macho
 #   expected: vtable[0..7] dump with pin layout, FATAL addr=0x8 (probe artifact)
 ```
+
+## Control #20 — dlopen probe with the pin-rebuild MSL: the phase regresses to an MSL-init startup death; the stock reaches the Foundation version wall
+
+### The pair (same recipe, only the planted MSL differs)
+
+chrome-launcher dlopen probe (Control #12's stack: source-app surgery +
+per-slack supplements + early-sync poller + DYLD_PRINT_INITIALIZERS +
+ktrace), poller plants ONLY the MSL — no stage-patch, no supplement
+plant — the Control #18 clean-pair method extended to the dlopen probe.
+Both plants md5-verified in the stage tree after firing:
+
+```
+stock   : 521c6983b531c2e71122e784981d3f89 (the overlay's stock)
+rebuild : 24933b2aada5b329cce7e1dcea7fc13a (Control #19's pin rebuild)
+```
+
+### Stock side (the baseline, re-measured this turn)
+
+Startup completes (libSystem, dyld-trace, libc++, libobjc initializers
+×5), the launcher reaches the dlopen, and the refusal is the asserted
+Foundation version wall:
+
+```
+dlopen //Frameworks/Google Chrome for Testing Framework…:
+  Library not loaded: /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+  Reason: Incompatible library version: Google Chrome for Testing
+    Framework requires version 300.0.0 or later, but Foundation provides
+    version 0.0.0.
+```
+
+(The run log: 1905 lines; the launcher aborts after the refusal —
+ktrace tail: SIGABRT caught → SIGILL SIG_DFL.)
+
+### Rebuild side (the lane's subject)
+
+The run dies during STARTUP, before the dlopen phase:
+
+```
+log: 151 lines, last non-trace line:
+  dyld: calling initializer function 0x8f7d848f110 in /usr/lib/libSystem.B.dylib
+  (no "…in libsystem_malloc.dylib" initializer print — the death sits
+   inside libSystem's init cascade, where libsystem_c's init calls into MSL)
+no FATAL block in the run log; RC=132 (SIGILL).
+ktrace tail (pid 91473): repeated
+  PSIG SIGILL caught handler=0x823039920 code=ILL_PRVOPC
+  → sigaction(SIGILL) → thr_kill(SIGILL) → PSIG SIGILL SIG_DFL SI_LWP
+```
+
+ILL_PRVOPC traps also appear in the stock trace (mldr's trap-based
+translation mechanism is trap-heavy in both runs) — the discriminating
+fact is the PHASE: the stock continues past its traps to the dlopen
+refusal; the rebuild's traps end the process at the libSystem
+initializer.
+
+### Phase comparison
+
+| side    | phase reached                | refusal / death                          |
+|---------|------------------------------|------------------------------------------|
+| stock   | dlopen (startup complete)    | Foundation version wall (300.0.0 vs 0.0.0)|
+| rebuild | libSystem initializer        | SIGILL ILL_PRVOPC, thr_kill, startup death|
+
+The rebuild REGRESSES the dlopen probe: the Control #19 zone-vtable
+probe showed stock behavior for this same dylib (the MSL initializer
+ran, the vtable dumped) — the class is CONTEXT-DEPENDENT: the
+chrome-launcher's libSystem init cascade exercises an MSL-init path
+that the zone-vtable probe does not.
+
+### Verdict (control #20, one line)
+
+dlopen = фаза НЕ ДОСТИГНУТА (rebuild: смерть на инициализаторе
+/usr/lib/libSystem.B.dylib — 151 строка лога против 1905 у стока, SIGILL
+ILL_PRVOPC → thr_kill, без FATAL-блока); против стока = СМЕСТИЛАСЬ НАЗАД
+(сток: startup полон, dlopen достигнут, отказ = Foundation version wall —
+«requires version 300.0.0 or later, but Foundation provides version
+0.0.0»); пересборка несёт собственный класс = ДА — MSL-init в
+dlopen-контексте (тот же dylib в зон-vtable-пробе Control #19 отрабатывал
+штатно — класс контекст-зависимый); остаток = разбор контекст-зависимой
+MSL-init смерти (путь libsystem_c-init → MSL в chrome-закрытии — отдельный
+лейн); выбор сток-vs-пересборка в dlopen — решение владельца: замер
+говорит, что в этой пробе сток проходит дальше.
+
+### Repro
+
+```sh
+# pair: chrome-launcher dlopen probe, poller plants ONLY the MSL at the
+#   early marker "cached locally: <stage>/usr/lib" (no stage-patch, no
+#   supplements — the Control #18 clean-pair method); md5 both sides
+#   (stock 521c6983…, rebuild 24933b2a…)
+# ktrace -i + DYLD_PRINT_INITIALIZERS=1 per the Control #12 recipe;
+#   read: run-log length + last initializer print + crash/refusal text,
+#   kdump tail: PSIG records (ILL_PRVOPC caught vs SIG_DFL)
+# rebuild side: log ends at "calling initializer … /usr/lib/libSystem.B.dylib",
+#   RC=132; stock side: dlopen refusal text (Foundation version wall)
+```
