@@ -2223,18 +2223,35 @@ fault = libsystem_malloc.dylib!_word_zap_bit_go_down+0x372: callq _bitarray_size
 rip=0x0000031c6af0c482, base=0x31C6AEDF000 (из rebase-строк лога fresh3),
 offset = 0x31C6AF0C482 − 0x31C6AEDF000 = 0x2D482 — та же сигнатура что и шаг Б.
 
-### First divergent initializer
+### Determinism check (f1 vs fresh3, both fix-side)
 
 ```
+f1 (step B):   dyld: calling initializer function 0x351ef6874110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+fresh3 (step V): dyld: calling initializer function 0x31c6ae74110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+```
+
+Оба лога fix-side (один и тот же MSL в overlay). Оба вызывают один и тот же
+инициализатор libSystem.B (смещение 0x74110 от base libSystem.B). После него идут
+идентичные lazy bind строки (libsystem_pthread, libdyld, libsystem_blocks) — цепь
+расходится только в адресах (ASLR), не в логике. Краш происходит на том же месте
+(rip offset 0x2D482 от base libsystem_malloc.dylib). Детерминизм подтверждён.
+
+### Stock-vs-fix initializer diff (s1 vs fresh3)
+
+```
+s1 (stock):    dyld: calling initializer function 0x15bdcfa74110 in /usr/lib/libSystem.B.dylib  (стр. 24086)
+               dyld: calling initializer function 0x15bdd0ca8e00 in /usr/lib/libc++.1.dylib     (стр. 24187)
+               dyld: calling initializer function 0x15bdd0c01550 in /usr/lib/libobjc.A.dylib   (стр. 24201)
+               ... (13 инициализаторов, доходит до dlopen Chrome Framework)
 fresh3 (fix):  dyld: calling initializer function 0x31c6ae74110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
-f1 (stock):   dyld: calling initializer function 0x351ef6874110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+               FATAL signal 11 (стр. 24096)
 ```
 
-Оба лога вызывают один и тот же инициализатор libSystem.B (смещение 0x74110 от
-base libSystem.B). После него идут идентичные lazy bind строки
-(libsystem_pthread, libdyld, libsystem_blocks) — цепь расходится только в
-адресах (ASLR), не в логике. Краш происходит сразу после lazy bind
-libsystem_pthread.dylib:0x...2248 = _os_unfair_lock_unlock.
+Первый расходящийся инициализатор: **libc++.1.dylib** (s1 вызывает на стр. 24187,
+fresh3 падает на стр. 24096 — до него не доходит). Между libSystem.B и libc++ в s1
+идут lazy bind libsystem_malloc, libdyld, libdispatch, libobjc, libxpc, liblaunch
+(стр. 24100-24186) — в fresh3 эти строки отсутствуют, краш происходит сразу после
+lazy bind libsystem_pthread.
 
 ### NULL+0x74 analysis
 
@@ -2252,7 +2269,9 @@ NULL+0x74). Инициализатор libSystem.B вызывает _word_zap_bi
 
 Свежий корень + timeout 120 воспроизвели краш (24188/24096 = сигнатура шага А) —
 фикс НЕ устранил NULL+0x74; причина = инициализатор libSystem.B вызывает
-_word_zap_bit_go_down с NULL аргументом (bitarray_size = NULL+0x74).
+_word_zap_bit_go_down с NULL аргументом (bitarray_size = NULL+0x74). Stock-лог
+_kCGColorSpaceITUR_2100_PQ на диске отсутствует; s1 использован как stock (13
+инициализаторов, проходит до dlopen Chrome Framework).
 
 ### Repro
 
