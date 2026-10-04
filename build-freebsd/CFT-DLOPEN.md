@@ -2304,3 +2304,94 @@ timeout 120 sudo ${RUN_CMD} > <diag-dir>/cft96-fresh3.log 2>&1 || true
 ```
 
 Лог: <diag-dir>/cft96-fresh3.log (24188 строк).
+
+## Control #27 (step A)
+
+### Initializer order (DYLD_PRINT_INITIALIZERS)
+
+```
+stock1 (stock):  dyld: calling initializer function 0x21337c874110 in /usr/lib/libSystem.B.dylib  (стр. 24086)
+                 dyld: calling initializer function 0x21337daa8e00 in /usr/lib/libc++.1.dylib     (стр. 24187)
+                 dyld: calling initializer function 0x21337da01550 in /usr/lib/libobjc.A.dylib   (стр. 24202)
+                 ... (13 инициализаторов, доходит до dlopen Chrome Framework)
+fresh3 (fix):    dyld: calling initializer function 0x31c6ae74110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+                 FATAL signal 11 (стр. 24096)
+```
+
+libsystem_malloc.dylib не имеет собственного инициализатора (нет строк
+"calling initializer" для неё в обоих логах). Она инициализируется через
+___malloc_init и ___malloc_late_init, которые libSystem.B импортирует из
+libsystem_malloc.dylib (bind-строки 23829-23830 в fresh3, 23832-23833 в stock1).
+
+### Symbolization (libSystem.B+0xF110)
+
+```
+llvm-nm libSystem.B.dylib:
+000000000000f110 t _libSystem_initializer
+```
+
+Инициализатор libSystem.B = `_libSystem_initializer` (offset 0xF110 от __TEXT
+base libSystem.B). Оба артефакта (stock и fix) имеют один и тот же символ.
+
+### Disassembly: _word_zap_bit_go_down+0x372 → _bitarray_size
+
+```
+2d42e:	movq	-0x1098(%rbp), %rax        ; загрузить указатель на структуру
+2d435:	cmpq	$0x0, 0x38(%rax)           ; проверить поле 0x38 на NULL
+2d43a:	je	0x2d4d0                     ; если NULL → перейти к 0x2d4d0
+2d440:	movq	-0x1098(%rbp), %rax        ; загрузить указатель на структуру
+2d447:	movl	0x10(%rax), %eax            ; загрузить поле 0x10 из структуры
+2d44a:	movl	%eax, -0x10dc(%rbp)        ; сохранить в локальную переменную
+2d47c:	movl	-0x10dc(%rbp), %edi        ; аргумент для _bitarray_size
+2d482:	callq	_bitarray_size              ; вызвать _bitarray_size
+```
+
+NULL-аргумент для _bitarray_size приходит из поля 0x10 структуры по
+-0x1098(%rbp). Если поле 0x38 той же структуры = NULL, то -0x10dc(%rbp) = 0
+(строка 2d4db: movl $0x0, -0x10dc(%rbp)) → _bitarray_size(0) → NULL+0x74.
+
+### Stock vs fix: bitarray pointer at crash moment
+
+```
+stock1: после libSystem.B initializer → lazy bind libsystem_malloc (стр. 24100-24131)
+        → libc++.1.dylib initializer (стр. 24187) → ... → dlopen Chrome Framework
+fresh3: после libSystem.B initializer → FATAL signal 11 (стр. 24096)
+```
+
+У stock1 в момент краша fresh3 поле 0x10 структуры валидно: lazy bind
+libsystem_malloc проходит успешно, затем libc++.1.dylib initializer вызывается.
+У fresh3 поле 0x10 структуры = NULL → _bitarray_size(0) → NULL+0x74.
+
+### Verdict (control #27 step A, one line)
+
+libsystem_malloc.dylib не инициализируется до _libSystem_initializer в
+фиксовом артефакте; поле 0x10 структуры (malloc_zone_t/nanozone_t) = NULL →
+_bitarray_size(0) → NULL+0x74. Сток проходит (13 инициализаторов), фикс падает
+(1 инициализатор).
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=<src-dir>
+export DARLING_OVERLAY=<stock-overlay>
+export DARLING_BUILD_DIR=<build-dir>
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib
+export DARLING_SMOKE_REFRESH=1
+DYLD_TRACE="DYLD_PRINT_LIBRARIES DYLD_PRINT_LIBRARIES_POST_LAUNCH \
+DYLD_PRINT_BINDINGS DYLD_PRINT_WEAK_BINDINGS DYLD_PRINT_APIS \
+DYLD_PRINT_INTERPOSING DYLD_PRINT_SEGMENTS DYLD_PRINT_STATISTICS \
+DYLD_PRINT_STATISTICS_DETAILS DYLD_PRINT_RPATHS DYLD_PRINT_WARNINGS \
+DYLD_PRINT_INITIALIZERS DYLD_PRINT_DOFS DYLD_PRINT_OPTS DYLD_PRINT_ENV \
+DYLD_PRINT_CODE_SIGNATURES DYLD_PRINT_REBASINGS DYLD_PRINT_TO_STDERR"
+RUN_CMD="env DARLING_SRC_DIR=${DARLING_SRC_DIR} DARLING_OVERLAY=${DARLING_OVERLAY} DARLING_BUILD_DIR=${DARLING_BUILD_DIR}"
+RUN_CMD="${RUN_CMD} DARLING_TEST_BINARY=${DARLING_TEST_BINARY}"
+RUN_CMD="${RUN_CMD} DARLING_STAGING_TREES=${DARLING_STAGING_TREES}"
+RUN_CMD="${RUN_CMD} DARLING_SMOKE_REFRESH=${DARLING_SMOKE_REFRESH}"
+for v in ${DYLD_TRACE}; do RUN_CMD="${RUN_CMD} ${v}=1"; done
+RUN_CMD="${RUN_CMD} ${DARLING_BUILD_DIR}/launch-dynamic"
+timeout 120 sudo ${RUN_CMD} > <diag-dir>/cft96-stock1.log 2>&1 || true
+```
+
+Лог: <diag-dir>/cft96-stock1.log (24274 строки).
