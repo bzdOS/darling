@@ -2640,3 +2640,33 @@ abort_with_payload: reason: initializer in image (/usr/lib/libSystem.B.orig) tha
 `/usr/lib/libSystem.B.dylib`).
 
 REPRO: `sh cft96-run.sh lane99`.
+
+### Control #27 шаг В — снятие __mod_init_func с .orig (lane 100)
+
+Механизм гейта: `doModInitFunctions` выбирает инициализаторы по
+`sect->flags & SECTION_TYPE == S_MOD_INIT_FUNC_POINTERS`
+(ImageLoaderMachO.cpp:2301) — имя секции не читается вообще. Поэтому
+переименование `__mod_init_func` ничего не изменило бы, а декремент `nsects`
+сегмента снял бы ПОСЛЕДНЮЮ секцию (не `__mod_init_func`). Узчайший in-place
+фикс — сброс младших 8 бит (SECTION_TYPE) поля `flags` секции (4 байта, без
+сдвига load commands).
+
+Скрипт `build-freebsd/strip-mod-init-func.py`: обход LC по cmdsize, thin/fat,
+находит секции с типом S_MOD_INIT_FUNC_POINTERS и сбрасывает type-биты flags.
+На стейдж-копии `.orig` x86_64-слайс: flags `0x9 -> 0x0`. Pristine-бэкап не
+тронут, umbrella reexport не менялся.
+
+```
+repro: python3 build-freebsd/strip-mod-init-func.py <stage>/usr/lib/libSystem.B.orig
+       sh cft96-run.sh lane100
+before (lane99): dyld: initializer in image (/usr/lib/libSystem.B.orig) that does not link with libSystem.dylib  -> abort code 9
+after  (lane100): abort УШЁЛ; dyld: calling initializer function ... in /usr/lib/libSystem.B.dylib;
+                  lazy bind __libkernel_init / __libplatform_init / ___malloc_init;
+                  [darling-mldr] FATAL signal 11 (code=1) at addr=0xffffffffffffff8b
+```
+
+После снятия гейта единственным инициализатором стал umbrella (installPath ==
+`/usr/lib/libSystem.B.dylib`), и его ранний `__malloc_init` дошёл до вызова
+`___malloc_init` (libsystem_malloc.dylib) — но упал внутри него: rip =
+`___malloc_init+2`, addr = 0xffffffffffffff8b. Лейн 101: краш внутри раннего
+`___malloc_init`.
