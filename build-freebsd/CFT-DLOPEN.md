@@ -2451,8 +2451,86 @@ libsystem_malloc.dylib вызвался бы ДО libSystem.B initializer → п
 нет __mod_init_func). Он инициализируется только через вызовы ___malloc_init и
 ___malloc_late_init из libSystem.B initializer.
 
-### Fix source, rebuild pending
+### Constructor gate — dyld source, verbatim (resolves the step-B contradiction)
 
-Фикс должен обеспечить инициализацию libsystem_malloc ДО того, как libSystem.B
-initializer вызовет malloc (через __pthread_init или _libc_initializer). Способ,
-который подтвердится по артефактам (nm/llvm-readobj), без прогона — вторым коммитом.
+Шаг Б утверждал: __DATA,__mod_init_func вызывается «without the -init gate».
+Это неверно. Оба пути гейтованы на gProcessInfo->libSystemInitialized.
+Дословно, src/external/dyld/src/ImageLoaderMachO.cpp (сабмодуль cce174b65):
+
+doImageInit (LC_ROUTINES_64, -init), строки 2261-2263:
+
+    if ( ! dyld::gProcessInfo->libSystemInitialized ) {
+        // <rdar://problem/17973316> libSystem initializer must run first
+        dyld::throwf("-init function in image (%s) that does not link with libSystem.dylib\n", this->getPath());
+    }
+
+doModInitFunctions (__DATA,__mod_init_func), строки 2315-2319:
+
+    if ( ! dyld::gProcessInfo->libSystemInitialized ) {
+        // <rdar://problem/17973316> libSystem initializer must run first
+        const char* installPath = getInstallPath();
+        if ( (installPath == NULL) || (strcmp(installPath, libSystemPath(context)) != 0) )
+            dyld::throwf("initializer in image (%s) that does not link with libSystem.dylib\n", this->getPath());
+    }
+
+Вердикт: конструкторы гейтованы так же, как -init; единственное исключение —
+installPath == /usr/lib/libSystem.B.dylib (libSystemPath). Секционный маршрут
+pre-libSystem (___malloc_init через __mod_init_func в MSL) МЁРТВ: MSL — зависимость
+libSystem.B, инициализируется первой, libSystemInitialized ещё false,
+installPath != libSystemPath -> throwf. Фикс = ранний вызов ___malloc_init
+ВНУТРИ _libSystem_initializer пересобранного MSL (механизм стока: libSystem.B
+сам вызывает ___malloc_init из своего инициализатора). add-mod-init-func.py
+остаётся в дереве как инструмент; маршрут переписывается на стоковый механизм.
+
+### Evidence table (stock1 log + otool)
+
+Лог <diag-dir>/cft96-stock1.log (DYLD_PRINT_INITIALIZERS=1): 13 вызовов
+инициализаторов до dlopen Chrome Framework. Все 13 — ПОСЛЕ _libSystem_initializer
+(он первый, стр. 24086); до него — 0.
+
+| # | строка лога | образ | адрес вызова |
+|---|-------------|-------|--------------|
+| 1 | 24086 | libSystem.B.dylib | 0x21337c874110 (_libSystem_initializer) |
+| 2 | 24187 | libc++.1.dylib | 0x21337daa8e00 |
+| 3 | 24201 | libc++.1.dylib | 0x21337daa8e10 |
+| 4 | 24202 | libobjc.A.dylib | 0x21337da01550 |
+| 5 | 24203 | libobjc.A.dylib | 0x21337da051e0 |
+| 6 | 24204 | libobjc.A.dylib | 0x21337da05330 |
+| 7 | 24205 | libobjc.A.dylib | 0x21337da06a00 |
+| 8 | 24206 | libobjc.A.dylib | 0x21337da09480 |
+| 9 | 24207 | libobjc.A.dylib | 0x21337da0f090 |
+| 10 | 24208 | libobjc.A.dylib | 0x21337da110d0 |
+| 11 | 24209 | libobjc.A.dylib | 0x21337da13770 |
+| 12 | 24210 | libobjc.A.dylib | 0x21337da30d80 |
+| 13 | 24211 | libobjc.A.dylib | 0x21337da31870 |
+
+Цитаты лога (первый, переходные, последний):
+
+    24086: dyld: calling initializer function 0x21337c874110 in /usr/lib/libSystem.B.dylib
+    24187: dyld: calling initializer function 0x21337daa8e00 in /usr/lib/libc++.1.dylib
+    24201: dyld: calling initializer function 0x21337daa8e10 in /usr/lib/libc++.1.dylib
+    24202: dyld: calling initializer function 0x21337da01550 in /usr/lib/libobjc.A.dylib
+    24211: dyld: calling initializer function 0x21337da31870 in /usr/lib/libobjc.A.dylib
+
+otool (llvm-otool -l) по каждому члену — «член → механизм»:
+
+| член | секция | размер | элементов | механизм |
+|------|--------|--------|-----------|----------|
+| libSystem.B.dylib | __DATA,__mod_init_func | 0x8 | 1 | __mod_init_func (_libSystem_initializer) |
+| libc++.1.dylib | __DATA,__mod_init_func | 0x10 | 2 | __mod_init_func |
+| libobjc.A.dylib | __DATA,__objc_init_func | 0x50 | 10 | __objc_init_func |
+| libsystem_malloc.dylib | — | — | 0 | нет ни __mod_init_func, ни __objc_init_func, ни LC_ROUTINES_64 |
+
+Закрывает «противоречие»: утверждение шага Б «stock libSystem.B.dylib регистрирует
+через __mod_init_func» — ВЕРНО (1 элемент, он же _libSystem_initializer, первый
+в порядке); факт 05:28 «сток-MSL без mod_init_func» — тоже верен (0 секций).
+Это разные члены с разными механизмами: libSystem.B.dylib регистрирует свой
+инициализатор секционно, MSL — только вызовами ___malloc_init/___malloc_late_init
+из libSystem.B initializer.
+
+### Fix source, rebuild pending (rewritten)
+
+Фикс = ранний вызов ___malloc_init ВНУТРИ _libSystem_initializer пересобранного
+MSL (механизм стока). Способ подтвердится по артефактам (nm/llvm-readobj),
+без прогона — следующим коммитом. Пересборка + прогон — отдельным нарядом
+(шаг 3).

@@ -121,23 +121,15 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
     "/usr/lib/system/libsystem_c.dylib"
 
-# 8b. post-link: add LC_LOAD_DYLIB on libSystem.B.dylib so MSL is a
-#      DEPENDENCY of libSystem.B (not the other way around). This breaks
-#      the cyclic dependency and allows MSL's -init to run AFTER libSystem
-#      is initialized (dyld requires libSystemInitialized=true for -init
-#      in any image other than libSystem.dylib itself).
-#      Without this, -init in MSL runs BEFORE libSystem.B initializer
-#      (MSL is a dependency of libSystem.B) and dyld throws
-#      "-init function in image that does not link with libSystem.dylib".
-python3 "${SCRIPT_DIR}/add-libsystem-dep.py" \
-    "${BUILD}/libsystem_malloc.dylib" \
-    "/usr/lib/libSystem.B.dylib"
-
-# 8c. post-link: add the -init LC (LC_ROUTINES_64) for ___malloc_init so the
-#      MSL initializes at load time, after libSystem.B is initialized
-#      (ld64.lld does not implement -init; added post-link, exact-length
-#      surgery like the upward LC)
-python3 "${SCRIPT_DIR}/add-init-lc.py" \
+# 8b. post-link: add a __DATA,__mod_init_func entry for ___malloc_init.
+#      dyld forbids -init (LC_ROUTINES_64) in any image that does not link
+#      with libSystem.dylib (ImageLoaderMachO.cpp:2261-2263: requires
+#      libSystemInitialized=true, only true after libSystem.B's own
+#      initializer).  The stock overlay members (libSystem.B.dylib,
+#      libc++.1.dylib) register initializers through __mod_init_func
+#      instead — a section of function pointers dyld calls after load,
+#      without the -init gate.  This script repeats that mechanism.
+python3 "${SCRIPT_DIR}/add-mod-init-func.py" \
     "${BUILD}/libsystem_malloc.dylib" \
     "___malloc_init"
 

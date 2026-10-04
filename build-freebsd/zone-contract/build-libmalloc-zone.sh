@@ -175,10 +175,14 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${DARLING_OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
     "/usr/lib/system/libsystem_c.dylib"
 
-# -init LC (LC_ROUTINES_64) for ___malloc_init: the MSL initializes at load
-# time, before libSystem.B's initializer runs (ld64.lld does not implement
-# -init; added post-link, exact-length surgery like the upward LC)
-python3 "${SCRIPT_DIR}/add-init-lc.py" \
+# __DATA,__mod_init_func entry for ___malloc_init: dyld forbids -init
+# (LC_ROUTINES_64) in any image that does not link with libSystem.dylib
+# (ImageLoaderMachO.cpp:2261-2263: requires libSystemInitialized=true,
+# only true after libSystem.B's own initializer).  The stock overlay
+# members (libSystem.B.dylib, libc++.1.dylib) register initializers
+# through __mod_init_func instead — a section of function pointers dyld
+# calls after load, without the -init gate.
+python3 "${SCRIPT_DIR}/add-mod-init-func.py" \
     "${BUILD}/libsystem_malloc.dylib" \
     "___malloc_init"
 
