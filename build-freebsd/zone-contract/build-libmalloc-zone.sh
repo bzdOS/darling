@@ -175,6 +175,13 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${DARLING_OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
     "/usr/lib/system/libsystem_c.dylib"
 
+# -init LC (LC_ROUTINES_64) for ___malloc_init: the MSL initializes at load
+# time, before libSystem.B's initializer runs (ld64.lld does not implement
+# -init; added post-link, exact-length surgery like the upward LC)
+python3 "${SCRIPT_DIR}/add-init-lc.py" \
+    "${BUILD}/libsystem_malloc.dylib" \
+    "___malloc_init"
+
 # segment vm geometry: __DATA vmaddr moves to align_up(__TEXT end),
 # every __DATA section addr follows, __LINKEDIT vmaddr stays contiguous
 python3 "${SCRIPT_DIR}/fixup-segment-vm.py" \

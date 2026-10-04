@@ -98,7 +98,7 @@ def main():
             dd[o + 8:o + 12] = shift(symoff).to_bytes(4, "little")
             dd[o + 16:o + 20] = shift(stroff).to_bytes(4, "little")
         elif cmd == LC_DYSYMTAB:
-            for f in (8, 12, 16, 20, 24, 28, 32):  # file offsets in dysymtab
+            for f in (32, 40, 48, 56, 64, 72):  # file offsets in dysymtab
                 v = int.from_bytes(dd[o + f:o + f + 4], "little")
                 dd[o + f:o + f + 4] = shift(v).to_bytes(4, "little")
         elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):

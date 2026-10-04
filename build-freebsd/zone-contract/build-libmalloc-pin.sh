@@ -121,6 +121,31 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
     "/usr/lib/system/libsystem_c.dylib"
 
+# 8b. post-link: add LC_LOAD_DYLIB on libSystem.B.dylib so MSL is a
+#      DEPENDENCY of libSystem.B (not the other way around). This breaks
+#      the cyclic dependency and allows MSL's -init to run AFTER libSystem
+#      is initialized (dyld requires libSystemInitialized=true for -init
+#      in any image other than libSystem.dylib itself).
+#      Without this, -init in MSL runs BEFORE libSystem.B initializer
+#      (MSL is a dependency of libSystem.B) and dyld throws
+#      "-init function in image that does not link with libSystem.dylib".
+python3 "${SCRIPT_DIR}/add-libsystem-dep.py" \
+    "${BUILD}/libsystem_malloc.dylib" \
+    "/usr/lib/libSystem.B.dylib"
+
+# 8c. post-link: add the -init LC (LC_ROUTINES_64) for ___malloc_init so the
+#      MSL initializes at load time, after libSystem.B is initialized
+#      (ld64.lld does not implement -init; added post-link, exact-length
+#      surgery like the upward LC)
+python3 "${SCRIPT_DIR}/add-init-lc.py" \
+    "${BUILD}/libsystem_malloc.dylib" \
+    "___malloc_init"
+
+# 8d. post-link: segment vm geometry (__TEXT vmsize rounded to page,
+#      __DATA fileoff moved, all __LINKEDIT offsets shifted)
+python3 "${SCRIPT_DIR}/fixup-segment-vm.py" \
+    "${BUILD}/libsystem_malloc.dylib"
+
 # 9. verify
 echo "=== built dylib ==="
 ls -la "${BUILD}/libsystem_malloc.dylib"
