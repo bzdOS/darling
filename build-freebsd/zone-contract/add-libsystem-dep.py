@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Insert the LC_LOAD_DYLIB(UPWARD) record for libsystem_c into a linked
-dylib, byte-cloned from the original overlay dylib's own record.
+"""Insert the LC_LOAD_DYLIB record for libSystem.B.dylib into a linked
+dylib (libsystem_malloc.dylib).
 
-ld64.lld does not implement -upward-l / -upward_library, so the upward
-edge is added post-link with exact-length surgery:
-- the record bytes are copied verbatim from the original (same cmd,
-  name offset, timestamp, versions -- the encoding cannot be wrong);
-- ncmds += 1, sizeofcmds += len(record);
-- __TEXT filesize/vmsize += len(record) (the insertion lies inside it);
-- every file-offset field pointing at or past the insertion point is
-  shifted by len(record): LC_SEGMENT_64 fileoff, every section offset,
-  symtab dysymtab file offsets, dyld_info offsets, linkedit_data offsets.
+The MSL is a dependency of libSystem.B.dylib (libSystem.B imports
+___malloc_init from it). dyld initializes dependencies first, so an -init
+in the MSL would run BEFORE libSystem.B's initializer — and dyld forbids
+that: "-init function in image that does not link with libSystem.dylib"
+(ImageLoaderMachO.cpp:2261-2263, check on libSystemInitialized).
 
-Usage: add-upward-lc.py <built.dylib> <original-with-upward> <symbol-name>
+Adding LC_LOAD_DYLIB on libSystem.B.dylib to the MSL reverses the edge:
+libSystem.B becomes a dependency of the MSL. Now the MSL is initialized
+AFTER libSystem.B, so its -init runs when libSystemInitialized=true and
+the check passes. The MSL's ___malloc_init runs before libSystem.B's
+initializer calls malloc (via __pthread_init / _libc_initializer).
+
+The record is built from the original overlay dylib's own LC_LOAD_DYLIB
+record for libSystem.B.dylib (same cmd, name offset, timestamp, versions
+— the encoding cannot be wrong), then the standard exact-length surgery:
+ncmds += 1, sizeofcmds += len(record), __TEXT filesize/vmsize += len(record),
+every file-offset field pointing at or past the insertion point is shifted.
+
+Usage: add-libsystem-dep.py <built.dylib> <libsystem-b-path>
 """
 import struct
 import sys
@@ -45,25 +53,20 @@ def find_record(d, want):
         d = d[o:o + sz]
     for o, cmd, csz in iter_lcs(d):
         if cmd in DYLIB_CMDS and lc_name(d, o, csz) == want:
-            kind = int.from_bytes(d[o + 12:o + 16], "little")  # unused
-            rec = bytearray(d[o:o + csz])
-            rec[0:4] = (0x80000023).to_bytes(4, "little")  # UPWARD
-            return bytes(rec)
-    raise SystemExit(f"upward record for {want} not found in original")
+            return bytes(d[o:o + csz])
+    raise SystemExit(f"record for {want} not found in original")
 
 
 def main():
     built, orig, name = sys.argv[1:4]
     rec = find_record(open(orig, "rb").read(), name)
-    print(f"upward record: cmdsize={len(rec)} name={name}")
+    print(f"libSystem.B record: cmdsize={len(rec)} name={name}")
     dd = bytearray(open(built, "rb").read())
     assert dd[:4] != b"\xca\xfe\xba\xbe", "single-arch dylib expected"
     lcs = list(iter_lcs(dd))
     insert_at = lcs[-1][0] + lcs[-1][2]  # after the last LC
-    # sanity: no LC at/after insert_at that we would clobber
     assert insert_at + len(rec) <= len(dd), "record does not fit"
     dd[insert_at:insert_at] = rec
-    # header: ncmds + sizeofcmds
     ncmds = int.from_bytes(dd[16:20], "little")
     sizeofcmds = int.from_bytes(dd[20:24], "little")
     dd[16:20] = (ncmds + 1).to_bytes(4, "little")
@@ -72,7 +75,6 @@ def main():
     def shift(off):
         return off + len(rec) if off >= insert_at else off
 
-    # walk the LC region AFTER insertion and patch file offsets
     o = 32
     n = ncmds + 1
     for _ in range(n):

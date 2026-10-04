@@ -76,8 +76,8 @@ def main() -> int:
     struct.pack_into("<Q", data, data_seg["off"] + 40, old_data_fileoff + pad)
     so = data_seg["off"] + 72
     for s in range(data_seg["nsects"]):
-        off = struct.unpack_from("<I", data, so + 40)[0]
-        struct.pack_into("<I", data, so + 40, off + pad)
+        off = struct.unpack_from("<I", data, so + 48)[0]
+        struct.pack_into("<I", data, so + 48, off + pad)
         addr = struct.unpack_from("<Q", data, so + 32)[0]
         struct.pack_into("<Q", data, so + 32, addr + vm_delta)
         so += 80
