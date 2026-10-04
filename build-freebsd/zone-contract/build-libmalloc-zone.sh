@@ -146,15 +146,29 @@ echo "exports: original $(wc -l < "${BUILD}/exports-orig.txt"), visible $(wc -l 
 # 8. link: original install name + versions + export list; imports stay
 #    undefined exactly like the original overlay dylib carries them
 #    (the closure does not export the $UNIX2003 variants of mprotect/
-#    write/sleep/kill — the original links them as imports)
-# ld64.lld in this toolchain has no -segalign (silently ignored —
-# measured: geometry unchanged) and does not round a segment's vmsize up
-# to a page boundary, so __TEXT's raw end overlaps __DATA's vmaddr; the
-# residual is fixed post-link by fixup-segment-vm.py (exact-length LC
-# field surgery — vmaddrs only, file offsets untouched; the fixup
-# streams in __LINKEDIT are segment-relative, so nothing is rewritten)
+#    write/sleep/kill — the original links them as imports).
+#    Control #27 step D: the faulting defect was NOT the guard bind but
+#    the post-link file-offset surgery (fixup-segment-vm.py +
+#    add-upward-lc.py shifting section offsets): dyld maps each segment
+#    1:1 (mmap(vmaddr, vmsize, fd, fileoff), ImageLoaderMachO.cpp:2700),
+#    so shifted __TEXT section offsets executed the wrong instruction
+#    stream, and the inflated __TEXT vmsize overlapped __DATA's vmaddr.
+#    Both are gone: ld64.lld 19.1.7 emits clean page-aligned geometry
+#    on its own (measured: __TEXT vmsize == filesize, __DATA
+#    contiguous), and add-upward-lc.py is now an in-place overwrite of
+#    the -headerpad zero slack (file does not grow, no offset moves,
+#    identity preserved).
+#    ___stack_chk_guard: NO -lsystem_c on purpose — a regular downward
+#    edge to libsystem_c would initialize it before MSL (downward
+#    recursion), and its initializer mallocs; the stock dylib lists
+#    libsystem_c as UPWARD only (initialization postponed, ImageLoader.cpp
+#    rdar 14412057).  The guard bind stays -undefined dynamic_lookup,
+#    which the run log shows resolving to libsystem_c at runtime
+#    (dyld: bind: libsystem_malloc.dylib:... = libsystem_c.dylib:
+#    ___stack_chk_guard).
 ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
     -undefined dynamic_lookup \
+    -headerpad 0x100 \
     -install_name /usr/lib/system/libsystem_malloc.dylib \
     -current_version 0.0.0 -compatibility_version 1.0.0 \
     -exported_symbols_list "${BUILD}/exports.txt" \
@@ -167,9 +181,9 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
     -o "${BUILD}/libsystem_malloc.dylib" $(cat "${BUILD}/objs.txt")
 
 # ld64.lld does not implement -upward-l / -upward_library -- the upward
-# edge to libsystem_c is added post-link, byte-cloned from the original
-# overlay dylib's own LC record (exact-length surgery, ncmds+sizeofcmds
-# and every file offset shifted together)
+# edge to libsystem_c is added post-link as an in-place overwrite of the
+# header slack (byte-cloned LC record from the original overlay dylib;
+# the file does not grow, no file offset moves -- see add-upward-lc.py)
 python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${BUILD}/libsystem_malloc.dylib" \
     "${DARLING_OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
@@ -185,11 +199,6 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
 # still false).  The early-malloc-init fix lives in the libSystem.B
 # initializer source (src/external/libsystem/init.c).  add-mod-init-func.py
 # stays in the tree as a tool, unwired.
-
-# segment vm geometry: __DATA vmaddr moves to align_up(__TEXT end),
-# every __DATA section addr follows, __LINKEDIT vmaddr stays contiguous
-python3 "${SCRIPT_DIR}/fixup-segment-vm.py" \
-    "${BUILD}/libsystem_malloc.dylib"
 
 echo "=== built dylib ==="
 ls -la "${BUILD}/libsystem_malloc.dylib"

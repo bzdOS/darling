@@ -3,14 +3,27 @@
 dylib, byte-cloned from the original overlay dylib's own record.
 
 ld64.lld does not implement -upward-l / -upward_library, so the upward
-edge is added post-link with exact-length surgery:
-- the record bytes are copied verbatim from the original (same cmd,
-  name offset, timestamp, versions -- the encoding cannot be wrong);
-- ncmds += 1, sizeofcmds += len(record);
-- __TEXT filesize/vmsize += len(record) (the insertion lies inside it);
-- every file-offset field pointing at or past the insertion point is
-  shifted by len(record): LC_SEGMENT_64 fileoff, every section offset,
-  symtab dysymtab file offsets, dyld_info offsets, linkedit_data offsets.
+edge is added post-link as a PURE IN-PLACE OVERWRITE of the zero header
+slack that -headerpad reserves: the record bytes are copied verbatim
+from the original (same cmd, name offset, timestamp, versions -- the
+encoding cannot be wrong); ncmds += 1, sizeofcmds += len(record).  The
+file does not grow, so nothing moves: section file offsets, segment
+fileoff/filesize/vmsize and every __LINKEDIT offset stay exactly as the
+linker wrote them.
+
+The previous revision shifted every file offset at or past the insertion
+point and grew __TEXT's vmsize/filesize by the record length.  That
+broke the file<->vm identity dyld relies on (ImageLoaderMachO.cpp maps
+each segment 1:1: mmap(vmaddr, vmsize, fd, fileoff)): every __TEXT
+section ended up at file offset vm+0x40, so the code dyld executed was
+the instruction stream of the wrong addresses, and __TEXT's inflated
+vmsize overlapped __DATA's vmaddr ("malformed mach-o image: segment
+__DATA vm overlaps segment __TEXT").
+
+Requires the link to pass -headerpad with at least len(record) bytes of
+slack between the last load command and the first section; the slack is
+already part of __TEXT's file/vm range, so filling it with the record
+changes no offset anywhere.
 
 Usage: add-upward-lc.py <built.dylib> <original-with-upward> <symbol-name>
 """
@@ -18,9 +31,6 @@ import struct
 import sys
 
 DYLIB_CMDS = {0xC, 0x80000018, 0x8000001F, 0x80000023}
-LC_SYMTAB, LC_DYSYMTAB = 0x2, 0xB
-LC_DYLD_INFO, LC_DYLD_INFO_ONLY = 0x22, 0x80000022
-LINKEDIT_DATA = {0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x24, 0x25, 0x26, 0x29}
 
 
 def iter_lcs(dd):
@@ -45,7 +55,6 @@ def find_record(d, want):
         d = d[o:o + sz]
     for o, cmd, csz in iter_lcs(d):
         if cmd in DYLIB_CMDS and lc_name(d, o, csz) == want:
-            kind = int.from_bytes(d[o + 12:o + 16], "little")  # unused
             rec = bytearray(d[o:o + csz])
             rec[0:4] = (0x80000023).to_bytes(4, "little")  # UPWARD
             return bytes(rec)
@@ -60,57 +69,37 @@ def main():
     assert dd[:4] != b"\xca\xfe\xba\xbe", "single-arch dylib expected"
     lcs = list(iter_lcs(dd))
     insert_at = lcs[-1][0] + lcs[-1][2]  # after the last LC
-    # sanity: no LC at/after insert_at that we would clobber
-    assert insert_at + len(rec) <= len(dd), "record does not fit"
-    dd[insert_at:insert_at] = rec
-    # header: ncmds + sizeofcmds
+
+    # first section's file offset bounds the header slack
+    first_sect_off = None
+    for o, cmd, csz in lcs:
+        if cmd == 0x19:  # LC_SEGMENT_64
+            nsects = int.from_bytes(dd[o + 64:o + 68], "little")
+            so = o + 72
+            for _ in range(nsects):
+                sect_off = int.from_bytes(dd[so + 48:so + 52], "little")
+                if sect_off != 0 and (first_sect_off is None or sect_off < first_sect_off):
+                    first_sect_off = sect_off
+                so += 80
+    slack = (first_sect_off or len(dd)) - insert_at
+    if slack < len(rec):
+        raise SystemExit(
+            f"FATAL: header slack {slack:#x} < record {len(rec):#x} at "
+            f"{insert_at:#x}; link with -headerpad larger than the record"
+        )
+    print(f"header slack {slack:#x} at {insert_at:#x}; writing {len(rec):#x}")
+
+    # overwrite the zero slack in place -- the file does NOT grow, so no
+    # file offset anywhere moves
+    end = insert_at + len(rec)
+    assert dd[insert_at:end] == b"\0" * len(rec), "header slack is not zero padding"
+    dd[insert_at:end] = rec
     ncmds = int.from_bytes(dd[16:20], "little")
     sizeofcmds = int.from_bytes(dd[20:24], "little")
     dd[16:20] = (ncmds + 1).to_bytes(4, "little")
     dd[20:24] = (sizeofcmds + len(rec)).to_bytes(4, "little")
-
-    def shift(off):
-        return off + len(rec) if off >= insert_at else off
-
-    # walk the LC region AFTER insertion and patch file offsets
-    o = 32
-    n = ncmds + 1
-    for _ in range(n):
-        cmd, csz = struct.unpack_from("<II", dd, o)
-        if cmd == 0x19:  # LC_SEGMENT_64
-            fileoff = int.from_bytes(dd[o + 40:o + 48], "little")
-            filesize = int.from_bytes(dd[o + 48:o + 56], "little")
-            vmsize = int.from_bytes(dd[o + 32:o + 40], "little")
-            if fileoff == 0:  # __TEXT holds the header+LCs
-                dd[o + 48:o + 56] = (filesize + len(rec)).to_bytes(8, "little")
-                dd[o + 32:o + 40] = (vmsize + len(rec)).to_bytes(8, "little")
-            else:
-                dd[o + 40:o + 48] = shift(fileoff).to_bytes(8, "little")
-            nsects = int.from_bytes(dd[o + 64:o + 68], "little")
-            so = o + 72
-            for _ in range(nsects):
-                sect_off = int.from_bytes(dd[so + 48:so + 56], "little")
-                dd[so + 48:so + 56] = shift(sect_off).to_bytes(8, "little")
-                so += 80
-        elif cmd == LC_SYMTAB:
-            symoff = int.from_bytes(dd[o + 8:o + 12], "little")
-            stroff = int.from_bytes(dd[o + 16:o + 20], "little")
-            dd[o + 8:o + 12] = shift(symoff).to_bytes(4, "little")
-            dd[o + 16:o + 20] = shift(stroff).to_bytes(4, "little")
-        elif cmd == LC_DYSYMTAB:
-            for f in (32, 40, 48, 56, 64, 72):  # file offsets in dysymtab
-                v = int.from_bytes(dd[o + f:o + f + 4], "little")
-                dd[o + f:o + f + 4] = shift(v).to_bytes(4, "little")
-        elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
-            for f in (8, 16, 24, 32, 40, 48):  # rebases/weak/bind/weakbind/lazy/exports
-                v = int.from_bytes(dd[o + f:o + f + 4], "little")
-                dd[o + f:o + f + 4] = shift(v).to_bytes(4, "little")
-        elif cmd in LINKEDIT_DATA:
-            off_field = int.from_bytes(dd[o + 8:o + 12], "little")
-            dd[o + 8:o + 12] = shift(off_field).to_bytes(4, "little")
-        o += csz
     open(built, "wb").write(dd)
-    print(f"inserted at {insert_at}; ncmds {ncmds}->{ncmds+1}; "
+    print(f"overwrote [{insert_at:#x},{end:#x}); ncmds {ncmds}->{ncmds+1}; "
           f"sizeofcmds {sizeofcmds}->{sizeofcmds+len(rec)}")
 
 
