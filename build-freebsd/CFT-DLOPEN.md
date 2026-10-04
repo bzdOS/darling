@@ -2775,3 +2775,48 @@ rip=0x...2b72  libdyld!dyld3::MachOFile::hasMachOMagic() const+18
 указывает в `__DATA,__got`, FATAL на `___malloc_init` ушёл; следующее
 препятствие — NULL-deref `hasMachOMagic` из `_mvm_aslr_init` (фикс =
 лейн 103).
+
+## Control #29 — dlopen(/FWMACHO) на пост-105 стеке: "image not found" (FWMACHO не посажен)
+
+Лейн 106 (task/dlopen-wall-diag). Стек прогона: патч 103 (libdyld),
+патч 104 (libsystem_malloc), патч 105-3 (libSystem.B) и шим алиасов
+`$UNIX2003` (`build-freebsd/unix2003-shim.c`, sha256
+`a98c264f5addef87bd886e2b294482d4b1e06d62f233fd05577e1af6d5d49182`),
+подключённый через `DYLD_INSERT_LIBRARIES`.
+
+Команда:
+
+```
+DYLD_INSERT_LIBRARIES=/usr/lib/unix2003-shim.dylib timeout 90 sh cft96-run.sh lane105
+```
+
+Проба — `cft-fwmacho-probe-macho` (candidate [3] = `/FWMACHO`).
+
+Результат: **24405 строк** (эталон ≥ 24223). FATAL `$UNIX2003`
+отсутствует (единственная строка с `UNIX2003` — `lazy bind`
+`libsystem_malloc.dylib:… = unix2003-shim.dylib:_mprotect$UNIX2003`).
+Отказ собственного `dlopen` пробы:
+
+```
+dlopen_internal(/FWMACHO, 0x00000105)
+  dlopen_internal() failed, error: 'dlopen(/FWMACHO, 261): image not found'
+dlerror()
+[3] /FWMACHO
+  stat=0  dlopen=dlopen(/FWMACHO, 261): image not found
+```
+
+Класс: **image not found** — не версия-стена. Причина: `/FWMACHO` — это
+симлинк `$LOCAL/FWMACHO -> Frameworks/Google Chrome for Testing
+Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing
+Framework`, который по Control #5 сажает poller после строки
+`Chrome framework staged:`; а staging Chrome выполняется только при
+`DARLING_TEST_BINARY=chrome-macho` + `CHROME_APP`
+(`tests/launch-dynamic-smoke.c:740`). `cft96-run.sh` использует
+`DARLING_TEST_BINARY=cft-fwmacho-probe-macho`, staging не запускается,
+симлинк не создаётся — это в точности pre-cleanup сигнатура из Control #5
+(`fstatat("…/local-overlay/FWMACHO") RET -1 errno 2`, без `openat`).
+Кандидаты [0]/[1]/[2] в том же прогоне тоже дают `image not found`.
+
+СТОП (класс отказа иной, не версия-стена) — роут за головой: либо
+прогон с посаженным `$LOCAL/FWMACHO` (staging Chrome + poller из
+Control #5), либо иной выбор.
