@@ -2211,3 +2211,72 @@ fault = libsystem_malloc.dylib!_word_zap_bit_go_down+0x372: callq _bitarray_size
 rip=0x351ef690c482 = libsystem_malloc.dylib+0x2d482, внутри функции
 `_word_zap_bit_go_down` (+0x372); инструкция в точке краша — `callq
 _bitarray_size`; пересборка/патч MSL не выполнялись (шаг 96-В).
+
+## Control #26 (step V)
+
+### Fault line (fresh3)
+
+```
+fault = libsystem_malloc.dylib!_word_zap_bit_go_down+0x372: callq _bitarray_size
+```
+
+rip=0x0000031c6af0c482, base=0x31C6AEDF000 (из rebase-строк лога fresh3),
+offset = 0x31C6AF0C482 − 0x31C6AEDF000 = 0x2D482 — та же сигнатура что и шаг Б.
+
+### First divergent initializer
+
+```
+fresh3 (fix):  dyld: calling initializer function 0x31c6ae74110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+f1 (stock):   dyld: calling initializer function 0x351ef6874110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+```
+
+Оба лога вызывают один и тот же инициализатор libSystem.B (смещение 0x74110 от
+base libSystem.B). После него идут идентичные lazy bind строки
+(libsystem_pthread, libdyld, libsystem_blocks) — цепь расходится только в
+адресах (ASLR), не в логике. Краш происходит сразу после lazy bind
+libsystem_pthread.dylib:0x...2248 = _os_unfair_lock_unlock.
+
+### NULL+0x74 analysis
+
+```
+FATAL signal 11 (code=1) at addr=0xffffffffffffff8c
+rip=0x0000031c6af0c482  rax=0x0000000000000001  rcx=0x0000000000000000
+rdx=0x0000000000000000  rsi=0x0000000000000004  rdi=0x00007fffffdfff38
+```
+
+addr=0xffffffffffffff8c = NULL+0x74 — аргумент _bitarray_size (bitarray_size =
+NULL+0x74). Инициализатор libSystem.B вызывает _word_zap_bit_go_down с
+невалидным аргументом (NULL вместо валидного bitarray pointer).
+
+### Verdict (control #26 step V, one line)
+
+Свежий корень + timeout 120 воспроизвели краш (24188/24096 = сигнатура шага А) —
+фикс НЕ устранил NULL+0x74; причина = инициализатор libSystem.B вызывает
+_word_zap_bit_go_down с NULL аргументом (bitarray_size = NULL+0x74).
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=<src-dir>
+export DARLING_OVERLAY=<overlay-dir>
+export DARLING_BUILD_DIR=<build-dir>
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib
+export DARLING_SMOKE_REFRESH=1
+DYLD_TRACE="DYLD_PRINT_LIBRARIES DYLD_PRINT_LIBRARIES_POST_LAUNCH \
+DYLD_PRINT_BINDINGS DYLD_PRINT_WEAK_BINDINGS DYLD_PRINT_APIS \
+DYLD_PRINT_INTERPOSING DYLD_PRINT_SEGMENTS DYLD_PRINT_STATISTICS \
+DYLD_PRINT_STATISTICS_DETAILS DYLD_PRINT_RPATHS DYLD_PRINT_WARNINGS \
+DYLD_PRINT_INITIALIZERS DYLD_PRINT_DOFS DYLD_PRINT_OPTS DYLD_PRINT_ENV \
+DYLD_PRINT_CODE_SIGNATURES DYLD_PRINT_REBASINGS DYLD_PRINT_TO_STDERR"
+RUN_CMD="env DARLING_SRC_DIR=${DARLING_SRC_DIR} DARLING_OVERLAY=${DARLING_OVERLAY} DARLING_BUILD_DIR=${DARLING_BUILD_DIR}"
+RUN_CMD="${RUN_CMD} DARLING_TEST_BINARY=${DARLING_TEST_BINARY}"
+RUN_CMD="${RUN_CMD} DARLING_STAGING_TREES=${DARLING_STAGING_TREES}"
+RUN_CMD="${RUN_CMD} DARLING_SMOKE_REFRESH=${DARLING_SMOKE_REFRESH}"
+for v in ${DYLD_TRACE}; do RUN_CMD="${RUN_CMD} ${v}=1"; done
+RUN_CMD="${RUN_CMD} ${DARLING_BUILD_DIR}/launch-dynamic"
+timeout 120 sudo ${RUN_CMD} > <diag-dir>/cft96-fresh3.log 2>&1 || true
+```
+
+Лог: <diag-dir>/cft96-fresh3.log (24188 строк).
