@@ -2395,3 +2395,31 @@ timeout 120 sudo ${RUN_CMD} > <diag-dir>/cft96-stock1.log 2>&1 || true
 ```
 
 Лог: <diag-dir>/cft96-stock1.log (24274 строки).
+
+## Control #27 (step B)
+
+### Init-order mechanism (llvm-readobj artifact comparison)
+
+```
+stock (overlay):   FAT binary (cafebabe, 2 archs), 929 symbols
+                   ___malloc_init @ 0x23b90, ___malloc_late_init @ 0x24710
+                   calls ___malloc_init_experiments, ___malloc_init_from_bootargs
+fix (cft96):       thin x86_64 (cffaedfe), 0 symbols (stripped)
+                   does not disassemble (llvm-objdump: 0 lines)
+                   no ___malloc_init calls found
+```
+
+Оба libSystem.B.dylib (stock и fix) вызывают ___malloc_init и ___malloc_late_init
+на одних адресах (f20f, f32c). Различие в самом libsystem_malloc.dylib: стоковый
+содержит инициализационную логику, фиксовый — нет (stripped, не дизасмируется).
+
+### Before-crash line (fresh log)
+
+```
+<diag-dir>/cft96-baseline.log (24188 lines)
+  стр. 24082: dyld: calling initializer function 0x2ca08b274110 in /usr/lib/libSystem.B.dylib
+  стр. 24096: [darling-mldr] FATAL signal 11 (code=1) at addr=0xffffffffffffff8c
+```
+
+Прогон на текущем дереве (pr-arm64 2c7cfc8d5) воспроизвёл краш — та же
+сигнатура что и fresh3.
