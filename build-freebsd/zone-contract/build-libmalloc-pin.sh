@@ -104,6 +104,7 @@ grep -cE "malloc_default_zone|malloc_get_all_zones|malloc_create_zone|malloc_des
 # 7. link with the original's export trie names
 ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
     -undefined dynamic_lookup \
+    -headerpad 0x100 \
     -install_name /usr/lib/system/libsystem_malloc.dylib \
     -current_version 0.0.0 -compatibility_version 1.0.0 \
     -exported_symbols_list "${BUILD}/exports.txt" \
@@ -115,7 +116,8 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
     -upward-lsystem_c \
     -o "${BUILD}/libsystem_malloc.dylib" $(cat "${BUILD}/objs.txt") 2>&1 | tee "${BUILD}/link.log"
 
-# 8. post-link: add the upward LC (byte-clone from original)
+# 8. post-link: add the upward LC (byte-clone from original; in-place
+#    overwrite of the -headerpad slack, file does not grow)
 python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${BUILD}/libsystem_malloc.dylib" \
     "${OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
