@@ -2528,9 +2528,42 @@ otool (llvm-otool -l) по каждому члену — «член → меха
 инициализатор секционно, MSL — только вызовами ___malloc_init/___malloc_late_init
 из libSystem.B initializer.
 
-### Fix source, rebuild pending (rewritten)
+### Fix applied (step 3)
 
-Фикс = ранний вызов ___malloc_init ВНУТРИ _libSystem_initializer пересобранного
-MSL (механизм стока). Способ подтвердится по артефактам (nm/llvm-readobj),
-без прогона — следующим коммитом. Пересборка + прогон — отдельным нарядом
-(шаг 3).
+Фикс: `src/external/libsystem/init.c` — вызов `__malloc_init(apple)` перенесён
+в начало `libSystem_initializer`, сразу после `__libplatform_init` и ДО
+`__pthread_init`/`_libc_initializer` (раньше стоял после них, INIT_MALLOC после
+INIT_LIBC — отсюда NULL+0x74). Дифф сохранён как
+`build-freebsd/zone-contract/early-malloc-init.patch` (init.c — файл сабмодуля
+darling-Libsystem, upstream без write-доступа).
+
+Пересборка libSystem.B: CMake-таргет `system` на этой машине НЕ собирается
+(i386-архитектура падает на `__uint8_t` в mach/i386/_structs.h; init.c падает
+на конфликте `user_addr_t`/`__darwin_clock_t` между freebsd_mig_compat.h и
+Darling SDK). libSystem.B собран standalone: clang -target x86_64-apple-macos10.12
+объекты `init.c`/`dummy.c`/`CompatibilityHacks.c`/kqueue (без
+`-D_BSD_I386__TYPES_H_` и без `-include freebsd_mig_compat.h`) + `ld64.lld -dylib`
+с `-reexport_library` по overlay-siblings. Ранний вызов подтверждён
+дизассемблером `_libSystem_initializer` @0x1740: порядок callq
+`__libkernel_init → __libplatform_init → __malloc_init(apple) → __pthread_init
+→ _libc_initializer`.
+
+Repro: `sh cft96-run.sh <tag>` (repro корня лейна 96, DYLD_PRINT_INITIALIZERS=1,
+timeout 120). Результат (<diag-dir>/cft96-early.log, 23810 строк):
+
+```
+NULL+0x74 ушёл: в логе нет addr=0xffffffffffffff8c и FATAL signal 11;
+каскад дошёл до конца биндинга (23806 строк), затем:
+dyld: Symbol not found: ___stack_chk_guard
+  Referenced from: /usr/lib/libSystem.B.dylib
+  Expected in: /usr/lib/system/libdyld.dylib
+```
+
+Следующее препятствие = дефект standalone-линковки libSystem.B: ld64.lld с
+`-reexport_library` привязывает импорт (первый прогон: `_dlsym` → libsystem_kernel,
+второй: `___stack_chk_guard` → libdyld) к первой библиотеке в списке, а не к
+библиотеке-владельцу символа. Правильная резолюция требует Darling ld64
+(`build/dyld-only/.../x86_64-apple-darwin20-ld`, собран) + firstpass-библиотек,
+либо перенастройки reexport через `-dylib_file`. Это НЕ препятствие фикса
+malloc-init: NULL+0x74 закрыт, осталось починить reexport-умбреллу.
+
