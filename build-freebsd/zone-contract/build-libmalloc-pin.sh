@@ -121,17 +121,16 @@ python3 "${SCRIPT_DIR}/add-upward-lc.py" \
     "${OVERLAY}/usr/lib/system/libsystem_malloc.dylib" \
     "/usr/lib/system/libsystem_c.dylib"
 
-# 8b. post-link: add a __DATA,__mod_init_func entry for ___malloc_init.
-#      dyld forbids -init (LC_ROUTINES_64) in any image that does not link
-#      with libSystem.dylib (ImageLoaderMachO.cpp:2261-2263: requires
-#      libSystemInitialized=true, only true after libSystem.B's own
-#      initializer).  The stock overlay members (libSystem.B.dylib,
-#      libc++.1.dylib) register initializers through __mod_init_func
-#      instead — a section of function pointers dyld calls after load,
-#      without the -init gate.  This script repeats that mechanism.
-python3 "${SCRIPT_DIR}/add-mod-init-func.py" \
-    "${BUILD}/libsystem_malloc.dylib" \
-    "___malloc_init"
+# 8b. post-link: __DATA,__mod_init_func for ___malloc_init is NOT applied.
+#      Control #27 step B verdict (CFT-DLOPEN.md #27Б): doModInitFunctions
+#      is gated on gProcessInfo->libSystemInitialized exactly like -init
+#      (ImageLoaderMachO.cpp:2315-2319), with the sole exception of
+#      installPath == /usr/lib/libSystem.B.dylib.  A __mod_init_func entry
+#      in libsystem_malloc.dylib would be throwf-rejected at load (MSL is a
+#      dependency of libSystem.B and initializes first, libSystemInitialized
+#      still false).  The early-malloc-init fix lives in the libSystem.B
+#      initializer source (src/external/libsystem/init.c), not in a section.
+#      add-mod-init-func.py stays in the tree as a tool, unwired.
 
 # 8d. post-link: segment vm geometry (__TEXT vmsize rounded to page,
 #      __DATA fileoff moved, all __LINKEDIT offsets shifted)

@@ -1,0 +1,36 @@
+diff --git a/init.c b/init.c
+index 961157a..dd6aced 100644
+--- a/init.c
++++ b/init.c
+@@ -235,17 +235,26 @@ libSystem_initializer(int argc,
+ 	__libplatform_init(NULL, envp, apple, vars);
+ 	_libSystem_ktrace_init_func(PLATFORM);
+ 
++	// Control #27 step B: bring malloc up before __pthread_init/_libc_initializer
++	// allocate.  The stock order calls __malloc_init only after them
++	// (INIT_MALLOC after INIT_LIBC), so the first libc/pthread malloc runs on
++	// an uninitialized zone and faults (NULL+0x74).  The stock MSL has no
++	// LC_ROUTINES_64 and no __mod_init_func, and BOTH are dyld-gated on
++	// gProcessInfo->libSystemInitialized (ImageLoaderMachO.cpp:2261-2263 for
++	// -init, 2315-2319 for __mod_init_func, sole exception
++	// installPath == /usr/lib/libSystem.B.dylib), so a pre-libSystem section
++	// route is impossible; the only route is this call, inside the libSystem.B
++	// initializer itself.
++	// Note that __malloc_init() will also initialize ASAN when it is present
++	__malloc_init(apple);
++	_libSystem_ktrace_init_func(MALLOC);
++
+ 	__pthread_init(&libpthread_funcs, envp, apple, vars);
+ 	_libSystem_ktrace_init_func(PTHREAD);
+ 
+ 	_libc_initializer(&libc_funcs, envp, apple, vars);
+ 	_libSystem_ktrace_init_func(LIBC);
+ 
+-	// TODO: Move __malloc_init before __libc_init after breaking malloc's upward link to Libc
+-	// Note that __malloc_init() will also initialize ASAN when it is present
+-	__malloc_init(apple);
+-	_libSystem_ktrace_init_func(MALLOC);
+-
+ #if TARGET_OS_OSX
+ 	/* <rdar://problem/9664631> */
+ 	__keymgr_initializer();
