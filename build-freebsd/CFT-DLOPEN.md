@@ -2605,3 +2605,38 @@ Darling load commands).
 
 REPRO: `sh cft96-run.sh <tag>`; логи `<diag-dir>/cft96-relink.log`,
 `<diag-dir>/cft96-umb.log`.
+
+### Lane 99: circular broken
+
+Скрипт `build-freebsd/rewrite-dylib-name.py` переписывает имя в dylib-LC
+(LC_ID_DYLIB/LOAD/REEXPORT/WEAK/UPWARD) in-place: обход load commands строго по
+cmdsize, неизвестные LC (включая Darling 0x1e, на котором спотыкается
+llvm-install-name-tool) скипаются, не парсятся; новое имя обязано влезть в
+исходный слот (`cmdsize - name.offset`) с NUL-паддингом; сдвиг load commands
+запрещён (регресс-урок 1-байтового сдвига, PLAN 9.9). FAT обходится по слайсам.
+
+Раскладка (слот LC_ID_DYLIB стокового = 28 B; `/usr/lib/libSystem.B.orig.dylib`
+= 32 B НЕ влезает — имя урезано до `/usr/lib/libSystem.B.orig`, 26 B):
+- pristine-бэкап стокового → `$PRISTINE_OVERLAY_BACKUP/usr/lib/`;
+- стоковый → стейдж `/usr/lib/libSystem.B.orig` с ID, переписанным скриптом
+  (`--id-only`);
+- umbrella-libSystem.B шага 4 пересобран reexport'ом этого `.orig` (ID остаётся
+  `/usr/lib/libSystem.B.dylib`) → канонический `/usr/lib/libSystem.B.dylib`.
+
+Прогон `<diag-dir>/cft96-lane99.log`: circular SIGSEGV (стоп на 207-й строке из
+299) УШЁЛ — прогон дошёл до 24190 строк, инициализация и биндинг прошли.
+Следующее препятствие дословно:
+
+```
+dyld: initializer in image (/usr/lib/libSystem.B.orig) that does not link with libSystem.dylib
+abort_with_payload: reason: initializer in image (/usr/lib/libSystem.B.orig) that does not link with libSystem.dylib; code: 9
+```
+
+Это гейт doModInitFunctions (ImageLoaderMachO.cpp:2315-2319): стоковый `.orig`
+несёт свой `__mod_init_func` (`_libSystem_initializer`), но его installPath
+теперь `/usr/lib/libSystem.B.orig` != libSystemPath, а `libSystemInitialized`
+ещё false → throwf. Лейн 100: снять `__mod_init_func` с `.orig`, чтобы
+единственным инициализатором остался umbrella (installPath ==
+`/usr/lib/libSystem.B.dylib`).
+
+REPRO: `sh cft96-run.sh lane99`.
