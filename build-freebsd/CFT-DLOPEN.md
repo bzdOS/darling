@@ -2820,3 +2820,46 @@ Framework`, который по Control #5 сажает poller после стр
 СТОП (класс отказа иной, не версия-стена) — роут за головой: либо
 прогон с посаженным `$LOCAL/FWMACHO` (staging Chrome + poller из
 Control #5), либо иной выбор.
+
+## Control #30 — dlopen(/FWMACHO) при посаженном стейдже: фреймворк открылся, зависимость CoreFoundation — "image not found"
+
+Лейн 106-Б (task/fwmacho-staged-dlopen). Стек: патчи 103/104/105-3 + шим
+`$UNIX2003`; стейдж Chrome framework посажен в overlay-дерево
+(`DARLING_STAGING_TREES=usr/lib:Frameworks`), `$LOCAL/FWMACHO` — относительный
+симлинк `Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework`
+(сажал poller с `sudo ln` после появления `$LOCAL/Frameworks/…framework`).
+
+Команда:
+
+```
+DYLD_INSERT_LIBRARIES=/usr/lib/unix2003-shim.dylib timeout 90 sh cft96-run.sh lane105
+```
+
+Результат: **24425 строк**; FATAL `$UNIX2003` отсутствует. Кандидаты пробы:
+
+```
+[0] /Frameworks/…/154.0.8029.0/Google Chrome for Testing Framework
+    stat=1  dlopen=… Library not loaded: /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+            Reason: image not found
+[1] /tmp/Frameworks/…   stat=0  image not found
+[2] //../Frameworks/…   stat=0  image not found
+[3] /FWMACHO            stat=0  image not found   ← симлинк не оказался на месте к моменту dlopen
+```
+
+Класс: **image not found** (не версия-стена). Кандидат [0] действительно
+открыл staged Mach-O (stat=1) и упал на его зависимости CoreFoundation
+(`image not found`, не `Incompatible library version`), т.е. путь до
+`loadPhase5open` пройден, а следующее препятствие — резолв CoreFoundation.
+Кандидат [3] не открылся: симлинк `$LOCAL/FWMACHO` к моменту `dlopen` не
+существовал (`cleanup()`/тайминг; после прогона `ls` тоже пуст).
+
+Про `stat=%d` из Control #29: это код, который проба печатает рядом с
+`dlopen`; в 106-Б видно, что он РАЗЛИЧАЕТ исходы — реально открытый [0]
+даёт `stat=1`, неоткрытые [1]/[2]/[3] — `stat=0`. Значит, «stat=0» в
+Control #29 при отсутствующем `/FWMACHO` означало именно «не открыт»
+(а не «файл есть», как можно было прочесть); это не lstat на висячем
+симлинке — это результат до/без успешного открытия.
+
+СТОП (класс отказа иной, не версия-стена) — роут за головой: следующий
+барьер — резолв `/System/Library/Frameworks/CoreFoundation.framework/...`
+при открытии staged Chrome framework.
