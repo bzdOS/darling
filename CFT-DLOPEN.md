@@ -207,3 +207,61 @@ cd "$DARLING_BUILD_DIR" && bash -c 'source "$DARLING_BUILD_DIR/Developer/Environ
 The Control #31 host-side map predicted all 66 deps would pass (2 weak skipped). The guest-side run confirms the map is correct for deps #1–#4 (CoreFoundationExtras, libobjc, CoreGraphicsExtras, CoreTextExtras all load), but the cascade fails at dep #5 (Foundation) due to a version mismatch that the host-side map could not detect — the staged Foundation has no LC_ID_DYLIB version info, so the host-side map showed it as "OK (no version info)" while the guest-side dyld enforces the version requirement.
 
 **Milestone 02 expectation:** "failure strictly on the next dep after CoreFoundation" — **CONFIRMED**. The failure is at Foundation (dep #5), which is the first hard dep after CoreFoundation (dep #1). The host-side map correctly identified the dep chain but could not predict the version mismatch because the staged Foundation lacks version info.
+
+---
+
+# Control #33 — Foundation LC_ID_DYLIB Binary Patch (300.0.0)
+
+**Date:** 2026-10-04
+**Branch:** task/foundation-idver
+**Base:** local pr-arm64 = aab8c0fc5
+**Method:** Binary patch of LC_ID_DYLIB cur/compat in staged Foundation.framework
+
+## Patch
+
+- **Target:** `/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (staged overlay)
+- **Field:** LC_ID_DYLIB current_version + compatibility_version
+- **Old value:** 0x00000000 (0.0.0)
+- **New value:** 0x012C0000 (300.0.0)
+- **Tool:** build-freebsd/stage-patch.py (existing LC patcher from Controls #24/#25)
+- **cmdsize:** unchanged (in-place field patch)
+
+## Result
+
+**handle = NO**
+
+The dlopen still fails, but the error changed from "Incompatible library version" to "invalid file format" — dyld now rejects the patched Foundation binary structurally before it can check the version.
+
+## Exact dyld Error
+
+```
+OSError: //Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework: invalid file format
+```
+
+## Analysis
+
+The binary patch of LC_ID_DYLIB version fields (0x0 → 0x012C0000) causes dyld to reject the Foundation binary with "invalid file format" rather than the previous version mismatch. This suggests the patch corrupted a structural element that dyld validates before version checking — possibly the LC_ID_DYLIB name offset or cmdsize was inadvertently affected, or dyld's structural validation rejects the modified binary for another reason.
+
+The Foundation version wall is NOT cleared by this approach. The patch changes the version but introduces a structural rejection.
+
+## Reproduction Command
+
+```sh
+cd "$DARLING_BUILD_DIR" && bash -c 'source "$DARLING_BUILD_DIR/Developer/Environment.sh" 2>/dev/null; python3 -c "
+import ctypes
+lib = ctypes.CDLL(\"//Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework\")
+print(f\"handle={lib._handle}\")
+"'
+```
+
+**Output:** OSError: invalid file format
+
+## Control #32 Comparison
+
+| Metric | Control #32 (before patch) | Control #33 (after patch) |
+|---|---|---|
+| handle | NO | NO |
+| Error | Incompatible library version: requires 300.0.0 or later, but Foundation provides 0.0.0 | invalid file format |
+| Wall | Foundation version mismatch | Structural rejection (dyld rejects patched binary) |
+
+The patch did NOT clear the Foundation wall — it transformed a version mismatch into a structural rejection.
