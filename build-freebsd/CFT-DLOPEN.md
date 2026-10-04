@@ -2708,3 +2708,70 @@ repro: `sh cft96-run.sh lane100`; выдержка лога:
 
 Фикс = лейн 102: пересобрать MSL с корректной two-level relocation (не
 `-undefined dynamic_lookup`), либо `-fno-stack-protector`.
+
+### Control #27 шаг Д — восстановление file-offset identity (lane 102)
+
+Диагноз шага Г уточнён по артефактам: причиной краша была не flat-
+namespace bind (он в прогоне лейна 100 резолвится в `libsystem_c` —
+`dyld: bind: libsystem_malloc.dylib:... = libsystem_c.dylib:
+___stack_chk_guard`), а **смещение file-offset'ов пост-линковой
+хирургией**. dyld мапит каждый сегмент 1:1
+(`mmap(vmaddr, vmsize, fd, fileoff)`, ImageLoaderMachO.cpp:2700), а
+`fixup-segment-vm.py` + прежний `add-upward-lc.py` сдвигали offset'ы
+секций `__TEXT` на +0x40, не трогая vmaddr — исполнение шло по чужой
+инструкционной потоке; раздутый vmsize `__TEXT` к тому же перекрывал
+vmaddr `__DATA`. К тому же `-lsystem_c` (regular-грань) инициализировал
+бы libsystem_c ДО MSL (downward-рекурсия), а его initializer
+malloc'ает — в стоке libsystem_c только UPWARD
+(отложенная инициализация, ImageLoader.cpp rdar/14412057).
+
+Фикс (build-freebsd/zone-contract): убран вызов `fixup-segment-vm.py`
+(ld64.lld 19.1.7 сам отдаёт чистую page-aligned геометрию: измерено —
+`__TEXT vmsize == filesize`, `__DATA` встык, без пересечений) и
+`-lsystem_c`; добавлен `-headerpad 0x100`; `add-upward-lc.py` теперь
+перезаписывает нулевой header-slack на месте (файл не растёт, ни один
+offset не двигается; self-check — `dd[insert:end] == zeros`).
+
+Проверка артефакта до/после:
+
+```
+до (lane101, стейдж):  __text addr=0x7f0 off=0x830 (offset +0x40),
+  guard-load цель 0x4f020 — нулевой паддинг __TEXT (пост-фиксуп
+  __DATA на 0x50000); bind flat.
+после (lane102):       __TEXT identity 8/8 (addr == off), vm-пересечений
+  нет; __DATA,__got [0x4f000,0x4f048); guard-load:
+  000000000002d56b movq 0x21aae(%rip),%rax   ## 0x2d572+0x21aae = 0x4f020
+  -> цель в __DATA,__got (сток-аналог: 0x52008).
+```
+
+repro: свежий scratch-root, `DYLD_PRINT_INITIALIZERS=1`, timeout 120,
+`sh cft96-run.sh lane102`; контроль — `dyld: loaded: <UUID>` в логе
+равен LC_UUID посаженного артефакта, прочитанному до прогона.
+
+Выдержка лога (результат): FATAL на `___malloc_init` УШЁЛ — тело
+функции исполнилось (внутренние lazy binds `memset` / `_getentropy` /
+`__NSGetMachExecuteHeader` / `__dyld_get_image_slide` разрешились),
+останов на следующем препятствии:
+
+```
+[darling-mldr] FATAL signal 11 (code=1) at addr=0x0
+rip=0x...2b72  libdyld!dyld3::MachOFile::hasMachOMagic() const+18
+  (cmpl $0xfeedface,(%rcx) с rcx=0), стек: MSL _mvm_aslr_init+34 <-
+  _mvm_aslr_enabled+17 (каскад раннего ___malloc_init).
+```
+
+Подтверждено прогоном lane102 (2026-10-04, worker): пересборка MSL
+(`sh build-freebsd/zone-contract/build-libmalloc-zone.sh`, RC=0), дизасм
+`___malloc_init` — guard-load `movq 0x21aae(%rip),%rax` цель `0x4f020` ∈
+`__DATA,__got [0x4f000,0x4f048)`; file-offset identity 8/8 (addr == off),
+`__TEXT vmsize == filesize == 0x4f000`, `__DATA` встык; прогон
+`sh cft96-run.sh lane102` — FATAL на `___malloc_init` УШЁЛ (краш
+переместился с `addr=0xffffffffffffff8b` на `addr=0x0`), следующее
+препятствие: `rip=0x534baa32b72` ∈ `__TEXT libdyld.dylib`
+(0x534BA9BB000->0x534BAA47FFF), дизасм — `cmpl $0xfeedface,(%rcx)` при
+`rcx=0` (NULL-deref `dyld3::MachOFile::hasMachOMagic() const+18`).
+
+Вердикт одной строкой: file-offset identity восстановлена, guard-load
+указывает в `__DATA,__got`, FATAL на `___malloc_init` ушёл; следующее
+препятствие — NULL-deref `hasMachOMagic` из `_mvm_aslr_init` (фикс =
+лейн 103).

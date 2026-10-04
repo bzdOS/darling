@@ -43,7 +43,7 @@
 #include <sys/un.h>
 #include <dirent.h>
 
-#define PREFIX        "/tmp/darling-dynamic-smoke"
+#define PREFIX        "/tmp/darling-dynamic-smoke-fresh"
 #define SOCK_PATH     PREFIX "/.darlingserver.sock"
 #define LOCAL_OVERLAY "/tmp/darling-local-overlay"
 
