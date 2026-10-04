@@ -2567,3 +2567,41 @@ dyld: Symbol not found: ___stack_chk_guard
 либо перенастройки reexport через `-dylib_file`. Это НЕ препятствие фикса
 malloc-init: NULL+0x74 закрыт, осталось починить reexport-умбреллу.
 
+
+### Relink attempt (step 4) — imports to symbol owners
+
+Цель: перелинковать libSystem.B так, чтобы импорты резолвились к владельцам
+символов, а не к первой библиотеке списка (дефект шага 3). Все маршруты
+проверены на этой машине:
+
+1. «Darling ld64» `build/dyld-only/.../x86_64-apple-darwin20-ld` — это
+   СИМЛИНК на `/usr/local/bin/ld64.lld`, не отдельный линкер. Настоящий Apple
+   ld64 (`src/build-host-tools/ld64/x86_64-apple-darwin20-ld`, `PROJECT:ld64`)
+   существует и запускается (`-v` OK), но падает `Illegal instruction
+   (core dumped)` на минимальной линковке (`-dylib -arch x86_64 -o out dummy.o`)
+   — бинарь несовместим с этой VM.
+2. ld64.lld не реализует `-dylib_file` («Option `-dylib_file' is not yet
+   implemented»). При `-reexport_library` он привязывает undefined-импорт к
+   ПЕРВОЙ reexported библиотеке, не к владельцу: прогон 1 `_dlsym →
+   libsystem_kernel`, после перестановки libdyld первым `___stack_chk_guard →
+   libdyld`. Прямые dylib-аргументы, `-l`, `-flat_namespace` не помогают
+   (последний не собрался: нет `libresolv.9.dylib`).
+3. firstpass-библиотек нет (`find ... *firstpass*.dylib` → 0), их сборка —
+   отдельные CMake-таргеты, которые падают на i386 (см. выше).
+4. umbrella-обход: reexport СТОКОВОГО `overlay/usr/lib/libSystem.B.dylib`
+   вместе с `-L overlay/usr/lib/system -L overlay/usr/lib` собирается и даёт
+   ПРАВИЛЬНУЮ привязку (`_dlsym → this-image/libSystem`, как в стоке), но
+   install_name нового и стокового совпадают (`/usr/lib/libSystem.B.dylib`) →
+   circular self-reexport: прогон `<diag-dir>/cft96-umb.log` умирает SIGSEGV
+   на 207-й строке (addr=0x7fffff5ffff8, всего 299 строк). `llvm-install-name-tool
+   -id` не может сменить ID стокового: `unsupported load command (cmd=0x1e)`.
+
+Вывод: перелинковка libSystem.B в reexport-умбреллу на этой машине не встаёт
+ни одним маршрутом. NULL+0x74 закрыт шагом 3; `___stack_chk_guard`-стоп —
+дефект линковки, не каскада. Варианты для лейна 99: собрать настоящий Apple
+ld64, совместимый с VM, либо firstpass-библиотеки x86_64, либо разорвать
+circular через правку install_name стокового (нужен инструмент, понимающий
+Darling load commands).
+
+REPRO: `sh cft96-run.sh <tag>`; логи `<diag-dir>/cft96-relink.log`,
+`<diag-dir>/cft96-umb.log`.
