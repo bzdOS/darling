@@ -2423,3 +2423,36 @@ fix (cft96):       thin x86_64 (cffaedfe), 0 symbols (stripped)
 
 Прогон на текущем дереве (pr-arm64 2c7cfc8d5) воспроизвёл краш — та же
 сигнатура что и fresh3.
+
+## Control #27 (step B, continued — fix attempt)
+
+### Finding: -init in libsystem_malloc.dylib is forbidden by dyld
+
+Попытка фикса «malloc-init до _libSystem_initializer» через LC_ROUTINES_64
+(-init ___malloc_init) в пересобранной libsystem_malloc.dylib отвергнута dyld.
+
+Подтверждение (лог прогона fix2, <diag-dir>/cft96-fix2.log):
+
+```
+dyld: -init function in image (/usr/lib/system/libsystem_malloc.dylib) that does not link with libSystem.dylib
+abort_with_payload: reason: -init function in image (/usr/lib/system/libsystem_malloc.dylib) that does not link with libSystem.dylib; code: 9
+```
+
+Механизм (src/external/dyld/src/ImageLoaderMachO.cpp:2261-2263, 2315-2319):
+dyld при вызове -init/конструкторов проверяет `dyld::gProcessInfo->libSystemInitialized`.
+Если libSystem ещё не инициализирована, -init/конструкторы разрешены ТОЛЬКО в образе
+с installPath == /usr/lib/libSystem.B.dylib. Для всех остальных — throwf.
+
+libsystem_malloc.dylib — зависимость libSystem.B.dylib (LC_LOAD_DYLIB в libSystem.B).
+Зависимости инициализируются ПЕРВЫМИ (recursiveInitialization). Значит, -init в
+libsystem_malloc.dylib вызвался бы ДО libSystem.B initializer → проверка проваливается.
+
+Стоковый libsystem_malloc.dylib не имеет собственного инициализатора (нет LC_ROUTINES_64,
+нет __mod_init_func). Он инициализируется только через вызовы ___malloc_init и
+___malloc_late_init из libSystem.B initializer.
+
+### Fix source, rebuild pending
+
+Фикс должен обеспечить инициализацию libsystem_malloc ДО того, как libSystem.B
+initializer вызовет malloc (через __pthread_init или _libc_initializer). Способ,
+который подтвердится по артефактам (nm/llvm-readobj), без прогона — вторым коммитом.
