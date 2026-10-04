@@ -2670,3 +2670,41 @@ after  (lane100): abort УШЁЛ; dyld: calling initializer function ... in /usr
 `___malloc_init` (libsystem_malloc.dylib) — но упал внутри него: rip =
 `___malloc_init+2`, addr = 0xffffffffffffff8b. Лейн 101: краш внутри раннего
 `___malloc_init`.
+
+### Control #27 шаг Г — диагностика краша ___malloc_init (lane 101)
+
+Причина (по артефактам, без прогона): в пересобранном (zone-contract)
+`libsystem_malloc.dylib` relocation stack-protector в `___malloc_init` битая.
+
+Дизасм (цитаты обеих сторон):
+
+```
+стейдж ___malloc_init @0x2d480:        сток ___malloc_init @0x23b90:
+  2d480: pushq %rbp                      23b90: pushq %rbp
+  2d481: movq %rsp,%rbp                  23b91: movq %rsp,%rbp
+  2d484: subq $0x450,%rsp                23b94: subq $0x450,%rsp
+  2d48b: movq 0x21b8e(%rip),%rax         23b9b: movq 0x2e466(%rip),%rax
+         ## 0x4f020  (__TEXT, padding)          ## 0x52008  <__DATA,__got>
+  2d492: movq (%rax),%rax                23ba2: movq (%rax),%rax
+```
+
+В стоке цель = `__DATA,__got` (0x52008), bind `___stack_chk_guard` ->
+`libsystem_c` (two-level). В стейдже цель = 0x4f020 (`__TEXT`, ВНЕ секций,
+padding = 0), а bind `___stack_chk_guard` -> `flat-namespace` на
+`__DATA,__got 0x50020`. То есть relocation stack-protector ссылается НЕ на
+GOT-слот guard'а (0x50020), а на padding 0x4f020; при первом вызове
+`___malloc_init` (guard ещё не разрешён) rax = *(0x4f020) = 0, и
+`movq (%rax),%rax` фолтит.
+
+rip в логе = `___malloc_init+2` (0x2d482, середина prologue) и addr =
+0xffffffffffffff8b — симптомы неверного чтения/перехода; faulting-инструкция
+по дизасму — `movq (%rax),%rax` (0x2d492). ВЕРДИКТ одной строкой: битая
+relocation stack-protector + flat-namespace bind в пересобранном MSL (должно
+быть two-level `libsystem_c`, как в стоке).
+
+repro: `sh cft96-run.sh lane100`; выдержка лога:
+`[darling-mldr] FATAL signal 11 (code=1) at addr=0xffffffffffffff8b` /
+`rip=0x...482 (___malloc_init+2)`.
+
+Фикс = лейн 102: пересобрать MSL с корректной two-level relocation (не
+`-undefined dynamic_lookup`), либо `-fno-stack-protector`.
