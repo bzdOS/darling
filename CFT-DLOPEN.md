@@ -92,6 +92,8 @@ Both missing deps are `LC_LOAD_WEAK_DYLIB` — the dynamic linker will not fail 
 | 22 | `/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit` | LC_LOAD_WEAK_DYLIB | Weak — load succeeds without it. No action needed for milestone 02. |
 | 29 | `/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight` | LC_LOAD_WEAK_DYLIB | Weak — load succeeds without it. No action needed for milestone 02. |
 
+**Step 2 verdict:** Both unresolvable deps are weak loads. Neither blocks the cascade. The first unresolvable dep after CoreFoundation (#22 ScreenCaptureKit) is closed by the weak-load mechanism itself — no staging or wrapper work is needed. The cascade proceeds through all 66 deps without a hard failure.
+
 ## First Unresolved Dep After CoreFoundation
 
 **Dep #22: `/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit`** (LC_LOAD_WEAK_DYLIB)
