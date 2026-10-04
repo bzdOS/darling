@@ -2223,7 +2223,7 @@ fault = libsystem_malloc.dylib!_word_zap_bit_go_down+0x372: callq _bitarray_size
 rip=0x0000031c6af0c482, base=0x31C6AEDF000 (из rebase-строк лога fresh3),
 offset = 0x31C6AF0C482 − 0x31C6AEDF000 = 0x2D482 — та же сигнатура что и шаг Б.
 
-### Determinism check (f1 vs fresh3, both fix-side)
+### Determinism check (fix fresh3 vs fix f1)
 
 ```
 f1 (step B):   dyld: calling initializer function 0x351ef6874110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
@@ -2235,23 +2235,27 @@ fresh3 (step V): dyld: calling initializer function 0x31c6ae74110 in /usr/lib/li
 идентичные lazy bind строки (libsystem_pthread, libdyld, libsystem_blocks) — цепь
 расходится только в адресах (ASLR), не в логике. Краш происходит на том же месте
 (rip offset 0x2D482 от base libsystem_malloc.dylib). Детерминизм подтверждён.
+История подстановки: f1 был ошибочно помечен как stock в первом коммите (b346bffc8);
+исправлено в 6e5124c5c.
 
-### Stock-vs-fix initializer diff (s1 vs fresh3)
+### Stock-vs-fix initializer diff (stock1 vs fresh3)
 
 ```
-s1 (stock):    dyld: calling initializer function 0x15bdcfa74110 in /usr/lib/libSystem.B.dylib  (стр. 24086)
-               dyld: calling initializer function 0x15bdd0ca8e00 in /usr/lib/libc++.1.dylib     (стр. 24187)
-               dyld: calling initializer function 0x15bdd0c01550 in /usr/lib/libobjc.A.dylib   (стр. 24201)
-               ... (13 инициализаторов, доходит до dlopen Chrome Framework)
-fresh3 (fix):  dyld: calling initializer function 0x31c6ae74110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
-               FATAL signal 11 (стр. 24096)
+stock1 (stock): dyld: calling initializer function 0x21337c874110 in /usr/lib/libSystem.B.dylib  (стр. 24086)
+                dyld: calling initializer function 0x21337daa8e00 in /usr/lib/libc++.1.dylib     (стр. 24187)
+                dyld: calling initializer function 0x21337da01550 in /usr/lib/libobjc.A.dylib   (стр. 24202)
+                ... (13 инициализаторов, доходит до dlopen Chrome Framework)
+fresh3 (fix):   dyld: calling initializer function 0x31c6ae74110 in /usr/lib/libSystem.B.dylib  (стр. 24082)
+                FATAL signal 11 (стр. 24096)
 ```
 
-Первый расходящийся инициализатор: **libc++.1.dylib** (s1 вызывает на стр. 24187,
-fresh3 падает на стр. 24096 — до него не доходит). Между libSystem.B и libc++ в s1
+Первый расходящийся инициализатор: **libc++.1.dylib** (stock1 вызывает на стр. 24187,
+fresh3 падает на стр. 24096 — до него не доходит). Между libSystem.B и libc++ в stock1
 идут lazy bind libsystem_malloc, libdyld, libdispatch, libobjc, libxpc, liblaunch
 (стр. 24100-24186) — в fresh3 эти строки отсутствуют, краш происходит сразу после
-lazy bind libsystem_pthread.
+lazy bind libsystem_pthread. У stock1 в момент краша fresh3 (после libSystem.B)
+bitarray-указатели валидны: lazy bind libsystem_malloc.dylib проходит успешно
+(стр. 24100-24131), затем libc++.1.dylib initializer вызывается на стр. 24187.
 
 ### NULL+0x74 analysis
 
@@ -2269,9 +2273,10 @@ NULL+0x74). Инициализатор libSystem.B вызывает _word_zap_bi
 
 Свежий корень + timeout 120 воспроизвели краш (24188/24096 = сигнатура шага А) —
 фикс НЕ устранил NULL+0x74; причина = инициализатор libSystem.B вызывает
-_word_zap_bit_go_down с NULL аргументом (bitarray_size = NULL+0x74). Stock-лог
-_kCGColorSpaceITUR_2100_PQ на диске отсутствует; s1 использован как stock (13
-инициализаторов, проходит до dlopen Chrome Framework).
+_word_zap_bit_go_down с NULL аргументом (bitarray_size = NULL+0x74). Stock-прогон
+(stock1, сток-overlay без cft96-фикса): 13 инициализаторов, проходит до dlopen
+Chrome Framework; первый расходящийся инициализатор = libc++.1.dylib (stock1 вызывает,
+fresh3 падает до него).
 
 ### Repro
 
