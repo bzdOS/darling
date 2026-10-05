@@ -5989,3 +5989,68 @@ grep -n 'genuine SIGILL\|FATAL signal' /tmp/iokit-probe-65-1.log | head
 llvm-objdump -d --start-address=0x161e00 --stop-address=0x161e50 "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework
 llvm-nm -n "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib | awk '$1>="0000000000008220" && $1<="0000000000008260"'
 ```
+
+## Control #67 — the lock word at the crash: non-zero (the #66 verdict holds)
+
+**Date:** 2026-10-05
+**Branch:** task/lockword-crash-dump
+**Base:** pr-arm64 = 4a1d561b1079dc6e10a52f0452720e969d673799
+**Goal:** decide the #66 fork by reading the lock word at the crash. Logs
+62-1/63-1/65-1 untouched; this run is /tmp/iokit-probe-67-1.log.
+
+### Step 0 — rdi is not the lock at the ud2; rbx is
+
+```
+$ llvm-objdump -d --start-address=0x8230 --stop-address=0x8240 "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib
+__os_unfair_lock_recursive_abort:
+    8230: 55           pushq %rbp
+    8231: 48 89 e5     movq  %rsp, %rbp
+    8234: 89 7d fc     movl  %edi, -0x4(%rbp)
+    8237: 0f 0b        ud2
+```
+
+The routine is entered with `edi=0x307` and never touches rbx. The 65-1 register
+dump already showed exactly that: `rdi=0x307`, `rbx=0x2cf49ba9a7a0`. So rdi holds
+the abort's small argument (the lock *word value*), and the caller's lock object
+is **rbx** (callee-saved). The dump below therefore reads rbx, not rdi.
+
+### Step 1 — the dump line
+
+`crash_debug_handler`'s foreign-ud2 path (from #65) now prints, before FATAL, one
+guarded 32-byte hex line at rbx:
+
+```
+[darling-mldr] lock word @0x2cb02129a7a0: 0000000100000307 f390153b18a96fd3 8b815a1714bd5914 0000000000000000 (ok=1111 rdi=0x307)
+```
+
+### Step 2 — run 67-1
+
+```
+$ grep -n 'lock word' /tmp/iokit-probe-67-1.log
+1292564:[darling-mldr] lock word @0x2cb02129a7a0: 0000000100000307 f390153b18a96fd3 8b815a1714bd5914 0000000000000000 (ok=1111 rdi=0x307)
+```
+
+### Decision (the #66 fork)
+
+The first 4 bytes (little-endian) of the first quadword are `0x00000307` —
+**non-zero**. `rdi=0x307` at the abort is exactly that word value, confirming
+the object at rbx is the lock and that the abort routine receives the lock word
+itself.
+
+Per the fork: **non-zero / stale → the #66 verdict holds**. The word was never a
+clean zero-initialized lock; the run is not a clean recursive re-lock. (If the
+word had been 0 the verdict would have been withdrawn.)
+
+### Verdict
+
+The #66 verdict **holds**: the lock word at the crash is non-zero (0x307), so it
+is stale/uninitialized memory, not a clean recursive re-lock.
+
+### Repro
+
+```sh
+sh build-freebsd/build-mldr-only.sh
+# run the 60-2 probe chain into /tmp/iokit-probe-67-1.log
+grep -n 'lock word' /tmp/iokit-probe-67-1.log
+llvm-objdump -d --start-address=0x8230 --stop-address=0x8240 "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib
+```

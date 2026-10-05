@@ -2924,6 +2924,9 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
  * hands a genuine (non-patched) ud2 to it. */
 static void crash_debug_handler(int signo, siginfo_t *info, void *uctx_void);
 
+/* Control #67: mldr_dump_read_guarded, for the lock-word dump below. */
+#include "crash_dump.h"
+
 /*
  * purpose:  SA_SIGINFO SIGILL handler — catches the `ud2` we wrote into
  *           dyld's raw-Linux-syscall trampolines (see
@@ -3014,6 +3017,28 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                 " at %s rip=0x%llx rax=0x%llx\n",
                 site, (unsigned long long)mc->mc_rip,
                 (unsigned long long)mc->mc_rax);
+            /* Control #67: dump 32 bytes of guest memory at rbx — the live
+             * lock register. Step 0 showed rdi is NOT the lock at the ud2:
+             * the abort routine is entered with edi=0x307 and only does
+             * `movl %edi,-4(%rbp); ud2`, so rdi holds the abort's small
+             * argument, while the caller's lock object is rbx (callee-saved,
+             * untouched by the abort). Guarded: a bad pointer must not fault
+             * inside the handler. */
+            {
+                uintptr_t lp = (uintptr_t)mc->mc_rbx;
+                uint64_t w[4] = {0, 0, 0, 0};
+                int ok[4];
+                for (int i = 0; i < 4; i++)
+                    ok[i] = mldr_dump_read_guarded(lp + (uintptr_t)(8 * i), &w[i]);
+                fprintf(stderr,
+                    "[darling-mldr] lock word @0x%llx:"
+                    " %016llx %016llx %016llx %016llx (ok=%d%d%d%d rdi=0x%llx)\n",
+                    (unsigned long long)lp,
+                    (unsigned long long)w[0], (unsigned long long)w[1],
+                    (unsigned long long)w[2], (unsigned long long)w[3],
+                    ok[0], ok[1], ok[2], ok[3],
+                    (unsigned long long)mc->mc_rdi);
+            }
             fflush(stderr);
             crash_debug_handler(signo, info, uctx);
             return;
