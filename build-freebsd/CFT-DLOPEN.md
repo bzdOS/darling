@@ -5293,3 +5293,148 @@ timeout 180 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_O
 grep -c "Library not loaded" /tmp/foundation-probe-59-2.log
 grep -m1 -A2 "Symbol not found" /tmp/foundation-probe-59-2.log
 ```
+
+## Control #60 — IOKit stub: add the data symbol _kIOMasterPortDefault (wall cleared)
+
+**Date:** 2026-10-05
+**Branch:** task/iokit-masterport
+**Base:** pr-arm64 = a639ab5529286d6a82762968a2162dcca490250c
+**Goal:** clear the wall from 59-1: "Symbol not found: _kIOMasterPortDefault",
+Referenced from CoreGraphics, Expected in IOKit.
+
+### Step 1 — measurement: CoreGraphics imports six IOKit symbols, the #54 stub exported five
+
+```
+$ llvm-nm -u "$DARLING_OVERLAY"/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics | grep -iE '_k?IO'
+_IODisplayCreateInfoDictionary
+_IOIteratorNext
+_IOObjectRelease
+_IOServiceGetMatchingServices
+_IOServiceMatching
+_kIOMasterPortDefault
+$ llvm-nm -gU "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit | wc -l
+5
+```
+
+The #54 stub was synthesized from `nm -u CoreGraphics | grep ^_IO`; that filter
+missed `_kIOMasterPortDefault`, which starts `_kIO`. So the stub exported the five
+`_IO*` functions but not the one data symbol CoreGraphics also imports.
+
+### Step 2а — extend the stub export list with the data symbol
+
+The five functions in the #54 image are all `xorl %eax, %eax; retq` (recovered with
+`llvm-otool -tvV` on the installed image). The extended stub keeps them and adds
+`_kIOMasterPortDefault` as a data symbol, value 0 (MACH_PORT_NULL, valid in a
+headless probe — CoreGraphics takes the symbol's address, then reads 4 bytes):
+
+```asm
+	.section	__TEXT,__text,regular,pure_instructions
+	.globl	_IOServiceMatching
+	.p2align	2
+_IOServiceMatching:
+	xorl	%eax, %eax
+	retq
+	.globl	_IOServiceGetMatchingServices
+	.p2align	2
+_IOServiceGetMatchingServices:
+	xorl	%eax, %eax
+	retq
+	.globl	_IOIteratorNext
+	.p2align	2
+_IOIteratorNext:
+	xorl	%eax, %eax
+	retq
+	.globl	_IOObjectRelease
+	.p2align	2
+_IOObjectRelease:
+	xorl	%eax, %eax
+	retq
+	.globl	_IODisplayCreateInfoDictionary
+	.p2align	2
+_IODisplayCreateInfoDictionary:
+	xorl	%eax, %eax
+	retq
+	.section	__DATA,__const
+	.globl	_kIOMasterPortDefault
+	.p2align	3
+_kIOMasterPortDefault:
+	.quad	0
+```
+
+```
+$ clang -target x86_64-apple-macos10.12 -c "$DARLING_BUILD_DIR"/iokit-stub/iokit_stub.s -o "$DARLING_BUILD_DIR"/iokit-stub/iokit_stub.o
+$ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 -install_name /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit -o "$DARLING_BUILD_DIR"/iokit-stub/IOKit "$DARLING_BUILD_DIR"/iokit-stub/iokit_stub.o
+$ llvm-nm -gU "$DARLING_BUILD_DIR"/iokit-stub/IOKit
+0000000000000300 T _IODisplayCreateInfoDictionary
+00000000000002f8 T _IOIteratorNext
+00000000000002fc T _IOObjectRelease
+00000000000002f4 T _IOServiceGetMatchingServices
+00000000000002f0 T _IOServiceMatching
+0000000000001000 S _kIOMasterPortDefault
+$ cp "$DARLING_BUILD_DIR"/iokit-stub/IOKit "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+```
+
+Only the stub is rebuilt; the overlay's other images (CoreGraphics etc.) are not touched.
+
+### Step 3 — probe 60-1
+
+Same staging list as 59-2, `timeout 180`.
+
+```
+$ wc -l /tmp/iokit-probe-60-1.log
+1291601
+$ grep -c "Symbol not found" /tmp/iokit-probe-60-1.log
+0
+$ grep -c "Library not loaded" /tmp/iokit-probe-60-1.log
+0
+$ grep -c "dlopen_internal() failed" /tmp/iokit-probe-60-1.log
+0
+```
+
+The symbol binds (line 157682):
+
+```
+157682:dyld: bind: CoreGraphics:0x78B5C710018 = IOKit:_kIOMasterPortDefault, *0x78B5C710018 = 0x78B5CB1E000
+```
+
+Chrome fw loads and the dlopen proceeds (line 26547):
+
+```
+26547:dyld: loaded: <4C4C4409-5555-3144-A170-AD4644F310AD> /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+```
+
+### First new failure after the IOKit wall
+
+Not a symbol: the loader dies at the end of weak binding.
+
+```
+1291508:dyld: weak bind end
+1291509:[darling-mldr] FATAL signal 11 (code=1) at addr=0x435de5894850
+```
+
+### Verdict
+
+**success** — the IOKit stub now exports all six symbols CoreGraphics imports;
+0 hits "Symbol not found" and 0 hits "Library not loaded" in the 1291601-line log.
+The next wall is a different class: a loader SIGSEGV at the end of weak binding,
+after Chrome fw's own image loaded. The probe did not reach DONE rc=0.
+
+### Repro
+
+```sh
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+# 1. write the stub (assembly above) to $DARLING_BUILD_DIR/iokit-stub/iokit_stub.s
+clang -target x86_64-apple-macos10.12 -c "$DARLING_BUILD_DIR"/iokit-stub/iokit_stub.s -o "$DARLING_BUILD_DIR"/iokit-stub/iokit_stub.o
+ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 -install_name /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit -o "$DARLING_BUILD_DIR"/iokit-stub/IOKit "$DARLING_BUILD_DIR"/iokit-stub/iokit_stub.o
+cp "$DARLING_BUILD_DIR"/iokit-stub/IOKit "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+llvm-nm -gU "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit | wc -l   # 6
+# 2. run
+export BASE58=$(sed -n '14p' /tmp/foundation-probe-58-1.log | sed 's/^staging trees: derived from the closure -- //')
+export DARLING_STAGING_TREES="$BASE58:System/Library/Frameworks/QuartzCore.framework"
+timeout 180 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 "$DARLING_BUILD_DIR"/launch-dynamic > /tmp/iokit-probe-60-1.log 2>&1
+grep -c "Symbol not found" /tmp/iokit-probe-60-1.log
+grep -c "Library not loaded" /tmp/iokit-probe-60-1.log
+grep -n "IOKit:_kIOMasterPortDefault" /tmp/iokit-probe-60-1.log
+grep -n "FATAL signal" /tmp/iokit-probe-60-1.log
+```
