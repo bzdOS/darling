@@ -5100,3 +5100,39 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-56-1.log 2>&1
 grep -c "Library not loaded: /System/Library/Frameworks/AppKit.framework" /tmp/foundation-probe-56-1.log
 ```
+
+## Control #57 — стейджинг CoreData.framework (staging-source-missing)
+
+**Date:** 2026-10-05
+**Branch:** task/coredata-stage
+**Base:** pr-arm64 = 2c4ecd77f
+**Goal:** Stage CoreData.framework to clear the wall from 56-1 (Chrome fw: Library not loaded: CoreData.framework).
+
+### Step 1 — замер до изменений
+
+```
+$ ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+ls: /System/Library/Frameworks/CoreData.framework/Versions/A/CoreData: No such file or directory
+```
+
+CoreData.framework отсутствует в overlay.
+
+### Step 2б — поиск в build-продуктах
+
+```
+$ find "$DARLING_BUILD_DIR" -path '*CoreData.framework*' -name 'CoreData' 2>/dev/null
+(no output)
+```
+
+CoreData.framework отсутствует в build-продуктах.
+
+### Verdict
+
+**staging-source-missing** — CoreData.framework отсутствует в overlay и в build-продуктах. Стаб запрещён (классовый framework, нужны ObjC-классы). Стена CoreData остаётся. Решение головы.
+
+### Repro
+
+```sh
+ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData 2>/dev/null || echo "CoreData NOT FOUND in overlay"
+find "$DARLING_BUILD_DIR" -path '*CoreData.framework*' -name 'CoreData' 2>/dev/null || echo "CoreData NOT FOUND in build products"
+```
