@@ -4816,3 +4816,76 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-51-1.log 2>&1
 grep "rip=\|__TEXT at.*libobjc" /tmp/foundation-probe-51-1.log
 ```
+
+## Control #52 — экспорт _ccchacha20 из libcorecrypto (патч провайдера)
+
+**Date:** 2026-10-05
+**Branch:** task/ccchacha-export
+**Base:** pr-arm64 = 5cf3b9e1a
+**Goal:** Export `_ccchacha20` (and poly1305 trio) from libcorecrypto.dylib so that BIND_AT_LAUNCH=1 binding succeeds.
+
+### Mechanism
+
+Пересборка libcorecrypto из статической библиотеки `libcorecrypto_static.a` с экспорт-списком, включающим все глобальные символы (907 символов, включая ccchacha20 и poly1305-трио). Экспорт-список сгенерирован из `llvm-nm -g` статической библиотеки.
+
+Команда сборки:
+```sh
+ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
+  -install_name /usr/lib/system/libcorecrypto.dylib \
+  -current_version 1.0.0 -compatibility_version 1.0.0 \
+  -exported_symbols_list /tmp/corecrypto_all_syms.txt \
+  -undefined dynamic_lookup \
+  -o libcorecrypto.dylib libcorecrypto_static.a
+```
+
+### nm before/after
+
+Before (stock libcorecrypto.dylib):
+```
+$ nm "$DARLING_OVERLAY"/usr/lib/system/libcorecrypto.dylib | grep ccchacha
+0000000000019580 t _ccchacha20
+00000000000195e0 t _ccchacha20poly1305_decrypt_oneshot
+0000000000019630 t _ccchacha20poly1305_encrypt_oneshot
+00000000000195c0 t _ccchacha20poly1305_info
+```
+
+After (patched libcorecrypto.dylib):
+```
+$ nm -gU libcorecrypto.dylib | grep ccchacha
+0000000000018160 T _ccchacha20
+00000000000181c0 T _ccchacha20poly1305_decrypt_oneshot
+0000000000018210 T _ccchacha20poly1305_encrypt_oneshot
+00000000000181a0 T _ccchacha20poly1305_info
+```
+
+### dyld bind of _ccchacha20 (from run 52-2)
+
+```
+dyld: forced lazy bind: libcommonCrypto.dylib:0x27F0B299F0C0 = libcorecrypto.dylib:_ccchacha20, *0x27F0B299F0C0 = 0x27F0B2976160
+dyld: forced lazy bind: libcommonCrypto.dylib:0x27F0B299F0C8 = libcorecrypto.dylib:_ccchacha20poly1305_decrypt_oneshot, *0x27F0B299F0C8 = 0x27F0B29761C0
+dyld: forced lazy bind: libcommonCrypto.dylib:0x27F0B299F0D0 = libcorecrypto.dylib:_ccchacha20poly1305_encrypt_oneshot, *0x27F0B299F0D0 = 0x27F0B2976210
+dyld: forced lazy bind: libcommonCrypto.dylib:0x27F0B299F0D8 = libcorecrypto.dylib:_ccchacha20poly1305_info, *0x27F0B299F0D8 = 0x27F0B29761A0
+```
+
+### First new output after bind (next wall)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+  Referenced from: /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+  Reason: image not found
+```
+
+### Verdict
+
+**success** — `_ccchacha20` and poly1305-трио exported from libcorecrypto.dylib; BIND_AT_LAUNCH=1 binding succeeds (0 occurrences of "Symbol not found: _ccchacha20" in 27176-line log); next wall is staging-missing-dependency (IOKit.framework).
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-52-2.log 2>&1
+grep -c "Symbol not found: _ccchacha20" /tmp/foundation-probe-52-2.log
+```
