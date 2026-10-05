@@ -5439,42 +5439,44 @@ grep -n "IOKit:_kIOMasterPortDefault" /tmp/iokit-probe-60-1.log
 grep -n "FATAL signal" /tmp/iokit-probe-60-1.log
 ```
 
-## Control #61 — decode of the 60-1 SIGSEGV: libobjc readClass reads a FoundationExtras stub as a class
+## Control #61 — decode of the SIGSEGV at weak bind end: libobjc readClass reads a FoundationExtras stub as a class
 
 **Date:** 2026-10-05
 **Branch:** task/iokit-masterport
 **Base:** pr-arm64 = 5c432aa8a1ed0032c45adc11742c65c3f257e9a1
-**Goal:** decode the new wall from 60-1 (FATAL signal 11 at 0x435de5894850, right
+**Goal:** decode the wall that 60-1 left (FATAL signal 11 at 0x435de5894850, right
 after "dyld: weak bind end", line 1291509). A fix is not in this task.
+**Run:** 60-2 — the same harness on the accepted 6-symbol IOKit stub, a new run
+under a new log name (/tmp/iokit-probe-60-2.log); the crash is identical.
 
-### Crash block (60-1, lines 1291508-1291516)
+### Crash block (60-2, lines 1291508-1291516)
 
 ```
 1291508:dyld: weak bind end
 1291509:[darling-mldr] FATAL signal 11 (code=1) at addr=0x435de5894850
-  rip=0x00003f06d861a746  rax=0x00003f06e89924a0  rbx=0x00003f06e89924a0
-  rcx=0x2e66c35de5894855  rdx=0x0000435de5894850  rsi=0x0000000000000002
+  rip=0x0000041da441a746  rax=0x0000041db47924a0  rbx=0x0000041db47924a0
+  rcx=0x2e66c35de5894855  rdx=0x0000435de5894850  rsi=0x0000000000000000
   rdi=0x0000000000000005  rbp=0x00007fffffdfdbc0  rsp=0x00007fffffdfdb80
 ```
 
 ### Decode
 
 ```
-$ python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-60-1.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
+$ python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-60-2.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
 crash: signal 11 at 0x435de5894850
 images mapped: 134 address range(s) named by the log (133 dylib mapping(s) + the main executable), +1 pseudo from mldr DEBUG lines
-  rip  0x00003f06d861a746  /usr/lib/libobjc.A.dylib+0x24746                           __ZL9readClassP10objc_classbb+0xa6
-  stack 0x00003f06d8834000  /Frameworks/Google+0x0                                     ?
-  stack 0x00003f06d861be86  /usr/lib/libobjc.A.dylib+0x25e86                           -[Protocol hash]+0x256
-  stack 0x00003f06d8643984  /usr/lib/libobjc.A.dylib+0x4d984                           __ZL11UnsetLayout+0x25e0
-  stack 0x00003f06d8834e1a  /Frameworks/Google+0xe1a                                   ?
-  stack 0x00003f06d8643988  /usr/lib/libobjc.A.dylib+0x4d988                           __ZL11UnsetLayout+0x25e4
-  stack 0x00003f06d8834000  /Frameworks/Google+0x0                                     ?
-  stack 0x00003f06d8611eaf  /usr/lib/libobjc.A.dylib+0x1beaf                           __ZN4objc8DenseMapI12DisguisedPtrI11objc_objectENS0_IPKvNS_15ObjcAssociationENS_17DenseMapValueInfoIS6_EENS_12DenseMapInfoIS5_EENS_6detail12DenseMapPairIS5_S6_EEEENS7_ISE_EENS9_IS3_EENSC_IS3_SE_EEE16shrink_and_clearEv+0x11f
-  stack 0x00003f06d8834000  /Frameworks/Google+0x0                                     ?
-  stack 0x0000000826dad6ee  /cft-fwmacho-probe-macho+0x6ee                             ?
-  stack 0x00003f06d861b456  /usr/lib/libobjc.A.dylib+0x25456                           +[Object instanceMethodFor:]+0x16
-  stack 0x00000008280a96c9  /usr/lib/dyld+0x96c9                                       __ZN4dyldL15stateToHandlersE17dyld_image_statesPA3_Pv+0xa9
+  rip  0x0000041da441a746  /usr/lib/libobjc.A.dylib+0x24746                           __ZL9readClassP10objc_classbb+0xa6
+  stack 0x0000041da4634000  /Frameworks/Google+0x0                                     ?
+  stack 0x0000041da441be86  /usr/lib/libobjc.A.dylib+0x25e86                           -[Protocol hash]+0x256
+  stack 0x0000041da4443984  /usr/lib/libobjc.A.dylib+0x4d984                           __ZL11UnsetLayout+0x25e0
+  stack 0x0000041da4634e1a  /Frameworks/Google+0xe1a                                   ?
+  stack 0x0000041da4443988  /usr/lib/libobjc.A.dylib+0x4d988                           __ZL11UnsetLayout+0x25e4
+  stack 0x0000041da4634000  /Frameworks/Google+0x0                                     ?
+  stack 0x0000041da4411eaf  /usr/lib/libobjc.A.dylib+0x1beaf                           __ZN4objc8DenseMapI12DisguisedPtrI11objc_objectENS0_IPKvNS_15ObjcAssociationENS_17DenseMapValueInfoIS6_EENS_12DenseMapInfoIS5_EENS_6detail12DenseMapPairIS5_S6_EEEENS7_ISE_EENS9_IS3_EENSC_IS3_SE_EEE16shrink_and_clearEv+0x11f
+  stack 0x0000041da4634000  /Frameworks/Google+0x0                                     ?
+  stack 0x00000008273336ee  /cft-fwmacho-probe-macho+0x6ee                             ?
+  stack 0x0000041da441b456  /usr/lib/libobjc.A.dylib+0x25456                           +[Object instanceMethodFor:]+0x16
+  stack 0x00000008287116c9  /usr/lib/dyld+0x96c9                                       __ZN4dyldL15stateToHandlersE17dyld_image_statesPA3_Pv+0xa9
 
 69 of the stack words named no known image (not listed above)
 ```
@@ -5493,7 +5495,7 @@ segment table it lands on a stub:
 
 ```
 $ # rax -> image + offset (dyld segment table of the same log)
-rax 0x3f06e89924a0 -> /usr/lib/FoundationExtras.dylib +0x4a0
+rax 0x41db47924a0 -> /usr/lib/FoundationExtras.dylib +0x4a0
 ```
 
 and `FoundationExtras+0x4a0` is `_OBJC_CLASS_$_NSURLProtocol`.
@@ -5537,11 +5539,11 @@ be `S`/`D` (data); if the symbol were data, neighbour (a) would hold instead.
 ### Repro
 
 ```sh
-python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-60-1.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
+python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-60-2.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
 # rax (the class pointer) is not resolved by decode-crash; map it with the same segment parser:
 python3 - <<'PY'
 import re
-log = "/tmp/iokit-probe-60-1.log"
+log = "/tmp/iokit-probe-60-2.log"
 text = open(log, errors="replace").read()
 segs = []; path = None
 for line in text.splitlines():
