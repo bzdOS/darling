@@ -3085,9 +3085,9 @@ PYEOF
 **Base:** pr-arm64 = c62c78881
 **Goal:** Audit all deep validation fields dyld checks after version-check: LC_SYMTAB, LC_DYSYMTAB, LC_SEGMENT_SPLIT_INFO, LC_DATA_IN_CODE, LC_SEGMENT_64 bounds. Compare against CoreFoundation (loads OK).
 
-### Step 1 — dyld rejection text (not captured)
+### Step 1 — dyld rejection text (not executed this turn)
 
-The exact dyld rejection text from dlopen(Foundation) on the current overlay was not captured this turn. The rejection was observed in Control #33 (turn 23:5x) as "invalid file format" without rebuild. Capturing the full multi-line rejection requires running the chrome probe harness (guest dlopen), which needs a full build+run cycle. The bounds audit below is conclusive for the validation-fields question.
+The exact dyld rejection text from dlopen(Foundation) on the current overlay was not executed this turn. The rejection was observed in Control #33 (turn 23:5x) as "invalid file format" without rebuild. Capturing the full multi-line rejection is deferred to step 0 of Control #37. The bounds audit below is conclusive for the validation-fields question.
 
 ### Step 2 — Bounds audit: Foundation vs CoreFoundation
 
@@ -3099,8 +3099,8 @@ LC_SEGMENT_64:
   __DATA      : fileoff=0x137000  filesize=0x5a000  end=0x191000 OK
   __LINKEDIT  : fileoff=0x191000  filesize=0xf6940  end=0x287940 OK
 
-LC_SYMTAB:
-  symoff=0x1a6c10 nsyms=17434 sym_end=0x20ce80 OK
+LC_SYMTAB (nlist_64 = 16 B/symbol):
+  symoff=0x1a6c10 nsyms=17434 sym_end=0x1EADB0 OK (≤ stroff 0x1ec560, gap 0x17B0, no overlap)
   stroff=0x1ec560 strsize=0x9b3e0 str_end=0x287940 OK
 
 LC_DYSYMTAB:
@@ -3122,8 +3122,8 @@ LC_SEGMENT_64:
   __UNICODE   : fileoff=0x1e2000  filesize=0x8a000  end=0x26c000 OK
   __LINKEDIT  : fileoff=0x26c000  filesize=0x73a48 end=0x2dfa48 OK
 
-LC_SYMTAB:
-  symoff=0x2817e8 nsyms=8052 sym_end=0x2b0ac8 OK
+LC_SYMTAB (nlist_64 = 16 B/symbol):
+  symoff=0x2817e8 nsyms=8052 sym_end=0x2A0F28 OK (≤ stroff 0x2a1ec0, gap 0xF98, no overlap)
   stroff=0x2a1ec0 strsize=0x3db88 str_end=0x2dfa48 OK
 
 LC_DYSYMTAB:
@@ -3161,7 +3161,9 @@ for label, path in [
             print(f"{label} {segname}: fileoff={fileoff:#x} filesize={filesize:#x} end={fileoff+filesize:#x} {'OK' if fileoff+filesize <= fsize else 'OUT'}")
         elif cmd == 0x2:
             symoff, nsyms, stroff, strsize = struct.unpack_from('<IIII', data, o+8)
-            print(f"{label} SYMTAB: symoff={symoff:#x} nsyms={nsyms} stroff={stroff:#x} strsize={strsize:#x}")
+            sym_end = symoff + nsyms * 16
+            overlap = "OVERLAP" if sym_end > stroff else "no-overlap"
+            print(f"{label} SYMTAB: symoff={symoff:#x} nsyms={nsyms} sym_end={sym_end:#x} stroff={stroff:#x} {overlap}")
         elif cmd == 0x29:
             dataoff, datasize = struct.unpack_from('<II', data, o+8)
             print(f"{label} SPLIT_INFO: off={dataoff:#x} size={datasize:#x}")
