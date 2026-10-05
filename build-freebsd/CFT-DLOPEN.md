@@ -2874,7 +2874,7 @@ Control #29 при отсутствующем `/FWMACHO` означало име
 ### Step 1 — Load command parser on patched Foundation
 
 Parser: Control #31 dependency cascade map script (host-side Mach-O load command walk).
-Target: `/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (patched, cur=compat=0x012C0000).
+Target: `$DARLING_OVERLAY/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (patched, cur=compat=0x012C0000).
 
 ```
 Total LC_LOAD_DYLIB: 6
@@ -2890,8 +2890,8 @@ All 6 load commands parse cleanly. cmdsize values are valid, name offsets point 
 
 ### Step 2 — Byte-diff: patched vs original
 
-Original: `/opt/darling/build/real-macho/staged-overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (cur=compat=0x00000000)
-Patched: `/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (cur=compat=0x012C0000)
+Original: `$DARLING_BUILD_DIR/real-macho/staged-overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (cur=compat=0x00000000)
+Patched: `$DARLING_OVERLAY/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (cur=compat=0x012C0000)
 
 ```
 Original size: 2652480
@@ -2948,15 +2948,16 @@ def parse_macho_deps(path):
                 deps.append({'cmd': cmd_name, 'name': name.decode('utf-8', errors='replace'), 'current_version': current_version, 'compat_version': compat_version})
             f.seek(pos + cmdsize)
     return deps
-deps = parse_macho_deps('/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation')
+deps = parse_macho_deps(os.environ['DARLING_OVERLAY'] + '/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation')
 for i, dep in enumerate(deps):
     print(f"{i+1}: {dep['cmd']}: {dep['name']} (cur={dep['current_version']:#010x}, compat={dep['compat_version']:#010x})")
 PYEOF
 
 # Step 2: byte-diff
 python3 << 'PYEOF'
-orig = open('/opt/darling/build/real-macho/staged-overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation', 'rb').read()
-patched = open('/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation', 'rb').read()
+import os
+orig = open(os.environ['DARLING_BUILD_DIR'] + '/real-macho/staged-overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation', 'rb').read()
+patched = open(os.environ['DARLING_OVERLAY'] + '/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation', 'rb').read()
 print(f"Same size: {len(orig) == len(patched)}")
 diffs = [i for i in range(min(len(orig), len(patched))) if orig[i] != patched[i]]
 print(f"Bytes different: {len(diffs)}")
