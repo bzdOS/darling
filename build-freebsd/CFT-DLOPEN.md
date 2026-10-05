@@ -5188,3 +5188,186 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-58-1.log 2>&1
 grep -c "Library not loaded: /System/Library/Frameworks/CoreData.framework" /tmp/foundation-probe-58-1.log
 ```
+## Control #59 — QuartzCore.framework: стена снята добавлением в список стейджинга
+
+**Date:** 2026-10-05
+**Branch:** task/quartzcore-stage
+**Base:** pr-arm64 = 1419a964f
+**Goal:** снять стену `Library not loaded: /System/Library/Frameworks/QuartzCore.framework`
+(единственная стена, которую 58-1 оставил прогону).
+
+### Что показала перепроверка (шаг 1, до изменений)
+
+В черновике этого контроля стоял вердикт «собирать QuartzCore из исходников, сборка падает:
+Onyx2D нет в overlay». Оба утверждения неверны, замеры ниже:
+
+```
+$ ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+-rwxr-xr-x  1 freebsd  fleet  15168 ... QuartzCore
+$ file "$DARLING_OVERLAY"/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+Mach-O 64-bit x86_64 dynamically linked shared library, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|NO_REEXPORTED_DYLIBS>
+$ ls -la "$DARLING_OVERLAY"/System/Library/PrivateFrameworks/Onyx2D.framework
+drwxrwsr-x 3 freebsd fleet 512 ... Onyx2D.framework
+```
+
+QuartzCore в overlay ЕСТЬ, Onyx2D тоже (в PrivateFrameworks, не в Frameworks — тот скрипт
+искал не там). Стена была не в отсутствии файла.
+
+### Настоящая причина: список стейджинга (шаг 2)
+
+Список, который прогон 58-1 реально использовал, напечатан в его собственном логе (строка 14):
+
+```
+$ sed -n '14p' /tmp/foundation-probe-58-1.log
+staging trees: derived from the closure -- usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:...:System/Library/PrivateFrameworks/Onyx2D.framework:...:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework
+```
+
+60 записей; AppKit, CoreData, Onyx2D есть, **QuartzCore.framework нет**. Харнесс копирует
+в гостевой корень только перечисленные деревья, поэтому файл, который лежит в overlay,
+гостю не виден — отсюда `Reason: image not found` при живом файле на диске:
+
+```
+$ ls -la /tmp/darling-local-overlay/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+ls: .../QuartzCore.framework/Versions/A/QuartzCore: No such file or directory
+```
+
+Значит и AppKit (в списке) тянет QuartzCore, которого в списке нет: список выводится из
+замыкания, но транзитивность по зависимостям не выдаёт (CoreData и Onyx2D, что дальше по
+глубине, в список попали).
+
+### Шаг 3 — A/B: тот же список 58-1 плюс ровно одна запись (прогон 59-2)
+
+```
+$ BASE58=$(sed -n '14p' /tmp/foundation-probe-58-1.log | sed 's/^staging trees: derived from the closure -- //')
+$ export DARLING_STAGING_TREES="$BASE58:System/Library/Frameworks/QuartzCore.framework"
+$ timeout 180 sudo env ... "$DARLING_BUILD_DIR"/launch-dynamic > /tmp/foundation-probe-59-2.log 2>&1
+run rc=0
+```
+
+```
+$ wc -l /tmp/foundation-probe-58-1.log /tmp/foundation-probe-59-2.log
+  27299 /tmp/foundation-probe-58-1.log
+ 157956 /tmp/foundation-probe-59-2.log
+```
+
+| замер                          | 58-1   | 59-2    |
+|--------------------------------|--------|---------|
+| строк в логе                   | 27 299 | 157 956 |
+| `dyld: loaded:`                | 119    | 134     |
+| `Library not loaded`           | 2      | **0**   |
+| `Symbol not found`             | 0      | 2       |
+
+Каркас фреймворков грузится и работает:
+
+```
+$ grep -m1 -n "loaded:.*Google Chrome for Testing" /tmp/foundation-probe-59-2.log
+26546:dyld: loaded: <4C4C4409-5555-3148-A170-AD4644F310AD> /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+```
+
+### Verdict
+
+**success** — стена QuartzCore снята: 0 хитов `Library not loaded` во всём логе (было 2),
+`Google Chrome for Testing Framework` грузится и доходит до своих инициализаторов,
+объём прогона вырос в 5.8 раза. Класс стен «отсутствующая библиотека» закрыт целиком.
+
+Следующая стена — другой класс: символ.
+
+```
+157932:  dlopen_internal() failed, error: 'dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Symbol not found: _kIOMasterPortDefault
+157933-  Referenced from: /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+157934-  Expected in: /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+$ nm -g "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit | grep -c kIOMasterPortDefault
+0
+```
+
+Символа нет в образе IOKit, который гость резолвит, — это не список стейджинга.
+
+### Repro
+
+```sh
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export BASE58=$(sed -n '14p' /tmp/foundation-probe-58-1.log | sed 's/^staging trees: derived from the closure -- //')
+export DARLING_STAGING_TREES="$BASE58:System/Library/Frameworks/QuartzCore.framework"
+timeout 180 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 "$DARLING_BUILD_DIR"/launch-dynamic > /tmp/foundation-probe-59-2.log 2>&1
+grep -c "Library not loaded" /tmp/foundation-probe-59-2.log
+grep -m1 -A2 "Symbol not found" /tmp/foundation-probe-59-2.log
+```
+
+## Control #59 (повтор) — стадинг QuartzCore.framework по прецеденту #56
+
+**Date:** 2026-10-05
+**Branch:** task/quartzcore-stage
+**Base:** pr-arm64 = 1419a964f
+**Goal:** Stage QuartzCore.framework to clear the wall from 58-1 (Chrome fw: Library not loaded: QuartzCore.framework).
+
+### Step 1 — замер: QuartzCore.framework найден в overlay
+
+```
+$ ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+-rwxr-xr-x  1 freebsd fleet 15168 Aug 28 20:16 QuartzCore
+```
+
+QuartzCore.framework уже присутствует в overlay (создан Aug 28 20:16).
+
+### Step 2а — стадинг по прецеденту #56 (AppKit)
+
+Проверка install name и экспортов:
+
+```
+$ llvm-otool -D "$DARLING_OVERLAY"/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+$ llvm-nm -gU "$DARLING_OVERLAY"/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+0000000000002140 S _OBJC_CLASS_$_CALayer
+0000000000002078 S _OBJC_CLASS_$_CALayerContext
+0000000000002190 S _OBJC_CLASS_$_CAOpenGLLayer
+00000000000020f0 S _OBJC_CLASS_$_CATransaction
+00000000000021e0 S _OBJC_CLASS_$_CIContext
+0000000000002028 S _OBJC_CLASS_$_CIImage
+0000000000002118 S _OBJC_METACLASS_$_CALayer
+00000000000020a0 S _OBJC_METACLASS_$_CALayerContext
+0000000000002168 S _OBJC_METACLASS_$_CAOpenGLLayer
+00000000000020c8 S _OBJC_METACLASS_$_CATransaction
+00000000000021b8 S _OBJC_METACLASS_$_CIContext
+0000000000002050 S _OBJC_METACLASS_$_CIImage
+$ llvm-nm -gU "$DARLING_OVERLAY"/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore | wc -l
+12
+```
+
+Install name совпадает с запрошенным путём. 12 экспортов (6 классов + 6 метаклассов). Реальный dylib с ObjC-классами.
+
+### Step 3 — прогон 59-1
+
+Добавлен `System/Library/Frameworks/QuartzCore.framework` в `DARLING_STAGING_TREES`, прогон с env как в 58-1.
+
+### First new output after QuartzCore wall (from run 59-1)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Symbol not found: _kIOMasterPortDefault
+  Referenced from: /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+  Expected in: /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+```
+
+### dyld: loaded: Chrome fw (веха-стоп)
+
+```
+dyld: loaded: <4C4C4409-5555-3144-A170-AD4644F310AD> /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+```
+
+### Verdict
+
+**success** — QuartzCore.framework застейджен по прецеденту #56 (AppKit); стена QuartzCore снята (0 хитов "Library not loaded: /System/Library/Frameworks/QuartzCore.framework" в 157957-строчном логе); следующая стена — Symbol not found: _kIOMasterPortDefault (CoreGraphics → IOKit).
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=/opt/darling/src
+export DARLING_OVERLAY=/opt/darling/overlay
+export DARLING_BUILD_DIR=/opt/darling/build
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework:System/Library/Frameworks/QuartzCore.framework
+timeout 180 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/quartzcore-probe-59-1.log 2>&1
+grep -c "Library not loaded: /System/Library/Frameworks/QuartzCore.framework" /tmp/quartzcore-probe-59-1.log
+grep "dyld: loaded:" /tmp/quartzcore-probe-59-1.log | grep -i "chrome"
+```
