@@ -5136,3 +5136,55 @@ CoreData.framework отсутствует в build-продуктах.
 ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData 2>/dev/null || echo "CoreData NOT FOUND in overlay"
 find "$DARLING_BUILD_DIR" -path '*CoreData.framework*' -name 'CoreData' 2>/dev/null || echo "CoreData NOT FOUND in build products"
 ```
+
+## Control #58 — сборка CoreData.framework (стена снята)
+
+**Date:** 2026-10-05
+**Branch:** task/coredata-build
+**Base:** pr-arm64 = b2a85fa0f
+**Goal:** Build CoreData.framework from source to clear the wall from 56-1 (Chrome fw: Library not loaded: CoreData.framework).
+
+### Step 1 — сборка
+
+Запущен `sh build-freebsd/build-coredata-coreservices.sh`. Скрипт построил CoreData и скопировал в overlay до CoreServices (set -e), упал позже на AE (stub.c: не объявлены типы OSErr/Size/AEDesc — скрипт никогда не запускался). CoreData уже застейджен, это вилка 2а.
+
+```
+Built: $DARLING_BUILD_DIR/coredata-coreservices/staged-overlay/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+```
+
+### Step 2 — замер построенного dylib
+
+```
+$ llvm-otool -D "$DARLING_OVERLAY"/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+$ llvm-nm -gU "$DARLING_OVERLAY"/System/Library/Frameworks/CoreData.framework/Versions/A/CoreData | wc -l
+186
+```
+
+Install name совпадает с запрошенным путём. 186 экспортов.
+
+### Step 3 — прогон 58-1
+
+Добавлен `System/Library/Frameworks/CoreData.framework` в `DARLING_STAGING_TREES`, прогон с env как в 56-1.
+
+### First new output after CoreData wall (from run 58-1)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+  Reason: image not found
+```
+
+### Verdict
+
+**success** — CoreData.framework построен из исходников (cocotron, 25 .m, ObjC-классы) и застейджен; стена CoreData снята (0 хитов "Library not loaded: /System/Library/Frameworks/CoreData.framework" в 27299-строчном логе); следующая стена — QuartzCore.framework (staging-missing-dependency).
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-58-1.log 2>&1
+grep -c "Library not loaded: /System/Library/Frameworks/CoreData.framework" /tmp/foundation-probe-58-1.log
+```
