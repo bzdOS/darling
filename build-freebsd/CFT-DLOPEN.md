@@ -4758,3 +4758,61 @@ grep "FATAL\|crash_debug_handler" /tmp/foundation-probe-50-1.log
 ```
 
 Run 50-2 (no crash): same as 50-1 but add `DYLD_BIND_AT_LAUNCH=1` to the env, log `/tmp/foundation-probe-50-2.log`, grep for `Symbol not found`.
+
+## Control #51 — lazy-bind attribution + ccchacha20 discrimination
+
+**Date:** 2026-10-05
+**Branch:** task/ccchacha-diag
+**Base:** pr-arm64 = ba95ff198
+**Goal:** (1) Attribute the crash rip to a specific image using load ranges from the same run. (2) Discriminate the "Symbol not found: _ccchacha20" failure observed with DYLD_BIND_AT_LAUNCH=1.
+
+### Result 1 — Crash rip attribution
+
+Run 51-1 (full #48 tree, 58 trees). Log: `/tmp/foundation-probe-51-1.log` (1287100 lines). Crash reproduced. Register block (verbatim):
+
+```
+  rip=0x00003280ef219746  rax=0x00003280ff5914a0  rbx=0x00003280ff5914a0
+```
+
+Load range for /usr/lib/libobjc.A.dylib from the same log (verbatim):
+
+```
+            __TEXT at 0x3280EF1F5000->0x3280EF24DFFF with permissions r.x
+```
+
+Attribution: rip=0x3280ef219746 falls inside libobjc.A.dylib's __TEXT segment (0x3280EF1F5000–0x3280EF24DFFF). Offset within the segment: 0x3280ef219746 − 0x3280ef1f5000 = 0x24746. The crash is in libobjc.A.dylib's code, at offset 0x24746 within __TEXT.
+
+### Result 2 — ccchacha20 discrimination
+
+The "Symbol not found: _ccchacha20" failure (observed in 50-2 with DYLD_BIND_AT_LAUNCH=1) was investigated with nm on the overlay binaries:
+
+```
+$ nm -u "$DARLING_OVERLAY"/usr/lib/system/libcommonCrypto.dylib | grep ccchacha
+_ccchacha20
+_ccchacha20poly1305_decrypt_oneshot
+_ccchacha20poly1305_encrypt_oneshot
+_ccchacha20poly1305_info
+
+$ nm "$DARLING_OVERLAY"/usr/lib/system/libcorecrypto.dylib | grep ccchacha
+0000000000019580 t _ccchacha20
+00000000000195e0 t _ccchacha20poly1305_decrypt_oneshot
+0000000000019630 t _ccchacha20poly1305_encrypt_oneshot
+00000000000195c0 t _ccchacha20poly1305_info
+```
+
+**Вердикт: класс: missing-export — _ccchacha20 запрашивается libcommonCrypto.dylib (undefined), в libcorecrypto.dylib символ есть но как ЛОКАЛЬНЫЙ (строчная t, не экспортируется); при BIND_AT_LAUNCH=1 это даёт Symbol not found и abort; стейджингом не исправляется — проблема в бинарнике libcorecrypto (символ не экспортирован)**
+
+The symbol is present in libcorecrypto.dylib but as a local (non-exported) symbol. libcommonCrypto.dylib has it as undefined, expecting it from libcorecrypto. With lazy binding, the missing export is not hit until the symbol is actually called; with BIND_AT_LAUNCH=1, all symbols are bound eagerly, exposing the missing export immediately. Staging cannot fix this — the symbol needs to be exported from libcorecrypto.dylib (rebuild or patch).
+
+### Repro
+
+Run 51-1 (crash + attribution):
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework:System/Library/Frameworks/QuartzCore.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-51-1.log 2>&1
+grep "rip=\|__TEXT at.*libobjc" /tmp/foundation-probe-51-1.log
+```
