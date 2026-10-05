@@ -4889,3 +4889,39 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-52-2.log 2>&1
 grep -c "Symbol not found: _ccchacha20" /tmp/foundation-probe-52-2.log
 ```
+
+## Control #53 — стейджинг IOKit.framework (staging-source-missing)
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-iokit
+**Base:** pr-arm64 = 6a7a439d3
+**Goal:** Stage IOKit.framework into the probe's staging path to clear the wall from run 52-2.
+
+### Wall from run 52-2 (verbatim)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+  Referenced from: /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+  Reason: image not found
+```
+
+### IOKit.framework in overlay
+
+```
+$ ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework
+ls: /System/Library/Frameworks/IOKit.framework: No such file or directory
+```
+
+IOKit.framework is NOT present in the overlay. The SDK copy at
+`Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/IOKit.framework`
+contains only headers (Headers -> Versions/A/Headers), no binary.
+
+### Verdict
+
+**staging-source-missing** — IOKit.framework is absent from the overlay and cannot be staged. The wall from 52-2 remains. Next step: build IOKit.framework from source (src/external/IOKitUser) or obtain a prebuilt binary.
+
+### Repro
+
+```sh
+ls -la "$DARLING_OVERLAY"/System/Library/Frameworks/IOKit.framework 2>/dev/null || echo "IOKit.framework NOT FOUND in overlay"
+```
