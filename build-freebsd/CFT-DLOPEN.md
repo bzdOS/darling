@@ -4495,3 +4495,144 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-47-8.log 2>&1
 grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-47-8.log
 ```
+
+## Control #48 — batch staging 7: 6 walls cleared, then crash (non-staging)
+
+ERRATUM (#46): Final wall line 2 of the merged section #46 is wrong: the live log (/tmp/foundation-probe-46-8.log, both occurrences) says "Referenced from: /System/Library/Frameworks/AppKit.framework/Versions/C/AppKit".
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-staging-batch7
+**Base:** pr-arm64 = 257916cd5
+**Goal:** Continue the batch staging loop from the IOBluetooth wall (verdict #47), staging each new wall's framework from overlay and re-running the Chrome framework probe until a non-staging rejection, a Chrome load, or the iteration limit (8).
+
+### Step 0 — Batch loop (6 iterations, then crash)
+
+Each iteration: add the current wall's framework to `DARLING_STAGING_TREES`, run `cft-fwmacho-probe-macho`, capture the next wall. All frameworks staged minimally from overlay. Logs: `/tmp/foundation-probe-48-<N>.log`.
+
+### Iteration 1 — IOBluetooth.framework (wall from #47)
+
+Staging evidence (`/tmp/foundation-probe-48-1.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/IOBluetooth.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C444F-5555-3144-A1B0-173DB3DB6C76> /System/Library/Frameworks/IOBluetooth.framework/Versions/A/IOBluetooth
+```
+
+Next wall: MediaPlayer.framework.
+
+### Iteration 2 — MediaPlayer.framework
+
+Staging evidence (`/tmp/foundation-probe-48-2.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/MediaPlayer.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C447F-5555-3144-A1AF-CF1E35E4980E> /System/Library/Frameworks/MediaPlayer.framework/Versions/A/MediaPlayer
+```
+
+Next wall: AuthenticationServices.framework.
+
+### Iteration 3 — AuthenticationServices.framework
+
+Staging evidence (`/tmp/foundation-probe-48-3.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/AuthenticationServices.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44EE-5555-3144-A1DA-C99F3409B8F7> /System/Library/Frameworks/AuthenticationServices.framework/Versions/A/AuthenticationServices
+```
+
+Next wall: GameController.framework.
+
+### Iteration 4 — GameController.framework
+
+Staging evidence (`/tmp/foundation-probe-48-4.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/GameController.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44EC-5555-3144-A144-5B880DC71E4F> /System/Library/Frameworks/GameController.framework/Versions/A/GameController
+```
+
+Next wall: Vision.framework.
+
+### Iteration 5 — Vision.framework
+
+Staging evidence (`/tmp/foundation-probe-48-5.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Vision.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44B4-5555-3144-A1D0-FBE375028C08> /System/Library/Frameworks/Vision.framework/Versions/A/Vision
+```
+
+Next wall: UserNotifications.framework.
+
+### Iteration 6 — UserNotifications.framework (crash after load)
+
+Staging evidence (`/tmp/foundation-probe-48-6.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/UserNotifications.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44E3-5555-3144-A160-E40EBB0B11B3> /System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications
+```
+
+UserNotifications.framework loaded successfully, but the probe then crashed (non-staging failure). Verbatim from log:
+
+```
+backtrace (3 frames):
+  #00 0x2227e3  0x2227e3 <crash_debug_handler+0xc3> at $DARLING_BUILD_DIR/dserver/mldr-real/mldr
+  #01 0x82331945a  0x82331945a <_pthread_sigmask+0x50a> at /lib/libthr.so.3
+  #02 0x823318a5b  0x823318a5b <pthread_signals_unblock_np+0x5bb> at /lib/libthr.so.3
+```
+
+The crash occurred during lazy binding of AppKit to Foundation/CoreFoundation, after UserNotifications.framework was loaded. This is NOT a staging-missing-dependency rejection — it is a crash in the mldr (Mach-O loader) during symbol binding.
+
+### Final wall
+
+No final wall — the probe crashed before reaching the next dependency rejection. The crash is in the mldr's crash_debug_handler, triggered during AppKit's lazy binding to Foundation. This is a different class of failure from the staging-missing-dependency pattern: the staging is complete (all 6 frameworks loaded), but the loader crashes during binding.
+
+### Emission site
+
+N/A — no dyld rejection message was emitted. The crash is in the mldr itself, not in dyld's dependency resolution.
+
+### Verdict
+
+**crash-in-mldr (non-staging)** — 6 frameworks staged and loaded in one turn: IOBluetooth, MediaPlayer, AuthenticationServices, GameController, Vision, UserNotifications. The probe then crashed in the mldr during AppKit's lazy binding to Foundation, before reaching the next dependency rejection. The staging-missing-dependency pattern is broken: the next wall is not a missing framework but a loader crash. Cumulative staging across #38–#48: 59 frameworks. The crash needs investigation — it may be related to UserNotifications.framework's initialization or to the accumulated staging state.
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework:System/Library/Frameworks/QuartzCore.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-48-6.log 2>&1
+grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-48-6.log
+```
