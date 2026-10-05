@@ -5642,3 +5642,92 @@ timeout 180 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_O
 grep -c 'Symbol not found' /tmp/iokit-probe-62-1.log
 grep -c 'FATAL signal 11' /tmp/iokit-probe-62-1.log
 ```
+
+## Control #63 — decode of the 62-1 stack-jump: an unpatched raw-Linux syscall in Chrome's initializer
+
+**Date:** 2026-10-05
+**Branch:** task/objc-initializer-jump
+**Base:** pr-arm64 = 66266981974ba19dc2a60ccb43ebe15845181fe1
+**Goal:** decode the wall 62-1 left (FATAL signal 11 (code=2) at 0x7fffffdfd658,
+line 1292569). No new run — decoded from the existing /tmp/iokit-probe-62-1.log
+(read-only; it is cited by the merged #62 commit).
+
+### Crash block (62-1, lines 1292569-1292576)
+
+```
+1292569:[darling-mldr] FATAL signal 11 (code=2) at addr=0x7fffffdfd658
+  rip=0x00007fffffdfd658  rax=0x0000000826454f2c  rbx=0x000033ad5549a7a0
+  rcx=0x0000000000000307  rdx=0x0000000000000307  rsi=0x0000000000050000
+  rdi=0x0000000000000307  rbp=0x00007fffffdfd650  rsp=0x00007fffffdfd658
+```
+
+`rip == rsp == 0x7fffffdfd658` and `rbp == rsp - 8`: the CPU is executing on the
+stack. decode-crash.py reports the address unmapped (no image covers it), and the
+stack walk names the callers:
+
+```
+$ python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-62-1.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
+crash: signal 11 at 0x7fffffdfd658
+  rip  0x00007fffffdfd658  unmapped (no image covers this address)
+  stack 0x000033ad450bd57a  /usr/lib/system/libsystem_platform.dylib+0x257a   __OSSpinLockLockYield+0x4a
+  stack 0x000033ad450bd814  /usr/lib/system/libsystem_platform.dylib+0x2814   _spin_unlock+0x14
+  stack 0x0000000826454f2c  /usr/lib/dyld+0x14cf2c                            __main_thread+0xac
+  stack 0x000033ad45595e42  /Frameworks/Google+0x161e42                       ?
+```
+
+### The initializer is named by the log
+
+```
+1292562:dyld: calling initializer function 0x33ad4755e4c0 in /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+```
+
+Chrome fw maps at 0x33ad45434000 (62-1:26540), so 0x33ad4755e4c0 is Chrome fw
++0x212a4c0 — Chrome's own initializer, running on the main thread.
+
+### The ENOSYS lines are the run-up, not a neighbour
+
+Immediately after that initializer starts, and before the FATAL, mldr prints six
+unhandled raw-Linux syscalls:
+
+```
+1292563:[darling-mldr] unhandled Linux syscall 4294967287 — ENOSYS
+1292564:[darling-mldr] unhandled Linux syscall 4294967218 — ENOSYS
+... (4294967218 five times)
+```
+
+4294967287 = 0xFFFFFFF7 = -9 and 4294967218 = 0xFFFFFFB2 = -78 as signed 32-bit —
+not valid Linux syscall numbers. They are what a raw `syscall` instruction emits
+when rax was never set up for the Linux ABI.
+
+### Hypothesis (one, ranked)
+
+Chrome fw's raw-Linux `syscall` trampoline was **not** patched: its 253374464-byte
+mapping (0x33ad45434000) matched no known trampoline signature (62-1:26540), so
+Chrome's own initializer's `syscall` sites reach mldr raw. The guest's rax there
+is garbage (-78 / -9), mldr returns ENOSYS into rax, and the initializer then
+transfers control with the wrong rax/stack state — landing on the stack
+(rip == rsp).
+
+Neighbour this separates from: a crash inside a *stubbed* framework. The stack
+names Chrome fw and libsystem_platform, not an Extras wrapper, and the run-up is
+raw syscalls, not a Symbol-not-found.
+
+### Discriminating check
+
+```
+$ grep -n 'no known raw-syscall trampoline signature matched' /tmp/iokit-probe-62-1.log | grep 253374464
+26540:[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 253374464-byte executable mapping at 0x33ad45434000 — ...
+```
+
+Expected: exactly this line — Chrome fw's trampoline was not rewritten. If the
+line were absent (Chrome fw patched), the hypothesis would fail and the syscalls
+would have to come from another unpatched image.
+
+### Repro
+
+```sh
+python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-62-1.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
+grep -n 'calling initializer function.*Google Chrome for Testing Framework' /tmp/iokit-probe-62-1.log | tail -1
+grep -n 'unhandled Linux syscall' /tmp/iokit-probe-62-1.log | tail -6
+grep -n 'no known raw-syscall trampoline signature matched' /tmp/iokit-probe-62-1.log | grep 253374464
+```
