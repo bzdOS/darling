@@ -3831,3 +3831,169 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-43-8.log 2>&1
 grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-43-8.log
 ```
+
+## Control #44 — batch staging 3: 8 more walls cleared
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-staging-batch3
+**Base:** pr-arm64 = 0ccd9964c
+**Goal:** Continue the batch staging loop from the VideoToolbox wall (verdict #43), staging each new wall's framework from overlay and re-running the Chrome framework probe until a non-staging rejection, a Chrome load, or the iteration limit (8).
+
+### Step 0 — Batch loop (8 iterations, one framework per iteration)
+
+Each iteration: add the current wall's framework to `DARLING_STAGING_TREES`, run `cft-fwmacho-probe-macho`, capture the next wall. All frameworks staged minimally from overlay. Logs: `/tmp/foundation-probe-44-<N>.log`.
+
+### Iteration 1 — VideoToolbox.framework (wall from #43)
+
+Staging evidence (`/tmp/foundation-probe-44-1.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/VideoToolbox.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44A5-5555-3144-A1A9-0E88C0EB43D4> /System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox
+```
+
+Next wall: CoreMediaIO.framework.
+
+### Iteration 2 — CoreMediaIO.framework
+
+Staging evidence (`/tmp/foundation-probe-44-2.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreMediaIO.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C446D-5555-3144-A1C2-E25BE8B5AD7B> /System/Library/Frameworks/CoreMediaIO.framework/Versions/A/CoreMediaIO
+```
+
+Next wall: Accessibility.framework.
+
+### Iteration 3 — Accessibility.framework
+
+Staging evidence (`/tmp/foundation-probe-44-3.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Accessibility.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C445F-5555-3144-A1E5-80BD913F13AD> /System/Library/Frameworks/Accessibility.framework/Versions/A/Accessibility
+```
+
+Next wall: MetalKit.framework.
+
+### Iteration 4 — MetalKit.framework
+
+Staging evidence (`/tmp/foundation-probe-44-4.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/MetalKit.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C445D-5555-3144-A150-C14463891EFB> /System/Library/Frameworks/MetalKit.framework/Versions/A/MetalKit
+```
+
+Next wall: CoreMIDI.framework.
+
+### Iteration 5 — CoreMIDI.framework
+
+Staging evidence (`/tmp/foundation-probe-44-5.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreMIDI.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4431-5555-3144-A1F8-9548A19D0653> /System/Library/Frameworks/CoreMIDI.framework/Versions/A/CoreMIDI
+```
+
+Next wall: MediaAccessibility.framework.
+
+### Iteration 6 — MediaAccessibility.framework
+
+Staging evidence (`/tmp/foundation-probe-44-6.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/MediaAccessibility.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44EF-5555-3144-A1AF-7933D3CCCB99> /System/Library/Frameworks/MediaAccessibility.framework/Versions/A/MediaAccessibility
+```
+
+Next wall: SecurityInterface.framework.
+
+### Iteration 7 — SecurityInterface.framework
+
+Staging evidence (`/tmp/foundation-probe-44-7.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/SecurityInterface.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44DB-5555-3144-A1DC-C30263EBF6B8> /System/Library/Frameworks/SecurityInterface.framework/Versions/A/SecurityInterface
+```
+
+Next wall: CoreHaptics.framework.
+
+### Iteration 8 — CoreHaptics.framework (last iteration, limit reached)
+
+Staging evidence (`/tmp/foundation-probe-44-8.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreHaptics.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4491-5555-3144-A1CA-71A623C7D426> /System/Library/Frameworks/CoreHaptics.framework/Versions/A/CoreHaptics
+```
+
+### Final wall (verbatim from `/tmp/foundation-probe-44-8.log`)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/ForceFeedback.framework/Versions/A/ForceFeedback
+  Referenced from: /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+  Reason: image not found
+```
+
+The rejection moved from CoreHaptics.framework (wall cleared in iteration 8) to ForceFeedback.framework — same shape, next dependency in the chain.
+
+### Emission site
+
+Same emission site as #37–#43: `src/external/dyld/src/ImageLoader.cpp:820` — the message shape is identical across all iterations, only the dependency name changed.
+
+### Verdict
+
+**staging-missing-dependency (batch, 8/8 walls cleared)** — 8 frameworks staged and loaded in one turn: VideoToolbox, CoreMediaIO, Accessibility, MetalKit, CoreMIDI, MediaAccessibility, SecurityInterface, CoreHaptics. The Chrome framework now fails at ForceFeedback.framework, missing from the staging trees. The pattern from #38–#43 is confirmed at batch scale for the third time: each staged framework clears exactly one wall and reveals the next dependency. Cumulative staging across #38–#44: 29 frameworks. Next candidate: `/System/Library/Frameworks/ForceFeedback.framework`. Iteration limit (8) reached; further walls can be cleared in a follow-up batch.
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-44-8.log 2>&1
+grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-44-8.log
+```
