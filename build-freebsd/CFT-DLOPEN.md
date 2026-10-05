@@ -5557,3 +5557,88 @@ print("rax %#x -> %s +%#x" % (a, hit[0][2], a - hit[0][0]) if hit else "rax %#x 
 PY
 llvm-nm -gU "$DARLING_OVERLAY"/usr/lib/FoundationExtras.dylib | grep '_OBJC_CLASS_\$_NSURLProtocol'
 ```
+
+## Control #62 — Extras wrappers export ObjC class names as real classes, not code stubs
+
+**Date:** 2026-10-05
+**Branch:** task/objc-class-stubs
+**Base:** pr-arm64 = d581d0ee178202d238980e3bbb68144e8e72bd54
+**Goal:** remove the wall from #61 — libobjc's readClass dereferenced a code no-op
+stub exported under an ObjC class name (`_OBJC_CLASS_$_NSURLProtocol` at
+`FoundationExtras+0x4a0`) as if it were a class.
+
+### Variant 1 (remove the exports) fails: the bind is strong
+
+The 13 `/usr/lib/*Extras.dylib` wrappers that export `_OBJC_CLASS_$_*` /
+`_OBJC_METACLASS_$_*` were rebuilt without those names. Chrome then fails to load:
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Symbol not found: _OBJC_CLASS_$_AVSampleBufferAudioRenderer
+  Referenced from: /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+  Expected in: /usr/lib/AVFoundationExtras.dylib
+```
+
+So the reference is a strong two-level bind, not a weak one — variant 1 is out.
+
+### Variant 2 (the fix): export the names as real ObjC classes
+
+The same 13 wrappers are rebuilt so every `_OBJC_CLASS_$_X` / `_OBJC_METACLASS_$_X`
+is a **compiled root ObjC class** (`__attribute__((objc_root_class))`) — real data
+with a valid isa/metaclass — not `void X(void){}`. Every other stub export stays a
+function; `__objc_empty_cache` is defined locally (an assembly object) so the
+wrappers stay self-contained.
+
+```
+$ llvm-nm -gU "$DARLING_OVERLAY"/usr/lib/AVFoundationExtras.dylib | grep AVSampleBufferAudioRenderer
+0000000000001230 S _OBJC_CLASS_$_AVSampleBufferAudioRenderer
+0000000000001258 S _OBJC_METACLASS_$_AVSampleBufferAudioRenderer
+```
+
+### Run 62-1
+
+```
+$ wc -l /tmp/iokit-probe-62-1.log
+1292661
+$ grep -c 'Symbol not found' /tmp/iokit-probe-62-1.log
+0
+$ grep -c 'Library not loaded' /tmp/iokit-probe-62-1.log
+0
+$ grep -c 'FATAL signal 11' /tmp/iokit-probe-62-1.log
+1
+```
+
+The #61 wall is gone: the run passes the weak-bind batch, no readClass dereference
+happens, and the run advances into Chrome's own initializers:
+
+```
+1292568:dyld: calling initializer function 0x... in /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+```
+
+The first new stopper is a different crash — a jump to the stack, not a symbol:
+
+```
+1292569:[darling-mldr] FATAL signal 11 (code=2) at addr=0x7fffffdfd658
+  rip=0x00007fffffdfd658  rax=0x0000000826454f2c  rbx=0x000033ad5549a7a0
+  rbp=0x00007fffffdfd650  rsp=0x00007fffffdfd658
+```
+
+### Verdict
+
+**partial** — the #61 wall (a stub read as a class) is removed: Symbol not found = 0,
+no readClass dereference, the run reaches Chrome's initializers. But the acceptance
+criterion "FATAL signal 11 = 0" is **not** met: one FATAL signal 11 (code=2) remains,
+a jump to the stack during a Chrome initializer (not an IOKit/Extras symbol).
+
+### Repro
+
+```sh
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+python3 "$DARLING_SRC_DIR"/build-freebsd/build-extras-objc-classes.py
+# then the 60-2 probe chain, new log name:
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export BASE58=$(sed -n '14p' /tmp/foundation-probe-58-1.log | sed 's/^staging trees: derived from the closure -- //')
+export DARLING_STAGING_TREES="$BASE58:System/Library/Frameworks/QuartzCore.framework"
+timeout 180 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 "$DARLING_BUILD_DIR"/launch-dynamic > /tmp/iokit-probe-62-1.log 2>&1
+grep -c 'Symbol not found' /tmp/iokit-probe-62-1.log
+grep -c 'FATAL signal 11' /tmp/iokit-probe-62-1.log
+```
