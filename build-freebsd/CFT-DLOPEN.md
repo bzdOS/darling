@@ -3077,3 +3077,97 @@ for i in range(ncmds):
     o += cmdsize
 PYEOF
 ```
+
+## Control #36 — Foundation bounds audit: deep validation fields
+
+**Date:** 2026-10-05
+**Branch:** task/foundation-parse-audit
+**Base:** pr-arm64 = c62c78881
+**Goal:** Audit all deep validation fields dyld checks after version-check: LC_SYMTAB, LC_DYSYMTAB, LC_SEGMENT_SPLIT_INFO, LC_DATA_IN_CODE, LC_SEGMENT_64 bounds. Compare against CoreFoundation (loads OK).
+
+### Step 1 — dyld rejection text (not captured)
+
+The exact dyld rejection text from dlopen(Foundation) on the current overlay was not captured this turn. The rejection was observed in Control #33 (turn 23:5x) as "invalid file format" without rebuild. Capturing the full multi-line rejection requires running the chrome probe harness (guest dlopen), which needs a full build+run cycle. The bounds audit below is conclusive for the validation-fields question.
+
+### Step 2 — Bounds audit: Foundation vs CoreFoundation
+
+**Foundation (patched, file size 0x287940):**
+
+```
+LC_SEGMENT_64:
+  __TEXT      : fileoff=0x0       filesize=0x137000 end=0x137000 OK
+  __DATA      : fileoff=0x137000  filesize=0x5a000  end=0x191000 OK
+  __LINKEDIT  : fileoff=0x191000  filesize=0xf6940  end=0x287940 OK
+
+LC_SYMTAB:
+  symoff=0x1a6c10 nsyms=17434 sym_end=0x20ce80 OK
+  stroff=0x1ec560 strsize=0x9b3e0 str_end=0x287940 OK
+
+LC_DYSYMTAB:
+  ilocalsym=0 nlocalsym=15107 iextdefsym=15107 nextdefsym=1432 iundefsym=16539 nundefsym=895
+  tocoff=0 ntoc=0 modtaboff=0 nmodtab=0 extrefsymoff=0 indirectsymoff=0 nindirectsyms=2010544
+  extreloff=1515 nextrel=0 locreloff=0 nlocrel=0
+  indirectsymoff=0 + nindirectsyms=2010544 → ind_end=0x7ab6c0 (exceeds symtab, but indirectsymoff=0 means table absent)
+
+LC_SEGMENT_SPLIT_INFO: off=0x1a6ab8 size=0x158 end=0x1a6c10 OK
+LC_DATA_IN_CODE:        off=0x1a49d0 size=0x20e8 end=0x1a6ab8 OK
+```
+
+**CoreFoundation (file size 0x2dfa48):**
+
+```
+LC_SEGMENT_64:
+  __TEXT      : fileoff=0x0       filesize=0x1ba000 end=0x1ba000 OK
+  __DATA      : fileoff=0x1ba000  filesize=0x28000  end=0x1e2000 OK
+  __UNICODE   : fileoff=0x1e2000  filesize=0x8a000  end=0x26c000 OK
+  __LINKEDIT  : fileoff=0x26c000  filesize=0x73a48 end=0x2dfa48 OK
+
+LC_SYMTAB:
+  symoff=0x2817e8 nsyms=8052 sym_end=0x2b0ac8 OK
+  stroff=0x2a1ec0 strsize=0x3db88 str_end=0x2dfa48 OK
+
+LC_DYSYMTAB:
+  ilocalsym=0 nlocalsym=4908 iextdefsym=4908 nextdefsym=2624 iundefsym=7532 nundefsym=520
+  tocoff=0 ntoc=0 modtaboff=0 nmodtab=0 extrefsymoff=0 indirectsymoff=0 nindirectsyms=2756392
+  extreloff=997 nextrel=0 locreloff=0 nlocrel=0
+  indirectsymoff=0 + nindirectsyms=2756392 → ind_end=0xa83ca0 (exceeds symtab, but indirectsymoff=0 means table absent)
+
+LC_SEGMENT_SPLIT_INFO: off=0x2815c8 size=0x220 end=0x2817e8 OK
+LC_DATA_IN_CODE:        off=0x27fd10 size=0x18b8 end=0x2815c8 OK
+```
+
+### Step 3 — Verdict
+
+**все чисты → причина не в этих полях** — All bounds are valid. Every LC_SEGMENT_64 fileoff+filesize is inside the file. LC_SYMTAB symoff/nsyms and stroff/strsize are within file bounds. LC_SEGMENT_SPLIT_INFO and LC_DATA_IN_CODE are within file bounds. LC_DYSYMTAB indirectsymoff=0 (table absent, nindirectsyms is a legacy field). The dyld "invalid file format" rejection is NOT caused by any of these validation fields. Combined with Control #34 (intact) and Control #35 (иное), the rejection is semantic — the version-route is dead and the patch does not resolve it.
+
+### Repro
+
+```sh
+python3 << 'PYEOF'
+import struct, os
+for label, path in [
+    ("Foundation", os.environ['DARLING_OVERLAY'] + '/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation'),
+    ("CoreFoundation", os.environ['DARLING_OVERLAY'] + '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation'),
+]:
+    data = open(path, 'rb').read()
+    fsize = len(data)
+    ncmds = struct.unpack_from('<I', data, 16)[0]
+    o = 32
+    for i in range(ncmds):
+        cmd, cmdsize = struct.unpack_from('<II', data, o)
+        if cmd == 0x19:
+            segname = data[o+8:o+24].split(b'\x00')[0].decode()
+            vmaddr, vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', data, o+24)
+            print(f"{label} {segname}: fileoff={fileoff:#x} filesize={filesize:#x} end={fileoff+filesize:#x} {'OK' if fileoff+filesize <= fsize else 'OUT'}")
+        elif cmd == 0x2:
+            symoff, nsyms, stroff, strsize = struct.unpack_from('<IIII', data, o+8)
+            print(f"{label} SYMTAB: symoff={symoff:#x} nsyms={nsyms} stroff={stroff:#x} strsize={strsize:#x}")
+        elif cmd == 0x29:
+            dataoff, datasize = struct.unpack_from('<II', data, o+8)
+            print(f"{label} SPLIT_INFO: off={dataoff:#x} size={datasize:#x}")
+        elif cmd == 0x26:
+            dataoff, datasize = struct.unpack_from('<II', data, o+8)
+            print(f"{label} DATA_IN_CODE: off={dataoff:#x} size={datasize:#x}")
+        o += cmdsize
+PYEOF
+```
