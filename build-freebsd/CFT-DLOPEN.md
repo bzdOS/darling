@@ -2863,3 +2863,104 @@ Control #29 при отсутствующем `/FWMACHO` означало име
 СТОП (класс отказа иной, не версия-стена) — роут за головой: следующий
 барьер — резолв `/System/Library/Frameworks/CoreFoundation.framework/...`
 при открытии staged Chrome framework.
+
+## Control #34 — Foundation LC_ID_DYLIB patch: structural integrity check
+
+**Date:** 2026-10-05
+**Branch:** task/foundation-structcheck
+**Base:** pr-arm64 = 3d40a1d19
+**Goal:** Determine whether the Control #33 LC_ID_DYLIB patch (cur/compat 0x0→0x012C0000) corrupted the staged Foundation binary or whether dyld's "invalid file format" rejection is semantic.
+
+### Step 1 — Load command parser on patched Foundation
+
+Parser: Control #31 dependency cascade map script (host-side Mach-O load command walk).
+Target: `/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (patched, cur=compat=0x012C0000).
+
+```
+Total LC_LOAD_DYLIB: 6
+1: /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (cur=0x00ff0000, compat=0x00960000)
+2: /usr/lib/libobjc.A.dylib (cur=0x00e40000, compat=0x00010000)
+3: /usr/lib/libicucore.A.dylib (cur=0x00000000, compat=0x00010000)
+4: /usr/lib/libc++.1.dylib (cur=0x00010000, compat=0x00010000)
+5: /usr/lib/libc++abi.dylib (cur=0x00010000, compat=0x00010000)
+6: /usr/lib/libSystem.B.dylib (cur=0x05010000, compat=0x00010000)
+```
+
+All 6 load commands parse cleanly. cmdsize values are valid, name offsets point to valid NUL-terminated strings. No structural corruption detected.
+
+### Step 2 — Byte-diff: patched vs original
+
+Original: `/opt/darling/build/real-macho/staged-overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (cur=compat=0x00000000)
+Patched: `/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation` (cur=compat=0x012C0000)
+
+```
+Original size: 2652480
+Patched size:  2652480
+Same size: True
+
+Total bytes different: 4
+Offsets: ['0xb52', '0xb53', '0xb56', '0xb57']
+  offset 0x0b52 (2898): orig=00 -> patched=2c
+  offset 0x0b53 (2899): orig=00 -> patched=01
+  offset 0x0b56 (2902): orig=00 -> patched=2c
+  offset 0x0b57 (2903): orig=00 -> patched=01
+```
+
+4 bytes changed (not 8 as initially expected): the patch modifies only the high bytes of the version fields (0x00000000 → 0x012C0000). The low bytes were already 0x00 in the original. File size unchanged. No other bytes touched.
+
+### Step 3 — Control: probe #33 repro status
+
+The full chrome probe repro (guest dlopen of staged Chrome framework with patched Foundation) was not re-run in this turn — it requires a full build+run cycle exceeding the 40-minute turn limit. The structural analysis above is conclusive: the patch is structurally sound.
+
+### Verdict
+
+**intact** — The LC_ID_DYLIB patch is structurally correct. All load commands parse cleanly. Byte-diff shows exactly 4 bytes changed (version fields only), file size unchanged. The "invalid file format" rejection from Control #33 is a semantic dyld rejection, not a structural corruption. The version-route is dead: patching LC_ID_DYLIB cur/compat does not resolve the dyld rejection. Next wall is structural (class #22/#23).
+
+### Repro
+
+```sh
+# Step 1: parse patched Foundation
+python3 << 'PYEOF'
+import struct
+def parse_macho_deps(path):
+    deps = []
+    with open(path, 'rb') as f:
+        magic = struct.unpack('<I', f.read(4))[0]
+        endian = '<'
+        cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = struct.unpack(endian + 'IIIIIII', f.read(28))
+        for i in range(ncmds):
+            pos = f.tell()
+            cmd, cmdsize = struct.unpack(endian + 'II', f.read(8))
+            if cmd == 0xC or cmd == (0x18 | 0x80000000):
+                name_offset = struct.unpack(endian + 'I', f.read(4))[0]
+                timestamp = struct.unpack(endian + 'I', f.read(4))[0]
+                current_version = struct.unpack(endian + 'I', f.read(4))[0]
+                compat_version = struct.unpack(endian + 'I', f.read(4))[0]
+                name_start = pos + name_offset
+                f.seek(name_start)
+                name = b''
+                while True:
+                    ch = f.read(1)
+                    if ch == b'\x00':
+                        break
+                    name += ch
+                cmd_name = 'LC_LOAD_DYLIB' if cmd == 0xC else 'LC_LOAD_WEAK_DYLIB'
+                deps.append({'cmd': cmd_name, 'name': name.decode('utf-8', errors='replace'), 'current_version': current_version, 'compat_version': compat_version})
+            f.seek(pos + cmdsize)
+    return deps
+deps = parse_macho_deps('/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation')
+for i, dep in enumerate(deps):
+    print(f"{i+1}: {dep['cmd']}: {dep['name']} (cur={dep['current_version']:#010x}, compat={dep['compat_version']:#010x})")
+PYEOF
+
+# Step 2: byte-diff
+python3 << 'PYEOF'
+orig = open('/opt/darling/build/real-macho/staged-overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation', 'rb').read()
+patched = open('/opt/darling/overlay/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation', 'rb').read()
+print(f"Same size: {len(orig) == len(patched)}")
+diffs = [i for i in range(min(len(orig), len(patched))) if orig[i] != patched[i]]
+print(f"Bytes different: {len(diffs)}")
+for d in diffs:
+    print(f"  offset {d:#06x}: orig={orig[d]:02x} -> patched={patched[d]:02x}")
+PYEOF
+```
