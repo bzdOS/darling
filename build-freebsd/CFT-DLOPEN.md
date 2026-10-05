@@ -3366,3 +3366,67 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-39.log 2>&1
 grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-39.log
 ```
+
+## Control #40 — CoreServices.framework staged, next wall CFNetwork
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-coreservices
+**Base:** pr-arm64 = e73e4ba68
+**Goal:** Stage CoreServices.framework into the probe's staging trees (verdict #39 = next-in-chain after ApplicationServices), re-run the Chrome framework probe, and capture the next rejection or a load signal.
+
+### Step 0 — Staging + probe execution (no rebuild)
+
+CoreServices.framework added to staging trees (minimal, from overlay `/System/Library/Frameworks/CoreServices.framework`):
+
+```
+DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework
+```
+
+Probe executed: `launch-dynamic` with `DARLING_TEST_BINARY=cft-fwmacho-probe-macho` on current overlay. Log: `/tmp/foundation-probe-40.log` (24372 lines).
+
+Staging evidence (CoreServices.framework staged and mapped):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreServices.framework: 2 found, 2 created, 0 failed
+staging:   System/Library/Frameworks/CoreServices.framework: 3 directories opened, 5 entries read, 0 open failures
+```
+
+### Step 1 — CoreServices.framework loaded (wall #39 cleared)
+
+Verbatim from log:
+
+```
+dyld: Mapping /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+dyld: loaded: <4C4C4448-5555-3144-A13D-7FD0F4ACC49B> /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+```
+
+CoreServices.framework loaded successfully. The Chrome framework's dependency chain advanced past CoreServices.
+
+### Step 2 — Next rejection (verbatim from log)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork
+  Referenced from: /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+  Reason: image not found
+```
+
+The rejection moved from CoreServices.framework (wall #39, now cleared) to CFNetwork.framework — same shape, next dependency in the chain.
+
+### Step 3 — Emission site
+
+Same emission site as #37–#39: `src/external/dyld/src/ImageLoader.cpp:820` — the message shape is identical, only the dependency name changed.
+
+### Verdict
+
+**staging-missing-dependency (next-in-chain)** — CoreServices.framework staged and loaded (wall #39 cleared). The Chrome framework now fails at CFNetwork.framework, missing from the staging trees. The pattern from #38/#39 is confirmed a third time: each staged framework clears one wall and reveals the next dependency. Next candidate for staging: `/System/Library/Frameworks/CFNetwork.framework`.
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-40.log 2>&1
+grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-40.log
+```
