@@ -6200,3 +6200,122 @@ someone locked the global and did not unlock it (or locked it on another thread)
 llvm-otool -l "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework | grep -A6 'sectname __common'
 # RIP-relative scan of __text for 0x100667a0 / 0x100667a8 (12 sites above)
 ```
+
+## Control #70 — re-entry path for the global lock at Chrome fw+0x100667a0
+
+**Date:** 2026-10-05
+**Branch:** task/lock-reentry-path
+**Base:** pr-arm64 = e7f333c34081f56ff9df858a82ea1fee2d5d755d
+**Goal:** name the re-entry that produced __os_unfair_lock_recursive_abort (#65):
+the same thread takes the global lock a second time. Static, x86_64 slice.
+
+### Accessor boundaries
+
+Both accessors take the lock at Chrome fw+0x100667a0 and call the lock method
+0x161ce0.
+
+Accessor A — `0x8eee10`-`0x8eee88` (plus its cold blocks `0x8eee89`-`0x8eeeeb`):
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eee90 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  8eee10: 55                pushq %rbp
+  8eee11: 48 89 e5          movq  %rsp, %rbp
+  8eee14: 53                pushq %rbx
+  8eee15: 50                pushq %rax
+  8eee16: 48 8d 3d 83 79 77 0f  leaq 0x100667a0(%rip), %rdi
+  8eee1d: e8 e0 01 2d 0d    callq 0xdbbf002        ; trylock
+  8eee22: 84 c0             testb %al, %al
+  8eee24: 0f 84 b5 00 00 00  je    0x8eeedf         ; -> blocking lock
+  8eee2a: 80 3d 73 79 77 0f 01  cmpb $1, 0x100667a4 ; flag
+  8eee31: 75 56             jne   0x8eee89         ; -> init
+  8eee33: 48 8b 05 76 79 77 0f  movq 0x100667b0(%rip), %rax
+  8eee3a: 48 8d 3d 5f 79 77 0f  leaq 0x100667a0(%rip), %rdi
+  8eee41: 48 8b 0d 60 79 77 0f  movq 0x100667a8(%rip), %rcx
+  8eee48: 48 89 05 59 79 77 0f  movq %rax, 0x100667a8(%rip)
+  ... xorshift on 0x100667b0 ...
+  8eee7b: e8 7c 01 2d 0d    callq 0xdbbeffc        ; unlock (tail)
+  8eee80: 89 d8             movl  %ebx, %eax
+  8eee82: 48 83 c4 08       addq  $0x8, %rsp
+  8eee86: 5b                popq  %rbx
+  8eee87: 5d                popq  %rbp
+  8eee88: c3                retq
+  8eee89: 0f 57 c0          xorps %xmm0, %xmm0     ; init: zero + publish
+  8eee8c: 0f 11 05 ...       movups %xmm0, 0x100667a8(%rip)
+  8eeea3: e8 4e 04 2d 0d    callq 0xdbbf2f6
+  8eeec6: e8 2b 04 2d 0d    callq 0xdbbf2f6
+  8eeed3: c6 05 ... 01       movb  $1, 0x100667a4(%rip)  ; set flag
+  8eeeda: e9 5b ff ff ff    jmp   0x8eee3a
+  8eeedf: 48 8d 3d ba 78 77 0f  leaq 0x100667a0(%rip), %rdi
+  8eeee6: e8 f5 2d 87 ff    callq 0x161ce0         ; blocking lock
+  8eeeeb: e9 3a ff ff ff    jmp   0x8eee2a
+```
+
+Accessor B — `0x95d44c0`-`0x95d451d`:
+
+```
+$ llvm-objdump -d --start-address=0x95d44c0 --stop-address=0x95d4520 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  95d44c0: 55                pushq %rbp
+  95d44c1: 48 89 e5          movq  %rsp, %rbp
+  95d44c4: 53                pushq %rbx
+  95d44c5: 50                pushq %rax
+  95d44c6: 48 89 fb          movq  %rdi, %rbx
+  95d44c9: 48 8d 3d d0 22 a9 06  leaq 0x100667a0(%rip), %rdi
+  95d44d0: e8 2d ab 5e 04    callq 0xdbbf002        ; trylock
+  95d44d5: 84 c0             testb %al, %al
+  95d44d7: 75 0c             jne   0x95d44e5
+  95d44d9: 48 8d 3d c0 22 a9 06  leaq 0x100667a0(%rip), %rdi
+  95d44e0: e8 fb d7 b8 f6    callq 0x161ce0         ; blocking lock
+  95d44e5: 80 3d b8 22 a9 06 00  cmpb $0, 0x100667a4(%rip)
+  95d44ec: 75 13             jne   0x95d4501
+  95d44ee: 48 8d 3d b3 22 a9 06  leaq 0x100667a8(%rip), %rdi
+  95d44f5: e8 26 8b 07 f7    callq 0x64d020         ; init
+  95d44fa: c6 05 ... 01       movb  $1, 0x100667a4(%rip)
+  95d4501: 48 8d 3d a0 22 a9 06  leaq 0x100667a8(%rip), %rdi
+  95d4508: 48 89 de          movq  %rbx, %rsi
+  95d450b: e8 90 ff ff ff    callq 0x95d44a0        ; work
+  95d4510: 48 8d 3d 89 22 a9 06  leaq 0x100667a0(%rip), %rdi
+  95d4517: 48 83 c4 08       addq  $0x8, %rsp
+  95d451b: 5b                popq  %rbx
+  95d451c: 5d                popq  %rbp
+  95d451d: e9 da aa 5e 04    jmp   0xdbbeffc         ; unlock (tail)
+```
+
+### callq sites inside accessor A's locked region
+
+Lock is taken at 0x8eee1d (trylock) or 0x8eeee6 (blocking); released at 0x8eee7b.
+Between them:
+
+| site | target | what |
+|---|---|---|
+| 0x8eeea3 | 0xdbbf2f6 | init stub (first) |
+| 0x8eeec6 | 0xdbbf2f6 | init stub (second) |
+| 0x8eee7b | 0xdbbeffc | unlock |
+
+Accessor B's locked region (0x95d44d0/0x95d44e0 → 0x95d451d) calls 0x64d020 (init)
+at 0x95d44f5 and 0x95d44a0 (a trivial setter) at 0x95d450b.
+
+### Verdict — honest miss
+
+No call inside either locked region is statically resolvable to a re-entry:
+the only calls that can run arbitrary guest code under the lock are the init
+stubs 0xdbbf2f6 (A) and 0x64d020 (B) and the work 0x95d44a0 (B, a 3-instruction
+setter). None is a direct call back to 0x8eee10 / 0x95d44c0 in the slice, and
+the init stubs have no symbols (Chrome fw is stripped), so a re-entry through a
+callback/registration inside an init stub cannot be proven from static bytes.
+
+The most likely shape is still an outer holder re-entering: A or B is called
+again while this thread already holds the lock, and the second acquire — the
+blocking lock 0x161ce0 at 0x8eeee6 (A) / 0x95d44e0 (B) — hits
+__os_unfair_lock_recursive_abort. That is consistent with the #65 stack
+(libsystem_platform → 0x161e42 → 0x8eeeeb).
+
+One runtime step to close it: at the blocking-lock sites (0x8eeee6 / 0x95d44e0),
+record the caller's return address and the thread id of the first acquirer, then
+on the recursive abort print both. That names the outer holder directly.
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eee90 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+llvm-objdump -d --start-address=0x95d44c0 --stop-address=0x95d4520 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+```
