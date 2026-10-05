@@ -6124,3 +6124,79 @@ successfully (ok=1111), which already contradicted "unmapped".
 llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161cf5 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
 llvm-objdump -d --start-address=0x8eee80 --stop-address=0x8eef00 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
 ```
+
+## Control #69 — passport of the global at Chrome fw+0x100667a0
+
+**Date:** 2026-10-05
+**Branch:** task/global-lock-census
+**Base:** pr-arm64 = 6f1924387bd0fe1d683028cb3f11e018d6959464
+**Goal:** is the crash lock word 0x307 a real owner or garbage in a not-yet-
+initialised global? Static only (x86_64 slice of Chrome fw).
+
+### Section and size
+
+`llvm-objdump -h` / `llvm-otool -l`:
+
+```
+$ llvm-otool -l "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework | grep -A6 'sectname __common'
+  sectname __common
+   segname __DATA
+      addr 0x00000000100418c0
+      size 0x00000000000dbd00
+    offset 0
+```
+
+The global at `0x100667a0` is `__common + 0x24ee0` — in the `__DATA` segment's
+**BSS** (`__common`, addr 0x100418c0, size 0xdbd00). `offset 0` with no file
+bytes: it is zero-fill, so the **file word is 0**.
+
+The object spans at least `0x100667a0`-`0x100667b8` (24 bytes): the code writes
+the lock word at +0x0, a flag byte at +0x4, and 16 bytes of zero at +0x8.
+
+### Cross-references (RIP-relative scan of __text)
+
+Scanning `__text` (vaddr 0x2840, size 0xdbbc720) for disp32 resolving to
+0x100667a0 / 0x100667a8 — 12 sites:
+
+| insn | bytes | target |
+|---|---|---|
+| 0x8eee16 | 48 8d 3d | 0x100667a0 |
+| 0x8eee3a | 48 8d 3d | 0x100667a0 |
+| 0x8eee41 | 48 8b 0d | 0x100667a8 |
+| 0x8eee48 | 48 89 05 | 0x100667a8 |
+| 0x8eee8c | 0f 11 05 | 0x100667a8 |
+| 0x8eeeb3 | 48 89 05 | 0x100667a8 |
+| 0x8eeedf | 48 8d 3d | 0x100667a0 |
+| 0x95d44c9 | 48 8d 3d | 0x100667a0 |
+| 0x95d44d9 | 48 8d 3d | 0x100667a0 |
+| 0x95d44ee | 48 8d 3d | 0x100667a8 |
+| 0x95d4501 | 48 8d 3d | 0x100667a8 |
+| 0x95d4510 | 48 8d 3d | 0x100667a0 |
+
+Grouped: 0x8eee16-0x8eeeb3 is the lazy-init (zero + publish + flag, all writes to
++0x8), 0x8eeedf is the #68 caller, and 0x95d44c9-0x95d4510 is a second function
+that also takes `&global` (leaq into rdi) — the singleton's accessors. No site
+writes the lock word at +0x0 directly.
+
+### File vs runtime
+
+```
+file (__common, BSS): 0x00000000   (offset 0 — zero-fill)
+runtime (#67):        0x0000000307  (first 4 bytes of the lock word)
+```
+
+### Verdict
+
+The word is **not** uninitialised garbage: BSS guarantees 0 at load, so 0x307 was
+written at runtime. No xref writes +0x0, so the writer is `os_unfair_lock_lock`
+itself, invoked on `&global` — the lock-taking method at 0x161ce0, reached from
+0x8eeedf and 0x95d44c9-0x95d4510. **Named writer candidate (inferred):** the
+singleton's lock method at Chrome fw+0x161ce0. So 0x307 is a real lock owner —
+someone locked the global and did not unlock it (or locked it on another thread).
+
+### Repro
+
+```sh
+llvm-otool -l "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework | grep -A6 'sectname __common'
+# RIP-relative scan of __text for 0x100667a0 / 0x100667a8 (12 sites above)
+```
