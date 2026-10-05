@@ -4986,3 +4986,61 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-54-2.log 2>&1
 grep -c "Library not loaded: /System/Library/Frameworks/IOKit.framework" /tmp/foundation-probe-54-2.log
 ```
+
+## Control #55 — синтез стаба CoreText.framework (стена снята)
+
+**Date:** 2026-10-05
+**Branch:** task/coretext-fw
+**Base:** pr-arm64 = 9f700b92f
+**Goal:** Synthesize CoreText.framework stub to clear the wall from 54-2 (Chrome fw: Library not loaded: CoreText.framework).
+
+### Mechanism
+
+Синтез стаб-dylib по прецеденту IOKit (#54): 56 символов которые AppKit и Chrome fw импортируют из CoreText (замер `llvm-nm -u` по AppKit + Chrome fw, фильтр `^_CT`):
+
+```
+_CTFontCopyFullName, _CTFontCreatePathForGlyph, _CTFontCreateUIFontForLanguage,
+_CTFontCreateWithGraphicsFont, _CTFontGetAdvancesForGlyphs, _CTFontGetAscent,
+_CTFontGetBoundingBox, _CTFontGetCapHeight, _CTFontGetDescent, _CTFontGetGlyphCount,
+_CTFontGetGlyphsForCharacters, _CTFontGetLeading, _CTFontGetSize, _CTFontGetSlantAngle,
+_CTFontGetUnderlinePosition, _CTFontGetUnderlineThickness, _CTFontGetXHeight,
+_CTFontCollectionCreateFromAvailableFonts, _CTFontCollectionCreateMatchingFontDescriptors, ... (56 total)
+```
+
+Стаб собран как thin x86_64 dylib с install_name `/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText`, каждый символ = `xor %eax,%eax; ret` (нулевой возврат). Застейджен в `$DARLING_OVERLAY/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText` и добавлен в `DARLING_STAGING_TREES`.
+
+### nm before/after
+
+Before (overlay):
+```
+$ ls "$DARLING_OVERLAY"/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText
+ls: /System/Library/Frameworks/CoreText.framework/Versions/A/CoreText: No such file or directory
+```
+
+After (overlay):
+```
+$ llvm-nm -gU "$DARLING_OVERLAY"/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText | wc -l
+56
+```
+
+### First new output after CoreText wall (from run 55-1)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/AppKit.framework/Versions/C/AppKit
+  Reason: image not found
+```
+
+### Verdict
+
+**success** — CoreText.framework стаб синтезирован и застейджен; стена CoreText снята (0 хитов "Library not loaded: /System/Library/Frameworks/CoreText.framework" в 27270-строчном логе); следующая стена — AppKit.framework (staging-missing-dependency).
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=$DARLING_TEST_BINARY DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_BIND_AT_LAUNCH=1 DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-55-1.log 2>&1
+grep -c "Library not loaded: /System/Library/Frameworks/CoreText.framework" /tmp/foundation-probe-55-1.log
+```
