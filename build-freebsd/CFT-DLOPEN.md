@@ -3179,7 +3179,7 @@ PYEOF
 **Date:** 2026-10-05
 **Branch:** task/foundationyld-cause
 **Base:** pr-arm64 = 473e55b48
-**Goal:** Capture the exact dyld rejection text from dlopen(Foundation) on the current overlay (no rebuild), find the emission site in dyld source, and cross-reference with clean fields #34–#36.
+**Goal:** Capture the exact dyld rejection text from dlopen(Google Chrome for Testing Framework) on the current overlay (no rebuild), find the emission site in dyld source, and cross-reference with clean fields #34–#36.
 
 ### Step 0 — Probe #33 execution (no rebuild)
 
@@ -3193,7 +3193,14 @@ dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.
   Reason: image not found
 ```
 
-The rejection is NOT "invalid file format" — it is "Library not loaded: Security.framework, Reason: image not found". The Chrome framework loaded Foundation successfully (version patch worked), but failed at the next dependency: Security.framework is missing from the staging trees.
+The rejection is NOT "invalid file format" — it is "Library not loaded: Security.framework, Reason: image not found". The Chrome framework's dependency on Security.framework failed because Security.framework is missing from the staging trees.
+
+DYLD_PRINT_LIBRARIES evidence (Foundation loaded before Security failure):
+
+```
+dyld: loaded: <4C4C44CD-5555-3144-A11D-E848A43B5CB2> /usr/lib/CoreFoundationExtras.dylib
+dyld: loaded: <4C4C4402-5555-3144-A195-F60D85585054> /usr/lib/FoundationExtras.dylib
+```
 
 ### Step 1 — Emission site in dyld source
 
@@ -3211,11 +3218,16 @@ Condition: emitted when a required dependency cannot be loaded. The `msg` field 
 - #35: No code signature, no chained fixups, no exports trie — LC_DYLD_INFO_ONLY fields all inside __LINKEDIT
 - #36: All bounds valid — LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB, LC_SEGMENT_SPLIT_INFO, LC_DATA_IN_CODE all within file bounds
 
-The rejection is NOT caused by any structural field. The Chrome framework loaded Foundation (version patch worked), but Security.framework is missing from the staging trees. This is a staging issue, not a dyld validation issue.
+The rejection is NOT caused by any structural field. The Chrome framework's dependency on Security.framework failed because Security.framework is missing from the staging trees. This is a staging issue, not a dyld validation issue.
+
+### Two walls distinguished
+
+- **Wall #33 (OPEN):** dlopen(Foundation) → "invalid file format". This wall is NOT resolved by the version patch. The exact code path and condition are still unknown.
+- **Wall #37 (MEASURED):** dlopen(Google Chrome for Testing Framework) → "Library not loaded: Security.framework, Reason: image not found". This is a staging issue: Security.framework is not in the staging trees. The Chrome framework loaded FoundationExtras and CoreFoundationExtras (DYLD_PRINT_LIBRARIES evidence above), but failed at Security.framework.
 
 ### Verdict
 
-**staging-missing-dependency** — The dyld rejection is "Library not loaded: Security.framework, Reason: image not found". Foundation loaded successfully (version patch worked). The next dependency (Security.framework) is missing from the staging trees. This is a staging issue, not a structural dyld rejection. The "invalid file format" from Control #33 was likely a different code path or a transient state.
+**staging-missing-dependency** — The dyld rejection is "Library not loaded: Security.framework, Reason: image not found". The Chrome framework's dependency on Security.framework failed because Security.framework is missing from the staging trees. This is a staging issue, not a structural dyld rejection. Wall #33 (dlopen Foundation → invalid file format) remains OPEN and is a separate issue.
 
 ### Repro
 
