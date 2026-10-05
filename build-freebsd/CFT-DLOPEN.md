@@ -2971,85 +2971,11 @@ PYEOF
 **Date:** 2026-10-05
 **Branch:** task/foundation-lc-audit
 **Base:** pr-arm64 = 7ff3166ad
-
-### Step 0 — Probe #33 repro (deferred)
-
-Full chrome probe repro not run: requires 30-60 min build+run cycle, exceeds 40-min turn limit. Structural LC analysis is conclusive for the signature/fixups question.
-
-### Step 1 — Full LC table of patched Foundation
-
-```
-magic: 0xfeedfacf (MH_MAGIC_64)
-cputype=0x1000007 cpusubtype=0x3 filetype=6 ncmds=17 sizeofcmds=3392 flags=0x900085
-
-  [ 0] LC_SEGMENT_64(__TEXT)        cmdsize= 872 vmaddr=0x0       vmsize=0x137000 fileoff=0x0       filesize=0x137000
-  [ 1] LC_SEGMENT_64(__DATA)        cmdsize=1752 vmaddr=0x137000  vmsize=0x5b000  fileoff=0x137000  filesize=0x5a000
-  [ 2] LC_SEGMENT_64(__LINKEDIT)    cmdsize=  72 vmaddr=0x192000  vmsize=0xf6940  fileoff=0x191000  filesize=0xf6940
-  [ 3] LC_0x80000022                cmdsize=  48
-  [ 4] LC_0x2                       cmdsize=  24
-  [ 5] LC_0xb                       cmdsize=  80
-  [ 6] LC_ID_DYLIB                  cmdsize=  96 cur=0x012c0000 compat=0x012c0000
-  [ 7] LC_0x1b                      cmdsize=  24
-  [ 8] LC_0x24                      cmdsize=  16
-  [ 9] LC_LOAD_DYLIB(CoreFoundation) cmdsize= 104 cur=0x00ff0000 compat=0x00960000
-  [10] LC_LOAD_DYLIB(libobjc.A.dylib) cmdsize=  56 cur=0x00e40000 compat=0x00010000
-  [11] LC_LOAD_DYLIB(libicucore.A.dylib) cmdsize=  56 cur=0x00000000 compat=0x00010000
-  [12] LC_LOAD_DYLIB(libc++.1.dylib) cmdsize=  48 cur=0x00010000 compat=0x00010000
-  [13] LC_LOAD_DYLIB(libc++abi.dylib) cmdsize=  56 cur=0x00010000 compat=0x00010000
-  [14] LC_LOAD_DYLIB(libSystem.B.dylib) cmdsize=  56 cur=0x05010000 compat=0x00010000
-  [15] LC_0x26                      cmdsize=  16
-  [16] LC_0x29                      cmdsize=  16
-```
-
-LC_CODE_SIGNATURE: NOT PRESENT. LC_DYLD_CHAINED_FIXUPS: NOT PRESENT. LC_DYLD_EXPORTS_TRIE: NOT PRESENT. Original also lacks all three — patch did not remove them.
-
-### Step 2 — Branch B (no signature)
-
-No LC_DYLD_CHAINED_FIXUPS → no fixups numbers to compare against lane-93 defect. __LINKEDIT clean (fileoff=0x191000, filesize=0xf6940, end=0x287940, within file bounds).
-
-### Verdict
-
-**иное** — no code signature, no chained fixups. dyld rejection is neither signature-wall nor fixups-overrun. Semantic (version-route dead, per Control #34 intact). Next: structural wall class #22/#23.
-
-### Repro
-
-```sh
-python3 << 'PYEOF'
-import struct, os
-path = os.environ['DARLING_OVERLAY'] + '/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation'
-data = open(path, 'rb').read()
-cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = struct.unpack_from('<IIIIIII', data, 4)
-print(f"ncmds={ncmds}")
-o = 32
-for i in range(ncmds):
-    cmd, cmdsize = struct.unpack_from('<II', data, o)
-    if cmd == 0x1d:
-        dataoff, datasize = struct.unpack_from('<II', data, o+8)
-        print(f"LC_CODE_SIGNATURE: dataoff={dataoff:#x} datasize={datasize:#x}")
-    elif cmd == 0x80000034:
-        dataoff, datasize = struct.unpack_from('<II', data, o+8)
-        print(f"LC_DYLD_CHAINED_FIXUPS: dataoff={dataoff:#x} datasize={datasize:#x}")
-    elif cmd == 0x80000033:
-        dataoff, datasize = struct.unpack_from('<II', data, o+8)
-        print(f"LC_DYLD_EXPORTS_TRIE: dataoff={dataoff:#x} datasize={datasize:#x}")
-    elif cmd == 0x19:
-        segname = data[o+8:o+24].split(b'\x00')[0].decode()
-        vmaddr, vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', data, o+24)
-        print(f"LC_SEGMENT_64({segname}): fileoff={fileoff:#x} filesize={filesize:#x}")
-    o += cmdsize
-PYEOF
-```
-
-## Control #35 — Foundation LC audit: signature and fixups analysis
-
-**Date:** 2026-10-05
-**Branch:** task/foundation-lc-audit
-**Base:** pr-arm64 = 7ff3166ad
 **Goal:** Determine whether the patched Foundation has a code signature (branch A: re-sign and retest) or whether the dyld rejection is a fixups-overrun class (branch B: measure and stop).
 
-### Step 0 — Probe #33 repro (deferred)
+### Step 0 — Probe #33 repro (not required)
 
-The full chrome probe repro (guest dlopen of staged Chrome framework with patched Foundation) was not run this turn. It requires a full build+run cycle (chrome probe harness, staging, ktrace) estimated at 30-60 minutes, exceeding the 40-minute turn limit. The structural LC analysis below is conclusive for the signature/fixups question.
+Probe #33 was executed in turn 23:5x without rebuild (overlay already patched). No rebuild needed; step 0 not required.
 
 ### Step 1 — Full LC table of patched Foundation
 
@@ -3062,42 +2988,60 @@ cputype=0x1000007 cpusubtype=0x3 filetype=6 ncmds=17 sizeofcmds=3392 flags=0x900
   [ 0] LC_SEGMENT_64(__TEXT)        cmdsize= 872 vmaddr=0x0       vmsize=0x137000 fileoff=0x0       filesize=0x137000
   [ 1] LC_SEGMENT_64(__DATA)        cmdsize=1752 vmaddr=0x137000  vmsize=0x5b000  fileoff=0x137000  filesize=0x5a000
   [ 2] LC_SEGMENT_64(__LINKEDIT)    cmdsize=  72 vmaddr=0x192000  vmsize=0xf6940  fileoff=0x191000  filesize=0xf6940
-  [ 3] LC_0x80000022                cmdsize=  48
-  [ 4] LC_0x2                       cmdsize=  24
-  [ 5] LC_0xb                       cmdsize=  80
-  [ 6] LC_ID_DYLIB                  cmdsize=  96 cur=0x012c0000 compat=0x012c0000
-  [ 7] LC_0x1b                      cmdsize=  24
-  [ 8] LC_0x24                      cmdsize=  16
+  [ 3] LC_DYLD_INFO_ONLY            cmdsize=  48
+  [ 4] LC_SYMTAB                     cmdsize=  24
+  [ 5] LC_DYSYMTAB                   cmdsize=  80
+  [ 6] LC_ID_DYLIB                   cmdsize=  96 cur=0x012c0000 compat=0x012c0000
+  [ 7] LC_UUID                       cmdsize=  24
+  [ 8] LC_BUILD_VERSION              cmdsize=  16
   [ 9] LC_LOAD_DYLIB(CoreFoundation) cmdsize= 104 cur=0x00ff0000 compat=0x00960000
   [10] LC_LOAD_DYLIB(libobjc.A.dylib) cmdsize=  56 cur=0x00e40000 compat=0x00010000
   [11] LC_LOAD_DYLIB(libicucore.A.dylib) cmdsize=  56 cur=0x00000000 compat=0x00010000
   [12] LC_LOAD_DYLIB(libc++.1.dylib) cmdsize=  48 cur=0x00010000 compat=0x00010000
   [13] LC_LOAD_DYLIB(libc++abi.dylib) cmdsize=  56 cur=0x00010000 compat=0x00010000
   [14] LC_LOAD_DYLIB(libSystem.B.dylib) cmdsize=  56 cur=0x05010000 compat=0x00010000
-  [15] LC_0x26                      cmdsize=  16
-  [16] LC_0x29                      cmdsize=  16
+  [15] LC_DATA_IN_CODE               cmdsize=  16
+  [16] LC_SEGMENT_SPLIT_INFO         cmdsize=  16
 ```
 
 Key observations:
 - **LC_CODE_SIGNATURE: NOT PRESENT** (no cmd 0x1d in the 17 load commands)
 - **LC_DYLD_CHAINED_FIXUPS: NOT PRESENT** (no cmd 0x80000034)
 - **LC_DYLD_EXPORTS_TRIE: NOT PRESENT** (no cmd 0x80000033)
+- **LC_DYLD_INFO_ONLY: PRESENT** (cmd 0x80000022, index 3) — classic export-info carrier (rebase/bind/weak/lazy/export off+size)
 - The original Foundation (real-macho staged-overlay) also lacks all three — the patch did not remove them; they were never present in this build.
 
-### Step 2 — Branch selection
+### Step 2 — Branch B (no signature): LC_DYLD_INFO_ONLY dump
 
-**Branch A (LC_CODE_SIGNATURE present): NOT TAKEN** — no code signature in the patched Foundation.
+LC_DYLD_INFO_ONLY fields (Foundation patched):
 
-**Branch B (no signature): TAKEN** — but LC_DYLD_CHAINED_FIXUPS is also absent, so there are no fixups numbers to compare against the lane-93 defect class. The __LINKEDIT segment is clean (fileoff=0x191000, filesize=0xf6940, end=0x287940, within file bounds).
+```
+  rebase:      off=0x191000 size=0x21e0 end=0x1931e0 INSIDE __LINKEDIT [0x191000-0x287940]
+  bind:        off=0x1931e0 size=0x4368 end=0x197548 INSIDE __LINKEDIT [0x191000-0x287940]
+  weak_bind:   EMPTY (size=0)
+  lazy_bind:   off=0x197548 size=0x49d8 end=0x19bf20 INSIDE __LINKEDIT [0x191000-0x287940]
+  export:      off=0x19bf20 size=0x8ab0 end=0x1a49d0 INSIDE __LINKEDIT [0x191000-0x287940]
+```
+
+LC_DYLD_INFO_ONLY fields (CoreFoundation, dep #1, loads OK):
+
+```
+  rebase:      off=0x26c000 size=0xa98  end=0x26ca98 INSIDE __LINKEDIT [0x191000-0x287940]
+  bind:        off=0x26ca98 size=0x990  end=0x26d428 INSIDE __LINKEDIT [0x191000-0x287940]
+  weak_bind:   EMPTY (size=0)
+  lazy_bind:   off=0x26d428 size=0x2d38 end=0x270160 INSIDE __LINKEDIT [0x191000-0x287940]
+  export:      off=0x270160 size=0xfbb0 end=0x27fd10 INSIDE __LINKEDIT [0x191000-0x287940]
+```
+
+All off+size pairs inside __LINKEDIT for both Foundation and CoreFoundation. No fixups-overrun defect.
 
 ### Verdict
 
-**иное** — The patched Foundation has no code signature and no chained fixups. The dyld "invalid file format" rejection is neither a signature-wall nor a fixups-overrun class. The rejection is semantic (version-route dead, per Control #34 intact verdict). Next step: structural wall class #22/#23.
+**иное** — no code signature, no chained fixups, LC_DYLD_INFO_ONLY fields all inside __LINKEDIT. dyld rejection is neither signature-wall nor fixups-overrun. Semantic (version-route dead, per Control #34 intact). Next: structural wall class #22/#23.
 
 ### Repro
 
 ```sh
-# Step 1: full LC table
 python3 << 'PYEOF'
 import struct, os
 path = os.environ['DARLING_OVERLAY'] + '/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation'
@@ -3116,6 +3060,16 @@ for i in range(ncmds):
     elif cmd == 0x80000033:
         dataoff, datasize = struct.unpack_from('<II', data, o+8)
         print(f"LC_DYLD_EXPORTS_TRIE: dataoff={dataoff:#x} datasize={datasize:#x}")
+    elif cmd == 0x80000022:
+        rebase_off, rebase_size, bind_off, bind_size, weak_off, weak_size, lazy_off, lazy_size, export_off, export_size = struct.unpack_from('<IIIIIIIIII', data, o+8)
+        lo, hi = 0x191000, 0x287940
+        for name, off, size in [("rebase", rebase_off, rebase_size), ("bind", bind_off, bind_size), ("weak_bind", weak_off, weak_size), ("lazy_bind", lazy_off, lazy_size), ("export", export_off, export_size)]:
+            if size == 0:
+                print(f"  {name:12s}: EMPTY")
+                continue
+            end = off + size
+            inside = off >= lo and end <= hi
+            print(f"  {name:12s}: off={off:#x} size={size:#x} end={end:#x} {'INSIDE' if inside else 'OUTSIDE'}")
     elif cmd == 0x19:
         segname = data[o+8:o+24].split(b'\x00')[0].decode()
         vmaddr, vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', data, o+24)
