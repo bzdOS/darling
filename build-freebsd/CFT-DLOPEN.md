@@ -6054,3 +6054,73 @@ sh build-freebsd/build-mldr-only.sh
 grep -n 'lock word' /tmp/iokit-probe-67-1.log
 llvm-objdump -d --start-address=0x8230 --stop-address=0x8240 "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib
 ```
+
+## Control #68 — provenance of the lock pointer: it is a global, not a heap object
+
+**Date:** 2026-10-05
+**Branch:** task/lockword-provenance
+**Base:** pr-arm64 = 527cf01fd762715615c2f66aa1290d233bc4491c
+**Goal:** continue the #66/#67 trace one level up — find the caller of the
+function at 0x161ce0 (whose arg1 is the lock) and where its rdi comes from.
+
+### The function's arg1 is the lock
+
+```
+$ llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161cf5 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  161ce0: 55                pushq %rbp
+  161ce1: 48 89 e5          movq  %rsp, %rbp
+  161cea: 53                pushq %rbx
+  161ceb: 48 89 fb          movq  %rdi, %rbx      ; rbx = arg1 (the lock)
+  161e27: 48 89 df          movq  %rbx, %rdi      ; rdi = arg1
+  161e38: be 00 00 05 00    movl  $0x50000, %esi
+  161e3d: e8 22 e8 a5 0d    callq 0xdbc0664       ; os_unfair_lock_lock_with_options
+```
+
+### The caller passes a global as rdi
+
+The guest stack from #65 puts the caller's return address at Chrome fw+0x8eeeeb.
+Disassembling there:
+
+```
+$ llvm-objdump -d --start-address=0x8eee80 --stop-address=0x8eef00 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  8eeedf: 48 8d 3d ba 78 77 0f    leaq 0xf7778ba(%rip), %rdi   ## 0x100667a0
+  8eeee6: e8 f5 2d 87 ff          callq 0x161ce0
+  8eeeeb: e9 3a ff ff ff          jmp 0x8eee2a
+```
+
+So the caller loads `rdi = Chrome fw+0x100667a0` (a `__DATA` global) and calls
+0x161ce0. The lock object is that global — **not** a heap object.
+
+The chain, one level up:
+
+```
+os_unfair_lock_lock_with_options(call +0x161e3d)
+  rdi = rbx = arg1 of 0x161ce0
+  rdi at 0x161ceb = the caller's rdi = leaq 0x100667a0(%rip) at 0x8eeedf
+  => the lock is the global at Chrome fw+0x100667a0
+```
+
+The code just before the caller (0x8eee89-0x8eeeda) is a lazy-initialisation
+guard for that global — zero a local, call a stub at 0x8eeea3, publish to
+0x100667a8 — and then 0x8eeedf takes the address of 0x100667a0 and calls the
+lock-taking method.
+
+### Owner structure
+
+The lock is the global object at `Chrome fw+0x100667a0` — a lazily-initialised
+singleton; the `os_unfair_lock` word sits at the object's start (rdi is its
+address). **Inferred** — the object has no symbol (Chrome fw is stripped).
+
+### Correction to #66
+
+#66 called rbx a heap object because the dyld segment table reported it
+UNMAPPED. It is not heap: the same address is `base + 0x100667a0`, a `__DATA`
+global — the segment table simply did not cover that page. #67 read it
+successfully (ok=1111), which already contradicted "unmapped".
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161cf5 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+llvm-objdump -d --start-address=0x8eee80 --stop-address=0x8eef00 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+```
