@@ -2584,6 +2584,19 @@ static const uint8_t SIG_SIGRETURN_TRAMP[] = {
 #define SIG_SIGRETURN_TRAMP_SYSCALL_OFF 5
 
 /*
+ * Control #65: the addresses at which patch_one_signature planted its own
+ * `ud2`. sigill_handler uses this to tell a ud2 THIS loader planted (a
+ * raw-syscall site to dispatch) from a ud2 that was already in the image — a
+ * genuine `__builtin_trap()`, e.g. libsystem_platform's os_unfair_lock /
+ * os_once abort routines, which must crash honestly rather than be dispatched
+ * as a raw syscall with a garbage rax.
+ */
+#define MLDR_MAX_UD2_SITES 64
+static uintptr_t _mldr_ud2_sites[MLDR_MAX_UD2_SITES];
+static int _mldr_ud2_site_count = 0;
+
+
+/*
  * purpose:  Find and rewrite one fixed byte signature's `syscall` opcode to
  *           `ud2` within [base, base+size).
  * input:    base/size — byte range to scan; sig/sig_len — exact bytes to
@@ -2610,6 +2623,9 @@ patch_one_signature(uint8_t *base, size_t size,
         if (memcmp(base + i, sig, sig_len) == 0) {
             base[i + syscall_off]     = 0x0f;
             base[i + syscall_off + 1] = 0x0b; /* ud2 */
+            if (_mldr_ud2_site_count < MLDR_MAX_UD2_SITES)
+                _mldr_ud2_sites[_mldr_ud2_site_count++] =
+                    (uintptr_t)(base + i + syscall_off);
             found++;
         }
     }
@@ -2904,6 +2920,10 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
 #if defined(__x86_64__)
 /* ── SIGILL handler (patched raw-Linux-syscall trampolines, #198) ─────────── */
 
+/* Control #65: the honest crash path, defined further down; sigill_handler
+ * hands a genuine (non-patched) ud2 to it. */
+static void crash_debug_handler(int signo, siginfo_t *info, void *uctx_void);
+
 /*
  * purpose:  SA_SIGINFO SIGILL handler — catches the `ud2` we wrote into
  *           dyld's raw-Linux-syscall trampolines (see
@@ -2932,8 +2952,6 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
 static void
 sigill_handler(int signo, siginfo_t *info, void *uctx_void)
 {
-    (void)info;
-
     ucontext_t *uctx = (ucontext_t *)uctx_void;
     mcontext_t *mc = &uctx->uc_mcontext;
     const uint8_t *pc = (const uint8_t *)(uintptr_t)mc->mc_rip;
@@ -2969,6 +2987,35 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                 mldr_tlogx("SIGILL RE-RAISE(trap-site)", pc, (long)i);
             sigaction(signo, &sa_dfl, NULL);
             raise(signo);
+            return;
+        }
+    }
+
+    /*
+     * Control #65: only a ud2 THIS loader planted (patch_linux_raw_syscalls)
+     * is a raw-syscall site. A ud2 that was already in the image is a genuine
+     * `__builtin_trap()` — e.g. libsystem_platform's os_unfair_lock / os_once
+     * abort routines — and must crash honestly instead of being dispatched
+     * with a garbage rax (the #64 finding).
+     */
+    {
+        int is_ours = 0;
+        for (int i = 0; i < _mldr_ud2_site_count; i++) {
+            if ((uintptr_t)mc->mc_rip == _mldr_ud2_sites[i]) {
+                is_ours = 1;
+                break;
+            }
+        }
+        if (!is_ours) {
+            char site[256];
+            mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
+            fprintf(stderr,
+                "[darling-mldr] genuine SIGILL (ud2, not a patched trampoline)"
+                " at %s rip=0x%llx rax=0x%llx\n",
+                site, (unsigned long long)mc->mc_rip,
+                (unsigned long long)mc->mc_rax);
+            fflush(stderr);
+            crash_debug_handler(signo, info, uctx);
             return;
         }
     }
