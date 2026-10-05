@@ -5731,3 +5731,85 @@ grep -n 'calling initializer function.*Google Chrome for Testing Framework' /tmp
 grep -n 'unhandled Linux syscall' /tmp/iokit-probe-62-1.log | tail -6
 grep -n 'no known raw-syscall trampoline signature matched' /tmp/iokit-probe-62-1.log | grep 253374464
 ```
+
+## Control #64 — naming the raw-syscall sites: they are ud2 aborts in libsystem_platform, not a trampoline
+
+**Date:** 2026-10-05
+**Branch:** task/mldr-rawtrap-rip
+**Base:** pr-arm64 = ac8ead44da7260bdc7f49ae0ace34167be7324af
+**Goal:** name the guest sites of the unhandled raw syscalls #63 found in Chrome's
+initializer, so patch_linux_raw_syscalls can be judged against real sites.
+
+### Patch: mldr prints the site of every unhandled raw syscall
+
+`src/startup/mldr/freebsd_syscall_trap.c`, `dispatch_linux_syscall`'s default
+branch: after the existing "unhandled Linux syscall %u — ENOSYS" line, print
+`at <image>+0x<off> rip=0x… rax=0x…` via `mldr_describe_addr(mc->mc_rip, …)`.
+Capped at 32 sites so a loop cannot flood the log.
+
+```
+$ sh build-freebsd/build-mldr-only.sh
+# rebuilds and installs to $DARLING_BUILD_DIR/dserver/mldr-real/mldr
+$ # then the 60-2 probe chain, new log name:
+$ timeout 180 sudo env … "$DARLING_BUILD_DIR"/launch-dynamic > /tmp/iokit-probe-63-1.log 2>&1
+```
+
+### Sites (63-1, lines 1292563-1292574)
+
+| syscall nr | image+offset | rax |
+|---|---|---|
+| 4294967287 (0xFFFFFFF7, -9) | libsystem_platform.dylib+0x8247 | 0xfffffffffffffff7 |
+| 4294967218 (0xFFFFFFB2, -78) | libsystem_platform.dylib+0x8257 | 0xffffffffffffffb2 |
+| 4294967218 | libsystem_platform.dylib+0x8267 | 0xffffffffffffffb2 |
+| 4294967218 | libsystem_platform.dylib+0x8277 | 0xffffffffffffffb2 |
+| 4294967218 | libsystem_platform.dylib+0x8287 | 0xffffffffffffffb2 |
+| 4294967218 | libsystem_platform.dylib+0x8297 | 0xffffffffffffffb2 |
+
+The expectation was Chrome fw+0x…; the sites are in **libsystem_platform.dylib**,
+not Chrome fw.
+
+### Bytes at each rip
+
+```
+$ llvm-objdump -d --start-address=0x8230 --stop-address=0x82b0 "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib
+    8230: 55              pushq %rbp
+    8231: 48 89 e5        movq  %rsp, %rbp
+    8234: 89 7d fc        movl  %edi, -0x4(%rbp)
+    8237: 0f 0b           ud2
+__os_unfair_lock_unowned_abort:
+    8240: 55              pushq %rbp
+    8241: 48 89 e5        movq  %rsp, %rbp
+    8244: 89 7d fc        movl  %edi, -0x4(%rbp)
+    8247: 0f 0b           ud2            <- site 1
+__os_unfair_lock_corruption_abort:
+    8257: 0f 0b           ud2            <- site 2
+__os_once_gate_recursive_abort:
+    8267: 0f 0b           ud2            <- site 3
+__os_once_gate_unowned_abort:
+    8277: 0f 0b           ud2            <- site 4
+__os_once_gate_corruption_abort:
+    8287: 0f 0b           ud2            <- site 5
+__os_lock_recursive_abort:
+    8297: 0f 0b           ud2            <- site 6
+```
+
+Every site is `0f 0b` (`ud2`) — the `__builtin_trap()` of an os_unfair_lock /
+os_once abort routine, not a raw-Linux-syscall trampoline.
+
+### Finding / decision
+
+This is **not a trampoline**, so the signature in `patch_linux_raw_syscalls` must
+not be extended. mldr's `sigill_handler` treats *any* `ud2` as one of its own
+patched raw-syscall sites (it only checks `pc[0]==0x0f && pc[1]==0x0b`), so a
+genuine abort trap is dispatched as a raw syscall with a garbage rax (-9 / -78),
+ENOSYS is written back instead of aborting, and the guest continues with a
+corrupt lock state — which is what then jumps to the stack (63-1:1292575).
+
+### Repro
+
+```sh
+sh build-freebsd/build-mldr-only.sh
+# run the 60-2 probe chain into /tmp/iokit-probe-63-1.log
+grep -n -A1 'unhandled Linux syscall' /tmp/iokit-probe-63-1.log
+llvm-objdump -d --start-address=0x8230 --stop-address=0x82b0 "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib
+```
