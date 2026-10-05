@@ -2526,6 +2526,23 @@ dispatch_linux_syscall(unsigned int linux_nr,
     default:
         fprintf(stderr,
             "[darling-mldr] unhandled Linux syscall %u — ENOSYS\n", linux_nr);
+#if defined(__x86_64__)
+        /* Control #64: name the guest site of each unhandled raw syscall, so
+         * patch_linux_raw_syscalls can be judged against real sites. Capped so
+         * a syscall loop cannot flood the log. */
+        {
+            static int mldr_raw_site_logged = 0;
+            if (mc != NULL && mldr_raw_site_logged < 32) {
+                char site[256];
+                mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
+                fprintf(stderr,
+                    "[darling-mldr]   at %s rip=0x%llx rax=0x%llx\n",
+                    site, (unsigned long long)mc->mc_rip,
+                    (unsigned long long)mc->mc_rax);
+                mldr_raw_site_logged++;
+            }
+        }
+#endif
         /* exit-caller logging slice: name the caller of the unhandled
          * raw-Linux syscall (times(99) in the (a) window is the target) */
         if (mldr_trap_log_enabled && mldr_trap_log_handlers)
