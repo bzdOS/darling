@@ -5885,3 +5885,107 @@ grep -c 'unhandled Linux syscall' /tmp/iokit-probe-65-1.log   # 0
 grep -n 'genuine SIGILL\|FATAL signal' /tmp/iokit-probe-65-1.log | head
 llvm-nm -n "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib | awk '$1>="0000000000008220" && $1<="0000000000008260"'
 ```
+
+## Control #66 — decode of the aborting lock: the caller and the lock object
+
+**Date:** 2026-10-05
+**Branch:** task/unfairlock-site-decode
+**Base:** pr-arm64 = b4e03132adb530f5194da5b94493c07ca14f2d21
+**Goal:** name the code that reaches the aborting os_unfair_lock and the lock
+object. No new run — decoded read-only from /tmp/iokit-probe-65-1.log and the
+binaries (62-1/63-1/65-1 untouched).
+
+### Step 1 — the calling site (Chrome fw+0x161e42)
+
+`Chrome fw+0x161e42` is the return site of the `call` at `+0x161e3d`:
+
+```
+$ llvm-objdump -d --start-address=0x161e00 --stop-address=0x161e50 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  161e27: 48 89 df                movq  %rbx, %rdi
+  161e2a: 48 83 3d 5e 3b 04 0f 00  cmpq  $0x0, 0xf043b5e(%rip)   ## lazy ptr 0xf1a5990
+  161e32: 0f 84 03 01 00 00        je    0x161f3b
+  161e38: be 00 00 05 00           movl  $0x50000, %esi
+  161e3d: e8 22 e8 a5 0d           callq 0xdbc0664
+  161e42: 45 84 ff                 testb %r15b, %r15b      <- the frame
+```
+
+The call target `0xdbc0664` is a `__stubs` entry:
+
+```
+$ llvm-objdump -d --start-address=0xdbc0664 --stop-address=0xdbc066a "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  dbc0664: ff 25 26 53 5e 01   jmpq *0x15e5326(%rip)   ## 0xf1a5990
+```
+
+So the site calls `stub(0xdbc0664)`, whose lazy pointer is Chrome fw `+0xf1a5990`
+(guest 0x2cf48c95d990), with `rdi = rbx` (the lock object) and `esi = 0x50000`
+— the shape of `os_unfair_lock_lock_with_options(lock, options)`. The exact
+symbol is not readable statically (Chrome fw is chained-fixup built; no bind for
+that pointer appears in 65-1's log), so the name is inferred from the argument
+shape, not asserted.
+
+The function itself has **no local symbol**: Chrome fw is stripped, and the
+nearest exported symbol is `_ChromeMain` (0x3fe0), 1.4 MB away — not the
+function. The frame is named by offset only: `Chrome fw+0x161e42`.
+
+### Step 2 — the lock object is a heap pointer, not a __DATA global
+
+The lock is `rdi = rbx = 0x2cf49ba9a7a0`. Resolved against the dyld segment
+table it is **unmapped**:
+
+```
+$ # decode-crash segment table over the crash registers
+  0x2cf49ba9a7a0 -> UNMAPPED
+  0x2cf48c95d990 -> /Frameworks/Google Chrome for Testing Framework.framework/... +0xf29990
+```
+
+So the lock is a **heap object**, not a static `__DATA` global — there is no
+file address to read a raw word from, and the "file value of the lock word"
+question does not apply to this object. (The framework's `__DATA` does hold the
+stub's lazy pointer at +0xf1a5990, but that is the call target, not the lock.)
+
+### Step 3 — the abort function (confirmed)
+
+```
+$ llvm-nm -n "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib | awk '$1>="0000000000008220" && $1<="0000000000008260"'
+0000000000008220 T __os_lock_corruption_abort
+0000000000008230 T __os_unfair_lock_recursive_abort
+0000000000008240 T __os_unfair_lock_unowned_abort
+0000000000008250 T __os_unfair_lock_corruption_abort
+0000000000008260 T __os_once_gate_recursive_abort
+```
+
+65-1's site `+0x8237` is inside `__os_unfair_lock_recursive_abort` (function at
+0x8230, ud2 at 0x8237). Confirmed.
+
+### Step 4 — the first abort is non-deterministic (fact)
+
+The first abort the run reaches varies between runs:
+
+| run | first abort site | function |
+|---|---|---|
+| 63-1 | libsystem_platform+0x8247 | __os_unfair_lock_unowned_abort |
+| 65-1 | libsystem_platform+0x8237 | __os_unfair_lock_recursive_abort |
+
+The lock word's owner field therefore depends on **runtime state**, not on the
+load path — the same load reaches a differently-owned lock each run.
+
+### Verdict (fork)
+
+**The word was never initialized** (the heap lock word holds stale owner data),
+rather than a clean double acquisition: a double acquisition on a well-formed
+zero-initialized lock would always abort *recursive*, but 63-1 aborted
+*unowned* — the owner field held a dead thread's value. That is stale memory,
+not a re-lock of a lock this thread owns.
+
+**False-check:** read the lock word at the object (`*(uint32_t *)0x2cf49ba9a7a0`)
+at the crash. If it is 0 (a properly initialized free lock), this verdict is
+wrong and the abort must instead be a genuine recursive re-lock; if it is
+non-zero garbage/stale, the verdict holds.
+
+### Repro
+
+```sh
+grep -n 'genuine SIGILL\|FATAL signal' /tmp/iokit-probe-65-1.log | head
+llvm-objdump -d --start-address=0x161e00 --stop-address=0x161e50 "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework
+llvm-nm -n "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib | awk '$1>="0000000000008220" && $1<="0000000000008260"'
+```
