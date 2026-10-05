@@ -5813,3 +5813,75 @@ sh build-freebsd/build-mldr-only.sh
 grep -n -A1 'unhandled Linux syscall' /tmp/iokit-probe-63-1.log
 llvm-objdump -d --start-address=0x8230 --stop-address=0x82b0 "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib
 ```
+
+## Control #65 — a genuine ud2 aborts instead of being dispatched as a raw syscall
+
+**Date:** 2026-10-05
+**Branch:** task/sigill-abort-split
+**Base:** pr-arm64 = 50379ef23a03627befc7db2adddcaebad1d55437
+**Goal:** stop sigill_handler from swallowing a genuine abort (a ud2 it did not
+plant) as a raw-syscall site, per #64.
+
+### Patch
+
+`patch_one_signature` records every address where it writes its own `ud2` into
+`_mldr_ud2_sites[]`. `sigill_handler` now checks membership: a ud2 in the list is
+dispatched as a raw syscall (old path); a ud2 NOT in the list is a genuine
+`__builtin_trap()` — it prints `at <image>+0x<off> rip=… rax=…` and hands the
+context to `crash_debug_handler` (the FATAL block plus the guarded guest stack
+dump).
+
+### Run 65-1 (new log name; 62-1 and 63-1 untouched)
+
+```
+$ grep -c 'unhandled Linux syscall' /tmp/iokit-probe-65-1.log
+0
+$ grep -c 'genuine SIGILL' /tmp/iokit-probe-65-1.log
+1
+```
+
+The first ud2 is no longer dispatched; it aborts:
+
+```
+1292563:[darling-mldr] genuine SIGILL (ud2, not a patched trampoline) at libsystem_platform.dylib+0x8237 rip=0x2cf48b6c3237 rax=0x1
+1292564:[darling-mldr] FATAL signal 4 (code=5) at addr=0x2cf48b6c3237
+  rip=0x00002cf48b6c3237  rax=0x0000000000000001  rbx=0x00002cf49ba9a7a0
+  rcx=0x0000000000000307  rdx=0x0000000000000307  rsi=0x0000000000050000
+  rdi=0x0000000000000307  rbp=0x00007fffffdfd680  rsp=0x00007fffffdfd680
+```
+
+The site is `libsystem_platform.dylib+0x8237` = **`__os_unfair_lock_recursive_abort`**
+(nm: function at 0x8230, ud2 at 0x8237). The expectation was
+`__os_unfair_lock_unowned_abort` (+0x8247); the first trap this run reaches is
+the recursive-lock abort.
+
+### Guest stack (65-1:1292577-)
+
+```
+$ # decode-crash segment table over the dumped stack words
+  0x2cf48b6bd57a -> /usr/lib/system/libsystem_platform.dylib +0x257a
+  0x2cf401018527 -> UNMAPPED
+  0x2cf48bb95e42 -> /Frameworks/Google Chrome for Testing Framework.framework/... +0x161e42
+```
+
+The chain runs from the abort back into Chrome fw (+0x161e42). The initializer
+named in #63 (Chrome fw+0x212a4c0) is not itself on this stack — the trap fires
+from an os_unfair_lock call on the Chrome-side chain, not from the initializer
+frame.
+
+### Verdict
+
+**success** — the genuine abort is no longer swallowed: 0 "unhandled Linux
+syscall" lines from libsystem_platform, and instead a real SIGILL crash report
+naming the site (`libsystem_platform.dylib+0x8237`) with a guest stack reaching
+Chrome fw. New stopper: `FATAL signal 4 (code=5)` at the abort site.
+
+### Repro
+
+```sh
+sh build-freebsd/build-mldr-only.sh
+# run the 60-2 probe chain into /tmp/iokit-probe-65-1.log
+grep -c 'unhandled Linux syscall' /tmp/iokit-probe-65-1.log   # 0
+grep -n 'genuine SIGILL\|FATAL signal' /tmp/iokit-probe-65-1.log | head
+llvm-nm -n "$DARLING_OVERLAY"/usr/lib/system/libsystem_platform.dylib | awk '$1>="0000000000008220" && $1<="0000000000008260"'
+```
