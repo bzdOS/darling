@@ -3665,3 +3665,169 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-42-8.log 2>&1
 grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-42-8.log
 ```
+
+## Control #43 — batch staging 2: 8 more walls cleared
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-staging-batch2
+**Base:** pr-arm64 = 3882d6f2b
+**Goal:** Continue the batch staging loop from the CoreImage wall (verdict #42), staging each new wall's framework from overlay and re-running the Chrome framework probe until a non-staging rejection, a Chrome load, or the iteration limit (8).
+
+### Step 0 — Batch loop (8 iterations, one framework per iteration)
+
+Each iteration: add the current wall's framework to `DARLING_STAGING_TREES`, run `cft-fwmacho-probe-macho`, capture the next wall. All frameworks staged minimally from overlay. Logs: `/tmp/foundation-probe-43-<N>.log`.
+
+### Iteration 1 — CoreImage.framework (wall from #42)
+
+Staging evidence (`/tmp/foundation-probe-43-1.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreImage.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44AE-5555-3144-A150-3DF6F7146E72> /System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage
+```
+
+Next wall: Network.framework.
+
+### Iteration 2 — Network.framework
+
+Staging evidence (`/tmp/foundation-probe-43-2.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Network.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44C6-5555-3144-A19D-C97D74F3CCD7> /System/Library/Frameworks/Network.framework/Versions/A/Network
+```
+
+Next wall: IOSurface.framework.
+
+### Iteration 3 — IOSurface.framework
+
+Staging evidence (`/tmp/foundation-probe-43-3.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/IOSurface.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44FE-5555-3144-A1EB-9F5C510FB501> /System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface
+```
+
+Next wall: CoreMedia.framework.
+
+### Iteration 4 — CoreMedia.framework
+
+Staging evidence (`/tmp/foundation-probe-43-4.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreMedia.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44B7-5555-3144-A1F5-452A6D02BE6B> /System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia
+```
+
+Next wall: AudioToolbox.framework.
+
+### Iteration 5 — AudioToolbox.framework
+
+Staging evidence (`/tmp/foundation-probe-43-5.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/AudioToolbox.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C447E-5555-3144-A1EF-4FAB96BAE07C> /System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox
+```
+
+Next wall: OpenGL.framework.
+
+### Iteration 6 — OpenGL.framework
+
+Staging evidence (`/tmp/foundation-probe-43-6.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/OpenGL.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44E2-5555-3144-A166-0BFAD706EFB9> /System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL
+```
+
+Next wall: Quartz.framework.
+
+### Iteration 7 — Quartz.framework
+
+Staging evidence (`/tmp/foundation-probe-43-7.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Quartz.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44E2-5555-3144-A188-43912E65A3B3> /System/Library/Frameworks/Quartz.framework/Versions/A/Quartz
+```
+
+Next wall: Cocoa.framework.
+
+### Iteration 8 — Cocoa.framework (last iteration, limit reached)
+
+Staging evidence (`/tmp/foundation-probe-43-8.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Cocoa.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44D8-5555-3144-A17F-2F0D5088401F> /System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa
+```
+
+### Final wall (verbatim from `/tmp/foundation-probe-43-8.log`)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox
+  Referenced from: /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+  Reason: image not found
+```
+
+The rejection moved from Cocoa.framework (wall cleared in iteration 8) to VideoToolbox.framework — same shape, next dependency in the chain.
+
+### Emission site
+
+Same emission site as #37–#42: `src/external/dyld/src/ImageLoader.cpp:820` — the message shape is identical across all iterations, only the dependency name changed.
+
+### Verdict
+
+**staging-missing-dependency (batch, 8/8 walls cleared)** — 8 frameworks staged and loaded in one turn: CoreImage, Network, IOSurface, CoreMedia, AudioToolbox, OpenGL, Quartz, Cocoa. The Chrome framework now fails at VideoToolbox.framework, missing from the staging trees. The pattern from #38–#42 is confirmed at batch scale for the second time: each staged framework clears exactly one wall and reveals the next dependency. Cumulative staging across #38–#43: 21 frameworks. Next candidate: `/System/Library/Frameworks/VideoToolbox.framework`. Iteration limit (8) reached; further walls can be cleared in a follow-up batch.
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-43-8.log 2>&1
+grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-43-8.log
+```
