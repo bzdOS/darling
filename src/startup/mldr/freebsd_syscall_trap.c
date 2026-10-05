@@ -3080,8 +3080,6 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
 
 #include <execinfo.h>
 
-#include "crash_dump.h"
-
 #if defined(__x86_64__)
 static void
 crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
