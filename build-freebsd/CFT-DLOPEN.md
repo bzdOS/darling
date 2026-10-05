@@ -3499,3 +3499,169 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-41.log 2>&1
 grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-41.log
 ```
+
+## Control #42 — batch staging: 8 walls cleared in one turn
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-staging-batch
+**Base:** pr-arm64 = 382d47dd0
+**Goal:** Clear the staging-missing-dependency walls in a batch loop (one framework per iteration, up to 8 iterations), staging each new wall's framework from overlay and re-running the Chrome framework probe until a non-staging rejection, a Chrome load, or the iteration limit.
+
+### Step 0 — Batch loop (8 iterations, one framework per iteration)
+
+Each iteration: add the current wall's framework to `DARLING_STAGING_TREES`, run `cft-fwmacho-probe-macho`, capture the next wall. All frameworks staged minimally from overlay. Logs: `/tmp/foundation-probe-42-<N>.log`.
+
+### Iteration 1 — OpenDirectory.framework (wall from #41)
+
+Staging evidence (`/tmp/foundation-probe-42-1.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/OpenDirectory.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44F6-5555-3144-A1BF-7C09816101E2> /System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory
+```
+
+Next wall: CryptoTokenKit.framework.
+
+### Iteration 2 — CryptoTokenKit.framework
+
+Staging evidence (`/tmp/foundation-probe-42-2.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CryptoTokenKit.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4456-5555-3144-A115-8F45B1743231> /System/Library/Frameworks/CryptoTokenKit.framework/Versions/A/CryptoTokenKit
+```
+
+Next wall: LocalAuthentication.framework.
+
+### Iteration 3 — LocalAuthentication.framework
+
+Staging evidence (`/tmp/foundation-probe-42-3.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/LocalAuthentication.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4486-5555-3144-A139-A1672F9F0117> /System/Library/Frameworks/LocalAuthentication.framework/Versions/A/LocalAuthentication
+```
+
+Next wall: Accelerate.framework.
+
+### Iteration 4 — Accelerate.framework
+
+Staging evidence (`/tmp/foundation-probe-42-4.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Accelerate.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44DE-5555-3144-A102-CF9CB2DC2576> /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
+```
+
+Next wall: AudioUnit.framework.
+
+### Iteration 5 — AudioUnit.framework
+
+Staging evidence (`/tmp/foundation-probe-42-5.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/AudioUnit.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4435-5555-3144-A17E-EEC1F864F784> /System/Library/Frameworks/AudioUnit.framework/Versions/A/AudioUnit
+```
+
+Next wall: AVFAudio.framework.
+
+### Iteration 6 — AVFAudio.framework
+
+Staging evidence (`/tmp/foundation-probe-42-6.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/AVFAudio.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4495-5555-3144-A13E-AD6008B3567E> /System/Library/Frameworks/AVFAudio.framework/Versions/A/AVFAudio
+```
+
+Next wall: Carbon.framework.
+
+### Iteration 7 — Carbon.framework
+
+Staging evidence (`/tmp/foundation-probe-42-7.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Carbon.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C445B-5555-3144-A184-95BF05E6603F> /System/Library/Frameworks/Carbon.framework/Versions/A/Carbon
+```
+
+Next wall: CoreVideo.framework.
+
+### Iteration 8 — CoreVideo.framework (last iteration, limit reached)
+
+Staging evidence (`/tmp/foundation-probe-42-8.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreVideo.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4495-5555-3144-A120-4F8F32312810> /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
+```
+
+### Final wall (verbatim from `/tmp/foundation-probe-42-8.log`)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage
+  Referenced from: /Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+  Reason: image not found
+```
+
+The rejection moved from CoreVideo.framework (wall cleared in iteration 8) to CoreImage.framework — same shape, next dependency in the chain.
+
+### Emission site
+
+Same emission site as #37–#41: `src/external/dyld/src/ImageLoader.cpp:820` — the message shape is identical across all iterations, only the dependency name changed.
+
+### Verdict
+
+**staging-missing-dependency (batch, 8/8 walls cleared)** — 8 frameworks staged and loaded in one turn: OpenDirectory, CryptoTokenKit, LocalAuthentication, Accelerate, AudioUnit, AVFAudio, Carbon, CoreVideo. The Chrome framework now fails at CoreImage.framework, missing from the staging trees. The pattern from #38–#41 is confirmed at batch scale: each staged framework clears exactly one wall and reveals the next dependency. The chain is long (12+ frameworks staged so far: CoreFoundation, Security, ApplicationServices, CoreServices, CFNetwork, OpenDirectory, CryptoTokenKit, LocalAuthentication, Accelerate, AudioUnit, AVFAudio, Carbon, CoreVideo) and the next candidate is `/System/Library/Frameworks/CoreImage.framework`. Iteration limit (8) reached; further walls can be cleared in a follow-up batch.
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-42-8.log 2>&1
+grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-42-8.log
+```
