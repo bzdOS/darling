@@ -4687,3 +4687,74 @@ grep "crash_debug_handler\|gstack" /tmp/foundation-probe-49-1.log
 ```
 
 Run 49-2 (no crash, wall): same as 49-1 but remove `System/Library/Frameworks/UserNotifications.framework` from DARLING_STAGING_TREES (57 trees), log `/tmp/foundation-probe-49-2.log`, grep for `Library not loaded`.
+
+## Control #50 — mldr crash diagnosis: lazy-bind mechanics
+
+ERRATUM (#49): the analysis sentence "mldr crashes during lazy binding ... during AppKit's binding to Foundation" is wrong. Measured on live 50-1: UserNotifications.framework loaded (dyld: loaded, last of 134), crash is ~1.26M lines of output AFTER load, in weak/lazy binding phase; last operations before FATAL: weak binds SystemConfiguration→libc++ (__Znwm), then lazy binds libobjc.A.dylib→libsystem_platform (_fls) and libsystem_malloc.dylib→libsystem_kernel (_madvise); FATAL signal 11 addr=0x435de5894850, rip=0x0000203dfcc19746 (guest address), rcx=0x2e66c35de5894855 / rdx=0x435de5894850 — values look like code bytes (48 89 e5 = mov rbp,rsp) read through a corrupted pointer.
+
+**Date:** 2026-10-05
+**Branch:** task/mldr-crash-diag
+**Base:** pr-arm64 = cfaff75de
+**Goal:** Attribute the mldr crash more precisely than "UserNotifications present". Measure the crash context from a fresh run (50-1), then run a discriminating experiment (50-2).
+
+### Run 50-1 — full #48 tree (58 trees), crash context
+
+Log: `/tmp/foundation-probe-50-1.log` (1287100 lines). Crash reproduced. Last ~30 dyld lines before FATAL (verbatim):
+
+```
+dyld: weak bind: SystemConfiguration:0x203E0E0C7130 = libc++.1.dylib:__ZdlPv, *0x203E0E0C7130 = 0x203DFCCEB4B0
+dyld: weak bind: SystemConfiguration:0x203E0E0C7130 = libc++.1.dylib:__ZdlPv, *0x203E0E0C7130 = 0x203DFCCEB4B0
+dyld:     adjusting uses of __ZdlPv in /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration to use definition from /usr/lib/libc++.1.dylib
+dyld:   found weak __Znwm at 0x203DFCCEB310 in /usr/lib/libc++.1.dylib
+dyld: weak bind: SystemConfiguration:0x203E0E0C7138 = libc++.1.dylib:__Znwm, *0x203E0E0C7138 = 0x203DFCCEB310
+dyld: weak bind: SystemConfiguration:0x203E0E0C7138 = libc++.1.dylib:__Znwm, *0x203E0E0C7138 = 0x203DFCCEB310
+dyld:     adjusting uses of __Znwm in /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration to use definition from /usr/lib/libc++.1.dylib
+dyld: weak bind end
+dyld: lazy bind: libobjc.A.dylib:0x203DFCC4E2D8 = libsystem_platform.dylib:_fls, *0x203DFCC4E2D8 = 0x203DFCAC1DA0
+dyld: lazy bind: libsystem_malloc.dylib:0x203DFBB31220 = libsystem_kernel.dylib:_madvise, *0x203DFBB31220 = 0x203DFC7B390C
+[darling-mldr] FATAL signal 11 (code=1) at addr=0x435de5894850
+```
+
+Register block (verbatim):
+
+```
+  rip=0x0000203dfcc19746  rax=0x0000203e0cf914a0  rbx=0x0000203e0cf914a0
+  rcx=0x2e66c35de5894855  rdx=0x0000435de5894850  rsi=0x0000000000000002
+  rdi=0x0000000000000005  rbp=0x00007fffffdfdbb0  rsp=0x00007fffffdfdb70
+  r8 =0x0000000000000002  r9 =0x00007f82c867b290  r10=0x0000000000000004
+  r11=0x00007f82c863df40  r12=0x0000203e0bb0bb46  r13=0x0000000000000000
+  r14=0x0000203e0cca14d0  r15=0x00007ffffffffff8
+```
+
+Which image was binding at crash: the last dyld operations are lazy binds of libobjc.A.dylib and libsystem_malloc.dylib — but the crash address (0x435de5894850) and rip (0x203dfcc19746, a guest address in libobjc.A.dylib's range) point into libobjc.A.dylib's code. The corrupted pointer values (rcx/rdx look like x86 code bytes) suggest a bad function pointer was called during lazy binding of libobjc.A.dylib. However, from the printed output alone the exact image cannot be attributed with certainty — the crash is in the lazy-bind path, and the last successful binds were libobjc and libsystem_malloc.
+
+### Run 50-2 — DYLD_BIND_AT_LAUNCH=1 (discriminating experiment)
+
+Same 58-tree staging, but with `DYLD_BIND_AT_LAUNCH=1` (force eager binding instead of lazy). Log: `/tmp/foundation-probe-50-2.log` (25942 lines). No crash — the signal 11 FATAL is gone. Instead, a different failure appears:
+
+```
+dyld: Symbol not found: _ccchacha20
+  Referenced from: /usr/lib/system/libcommonCrypto.dylib
+  Expected in: /usr/lib/system/libcorecrypto.dylib
+ in /usr/lib/system/libcommonCrypto.dylib
+abort_with_payload: reason: Symbol not found: _ccchacha20
+```
+
+### Verdict
+
+**класс: lazy-bind mechanics — DYLD_BIND_AT_LAUNCH=1 убирает краш signal 11 (25942 строки, нет FATAL), но проявляет другой отказ (Symbol not found: _ccchacha20); краш — в пути lazy binding, не в самом UserNotifications.framework**
+
+### Repro
+
+Run 50-1 (crash):
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework:System/Library/Frameworks/QuartzCore.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework:System/Library/Frameworks/IOBluetooth.framework:System/Library/Frameworks/MediaPlayer.framework:System/Library/Frameworks/AuthenticationServices.framework:System/Library/Frameworks/GameController.framework:System/Library/Frameworks/Vision.framework:System/Library/Frameworks/UserNotifications.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-50-1.log 2>&1
+grep "FATAL\|crash_debug_handler" /tmp/foundation-probe-50-1.log
+```
+
+Run 50-2 (no crash): same as 50-1 but add `DYLD_BIND_AT_LAUNCH=1` to the env, log `/tmp/foundation-probe-50-2.log`, grep for `Symbol not found`.
