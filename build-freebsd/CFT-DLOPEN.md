@@ -4329,3 +4329,169 @@ export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFo
 timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-46-8.log 2>&1
 grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-46-8.log
 ```
+
+## Control #47 — batch staging 6: 8 more walls cleared
+
+**Date:** 2026-10-05
+**Branch:** task/chrome-fw-staging-batch6
+**Base:** pr-arm64 = d1403bdb5
+**Goal:** Continue the batch staging loop from the ImageIO wall (verdict #46), staging each new wall's framework from overlay and re-running the Chrome framework probe until a non-staging rejection, a Chrome load, or the iteration limit (8).
+
+### Step 0 — Batch loop (8 iterations, one framework per iteration)
+
+Each iteration: add the current wall's framework to `DARLING_STAGING_TREES`, run `cft-fwmacho-probe-macho`, capture the next wall. All frameworks staged minimally from overlay. Logs: `/tmp/foundation-probe-47-<N>.log`.
+
+### Iteration 1 — ImageIO.framework (wall from #46)
+
+Staging evidence (`/tmp/foundation-probe-47-1.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/ImageIO.framework: 0 found, 0 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44A8-5555-3144-A10D-A73E8B5D38B3> /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
+```
+
+Next wall: LaunchServices.framework.
+
+### Iteration 2 — LaunchServices.framework
+
+Staging evidence (`/tmp/foundation-probe-47-2.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/LaunchServices.framework: 0 found, 0 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44D9-5555-3144-A149-A8E85DE91E92> /System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices
+```
+
+Next wall: UniformTypeIdentifiers.framework.
+
+### Iteration 3 — UniformTypeIdentifiers.framework
+
+Staging evidence (`/tmp/foundation-probe-47-3.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/UniformTypeIdentifiers.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C444F-5555-3144-A1A8-0ECB0D1B0FBC> /System/Library/Frameworks/UniformTypeIdentifiers.framework/Versions/A/UniformTypeIdentifiers
+```
+
+Next wall: SystemConfiguration.framework.
+
+### Iteration 4 — SystemConfiguration.framework
+
+Staging evidence (`/tmp/foundation-probe-47-4.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/SystemConfiguration.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4111692E-BBCD-3EC7-BC4B-31F7AFCF321C> /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration
+```
+
+Next wall: Metal.framework.
+
+### Iteration 5 — Metal.framework
+
+Staging evidence (`/tmp/foundation-probe-47-5.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/Metal.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C446D-5555-3144-A103-C661069B3221> /System/Library/Frameworks/Metal.framework/Versions/A/Metal
+```
+
+Next wall: CoreAudio.framework.
+
+### Iteration 6 — CoreAudio.framework
+
+Staging evidence (`/tmp/foundation-probe-47-6.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreAudio.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C44C7-5555-3144-A114-9EDBCCAD5C53> /System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio
+```
+
+Next wall: AVFoundation.framework.
+
+### Iteration 7 — AVFoundation.framework
+
+Staging evidence (`/tmp/foundation-probe-47-7.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/AVFoundation.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C4413-5555-3144-A11D-4B006DAE4F75> /System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation
+```
+
+Next wall: CoreBluetooth.framework.
+
+### Iteration 8 — CoreBluetooth.framework (last iteration, limit reached)
+
+Staging evidence (`/tmp/foundation-probe-47-8.log`):
+
+```
+staging: symlinks under System/Library/Frameworks/CoreBluetooth.framework: 2 found, 2 created, 0 failed
+```
+
+Loaded (verbatim):
+
+```
+dyld: loaded: <4C4C440C-5555-3144-A183-1C3C7D0356B9> /System/Library/Frameworks/CoreBluetooth.framework/Versions/A/CoreBluetooth
+```
+
+### Final wall (verbatim from `/tmp/foundation-probe-47-8.log`)
+
+```
+dlopen(/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Library not loaded: /System/Library/Frameworks/IOBluetooth.framework/Versions/A/IOBluetooth
+  Referenced from: /usr/lib/IOBluetoothExtras.dylib
+  Reason: image not found
+```
+
+The rejection moved from CoreBluetooth.framework (wall cleared in iteration 8) to IOBluetooth.framework — same shape, next dependency in the chain.
+
+### Emission site
+
+Same emission site as #37–#46: `src/external/dyld/src/ImageLoader.cpp:820` — the message shape is identical across all iterations, only the dependency name changed.
+
+### Verdict
+
+**staging-missing-dependency (batch, 8/8 walls cleared)** — 8 frameworks staged and loaded in one turn: ImageIO, LaunchServices, UniformTypeIdentifiers, SystemConfiguration, Metal, CoreAudio, AVFoundation, CoreBluetooth. The Chrome framework now fails at IOBluetooth.framework, missing from the staging trees. The pattern from #38–#46 is confirmed at batch scale for the sixth time: each staged framework clears exactly one wall and reveals the next dependency. Cumulative staging across #38–#47: 53 frameworks. Next candidate: `/System/Library/Frameworks/IOBluetooth.framework`. Iteration limit (8) reached; further walls can be cleared in a follow-up batch.
+
+### Repro
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+export DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR
+export DARLING_TEST_BINARY=cft-fwmacho-probe-macho
+export DARLING_STAGING_TREES=usr/lib:Frameworks:System/Library/Frameworks/CoreFoundation.framework:System/Library/Frameworks/Security.framework:System/Library/Frameworks/ApplicationServices.framework:System/Library/Frameworks/CoreServices.framework:System/Library/Frameworks/CFNetwork.framework:System/Library/Frameworks/OpenDirectory.framework:System/Library/Frameworks/CryptoTokenKit.framework:System/Library/Frameworks/LocalAuthentication.framework:System/Library/Frameworks/Accelerate.framework:System/Library/Frameworks/AudioUnit.framework:System/Library/Frameworks/AVFAudio.framework:System/Library/Frameworks/Carbon.framework:System/Library/Frameworks/CoreVideo.framework:System/Library/Frameworks/CoreImage.framework:System/Library/Frameworks/Network.framework:System/Library/Frameworks/IOSurface.framework:System/Library/Frameworks/CoreMedia.framework:System/Library/Frameworks/AudioToolbox.framework:System/Library/Frameworks/OpenGL.framework:System/Library/Frameworks/Quartz.framework:System/Library/Frameworks/Cocoa.framework:System/Library/Frameworks/VideoToolbox.framework:System/Library/Frameworks/CoreMediaIO.framework:System/Library/Frameworks/Accessibility.framework:System/Library/Frameworks/MetalKit.framework:System/Library/Frameworks/CoreMIDI.framework:System/Library/Frameworks/MediaAccessibility.framework:System/Library/Frameworks/SecurityInterface.framework:System/Library/Frameworks/CoreHaptics.framework:System/Library/Frameworks/ForceFeedback.framework:System/Library/Frameworks/CoreWLAN.framework:System/Library/Frameworks/CoreLocation.framework:System/Library/Frameworks/CoreML.framework:System/Library/Frameworks/DiskArbitration.framework:System/Library/Frameworks/ServiceManagement.framework:System/Library/Frameworks/SafariServices.framework:System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework:System/Library/Frameworks/CoreGraphics.framework:System/Library/Frameworks/Foundation.framework:System/Library/PrivateFrameworks/Onyx2D.framework:System/Library/Frameworks/IOKit.framework:System/Library/Frameworks/CoreText.framework:System/Library/Frameworks/AppKit.framework:System/Library/Frameworks/CoreData.framework:System/Library/Frameworks/QuartzCore.framework:System/Library/Frameworks/ImageIO.framework:System/Library/Frameworks/LaunchServices.framework:System/Library/Frameworks/UniformTypeIdentifiers.framework:System/Library/Frameworks/SystemConfiguration.framework:System/Library/Frameworks/Metal.framework:System/Library/Frameworks/CoreAudio.framework:System/Library/Frameworks/AVFoundation.framework:System/Library/Frameworks/CoreBluetooth.framework
+timeout 120 sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=cft-fwmacho-probe-macho DARLING_STAGING_TREES=$DARLING_STAGING_TREES DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_LIBRARIES_POST_LAUNCH=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_WEAK_BINDINGS=1 DYLD_PRINT_APIS=1 DYLD_PRINT_INTERPOSING=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 DYLD_PRINT_STATISTICS_DETAILS=1 DYLD_PRINT_RPATHS=1 DYLD_PRINT_WARNINGS=1 DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_DOFS=1 DYLD_PRINT_OPTS=1 DYLD_PRINT_ENV=1 DYLD_PRINT_CODE_SIGNATURES=1 DYLD_PRINT_REBASINGS=1 DYLD_PRINT_TO_STDERR=1 $DARLING_BUILD_DIR/launch-dynamic > /tmp/foundation-probe-47-8.log 2>&1
+grep "Library not loaded\|image not found\|invalid file format" /tmp/foundation-probe-47-8.log
+```
