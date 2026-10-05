@@ -5438,3 +5438,120 @@ grep -c "Library not loaded" /tmp/iokit-probe-60-1.log
 grep -n "IOKit:_kIOMasterPortDefault" /tmp/iokit-probe-60-1.log
 grep -n "FATAL signal" /tmp/iokit-probe-60-1.log
 ```
+
+## Control #61 — decode of the 60-1 SIGSEGV: libobjc readClass reads a FoundationExtras stub as a class
+
+**Date:** 2026-10-05
+**Branch:** task/iokit-masterport
+**Base:** pr-arm64 = 5c432aa8a1ed0032c45adc11742c65c3f257e9a1
+**Goal:** decode the new wall from 60-1 (FATAL signal 11 at 0x435de5894850, right
+after "dyld: weak bind end", line 1291509). A fix is not in this task.
+
+### Crash block (60-1, lines 1291508-1291516)
+
+```
+1291508:dyld: weak bind end
+1291509:[darling-mldr] FATAL signal 11 (code=1) at addr=0x435de5894850
+  rip=0x00003f06d861a746  rax=0x00003f06e89924a0  rbx=0x00003f06e89924a0
+  rcx=0x2e66c35de5894855  rdx=0x0000435de5894850  rsi=0x0000000000000002
+  rdi=0x0000000000000005  rbp=0x00007fffffdfdbc0  rsp=0x00007fffffdfdb80
+```
+
+### Decode
+
+```
+$ python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-60-1.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
+crash: signal 11 at 0x435de5894850
+images mapped: 134 address range(s) named by the log (133 dylib mapping(s) + the main executable), +1 pseudo from mldr DEBUG lines
+  rip  0x00003f06d861a746  /usr/lib/libobjc.A.dylib+0x24746                           __ZL9readClassP10objc_classbb+0xa6
+  stack 0x00003f06d8834000  /Frameworks/Google+0x0                                     ?
+  stack 0x00003f06d861be86  /usr/lib/libobjc.A.dylib+0x25e86                           -[Protocol hash]+0x256
+  stack 0x00003f06d8643984  /usr/lib/libobjc.A.dylib+0x4d984                           __ZL11UnsetLayout+0x25e0
+  stack 0x00003f06d8834e1a  /Frameworks/Google+0xe1a                                   ?
+  stack 0x00003f06d8643988  /usr/lib/libobjc.A.dylib+0x4d988                           __ZL11UnsetLayout+0x25e4
+  stack 0x00003f06d8834000  /Frameworks/Google+0x0                                     ?
+  stack 0x00003f06d8611eaf  /usr/lib/libobjc.A.dylib+0x1beaf                           __ZN4objc8DenseMapI12DisguisedPtrI11objc_objectENS0_IPKvNS_15ObjcAssociationENS_17DenseMapValueInfoIS6_EENS_12DenseMapInfoIS5_EENS_6detail12DenseMapPairIS5_S6_EEEENS7_ISE_EENS9_IS3_EENSC_IS3_SE_EEE16shrink_and_clearEv+0x11f
+  stack 0x00003f06d8834000  /Frameworks/Google+0x0                                     ?
+  stack 0x0000000826dad6ee  /cft-fwmacho-probe-macho+0x6ee                             ?
+  stack 0x00003f06d861b456  /usr/lib/libobjc.A.dylib+0x25456                           +[Object instanceMethodFor:]+0x16
+  stack 0x00000008280a96c9  /usr/lib/dyld+0x96c9                                       __ZN4dyldL15stateToHandlersE17dyld_image_statesPA3_Pv+0xa9
+
+69 of the stack words named no known image (not listed above)
+```
+
+The rip resolves, against **libobjc.A.dylib's own symbol table**, to
+`readClass(objc_class*, bool, bool)+0xa6` (line 1291509). The instruction at
++0x24746 (`llvm-otool -tvV "$DARLING_OVERLAY"/usr/lib/libobjc.A.dylib`) is
+
+```
+0000000000024746	cmpl	$0x0, __objc_empty_vtable(%rdx)
+```
+
+i.e. a load through rdx = 0x435de5894850 — the faulting dereference. The class
+pointer in rax is not resolved by decode-crash; mapped against the same dyld
+segment table it lands on a stub:
+
+```
+$ # rax -> image + offset (dyld segment table of the same log)
+rax 0x3f06e89924a0 -> /usr/lib/FoundationExtras.dylib +0x4a0
+```
+
+and `FoundationExtras+0x4a0` is `_OBJC_CLASS_$_NSURLProtocol`.
+
+### Hypothesis (one, ranked)
+
+readClass is walking a class's isa chain and one link is the address of a **no-op
+stub function exported under an ObjC class name**. The Extras wrappers export
+`_OBJC_CLASS_$_X` as functions (`void X(void){}`), not as data objects, and the
+real framework does not export the class, so the Extras stub is its only provider.
+readClass treats the function's address as a class and reads the function's code
+as the class's isa.
+
+Evidence: the crash's rcx = 0x2e66c35de5894855, whose bytes are exactly
+`55 48 89 e5 5d c3 66 2e` — the entry sequence of a no-op stub
+(`push rbp; mov rbp,rsp; pop rbp; ret; nop`), identical to the bytes at
+`FoundationExtras+0x4a0`.
+
+Neighbours this separates from:
+- (a) a real class with an unrelocated isa — would be a **data** symbol (`S`/`D`)
+  pointing into the image's own `__DATA`, not a stub's `__TEXT`;
+- (b) dyld's weak-bind "adjusting uses" step corrupting a bind site — would not
+  yield the stub's exact entry bytes.
+
+### Discriminating check
+
+```
+$ llvm-nm -gU "$DARLING_OVERLAY"/usr/lib/FoundationExtras.dylib | grep '_OBJC_CLASS_\$_NSURLProtocol'
+00000000000004a0 T _OBJC_CLASS_$_NSURLProtocol
+$ llvm-otool -tvV "$DARLING_OVERLAY"/usr/lib/FoundationExtras.dylib | sed -n '/00000000000004a0/,+4p'
+00000000000004a0	pushq	%rbp
+00000000000004a1	movq	%rsp, %rbp
+00000000000004a4	popq	%rbp
+00000000000004a5	retq
+```
+
+Expected: `T` (code) and an entry of `pushq %rbp; movq %rsp,%rbp; popq %rbp; retq`,
+whose bytes `55 48 89 e5 5d c3` are the crash's rcx. A correct class export would
+be `S`/`D` (data); if the symbol were data, neighbour (a) would hold instead.
+
+### Repro
+
+```sh
+python3 "$DARLING_SRC_DIR"/build-freebsd/decode-crash.py /tmp/iokit-probe-60-1.log "$DARLING_OVERLAY" "$DARLING_SRC_DIR"/tests
+# rax (the class pointer) is not resolved by decode-crash; map it with the same segment parser:
+python3 - <<'PY'
+import re
+log = "/tmp/iokit-probe-60-1.log"
+text = open(log, errors="replace").read()
+segs = []; path = None
+for line in text.splitlines():
+    m = re.search(r"dyld: Mapping (\S+)", line)
+    if m: path = m.group(1); continue
+    m = re.search(r"__TEXT at 0x([0-9A-Fa-f]+)->0x([0-9A-Fa-f]+)", line)
+    if m and path: segs.append((int(m.group(1),16), int(m.group(2),16), path))
+a = int(re.search(r"FATAL signal.*?rax=(0x[0-9A-Fa-f]+)", text, re.S).group(1), 16)
+hit = [s for s in segs if s[0] <= a <= s[1]]
+print("rax %#x -> %s +%#x" % (a, hit[0][2], a - hit[0][0]) if hit else "rax %#x -> UNMAPPED" % a)
+PY
+llvm-nm -gU "$DARLING_OVERLAY"/usr/lib/FoundationExtras.dylib | grep '_OBJC_CLASS_\$_NSURLProtocol'
+```
