@@ -8615,3 +8615,106 @@ grep -n "OS_ULOCK_IS_OWNER(current, self\|_os_unfair_lock_recursive_abort(self)"
 llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161d10 "$FRAMEWORK"
 llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -E "F1A3108|F1A5990"
 ```
+
+## Control #89 — unlock_slow writes nothing; the F0 window is closed; A's calls are all external
+
+**Date:** 2026-10-06
+**Branch:** task/a-unlock-slow
+**Base:** pr-arm64 = 2e94ed6d35a4dba2a6ab87070a562e7d32ab38f8 (`git rev-parse` before branching)
+
+### Step 1 — `_os_unfair_lock_unlock_slow` never writes the lock word
+
+```
+$ llvm-objdump -d --arch-name=x86_64 --start-address=0x2960 --stop-address=0x2a80 "$LSP"
+  2960: pushq %rbp
+  2968: movq  %rdi, -0x8(%rbp)          ; l
+  296c: movl  %esi, -0xc(%rbp)          ; self
+  296f: movl  %edx, -0x10(%rbp)         ; current
+  2972: movl  %ecx, -0x14(%rbp)         ; options
+  ...
+  2999: cmpl  -0xc(%rbp), %ecx          ; (current|NOWAITERS) vs self
+  299f: je    0x29c4
+  29f1: callq __os_unfair_lock_unowned_abort   ; not owner -> unowned abort
+  29f6: movl  -0x10(%rbp), %eax
+  29f9: andl  $0x1, %eax                ; NOWAITERS bit set?
+  2a05: ud2                             ; crash "unlock_slow with no waiters"
+  2a0c: movq  -0x8(%rbp), %rsi
+  2a10: movl  $0x1000002, %edi
+  2a19: callq ___ulock_wake             ; wake waiters on l
+  2a7a: ... retq
+```
+
+Tied to `src/external/libplatform/src/os/lock.c` (@60b178e):
+
+```
+563: _os_unfair_lock_unlock_slow(_os_unfair_lock_t l, os_lock_owner_t self, ...)
+569:     if (unlikely(OS_ULOCK_IS_NOT_OWNER(current, self, allow_anonymous_owner))) {
+570:             return _os_unfair_lock_unowned_abort(OS_ULOCK_OWNER(current));
+573:             __LIBPLATFORM_INTERNAL_CRASH__(current, "unlock_slow with no waiters");
+576:             int ret = __ulock_wake(UL_UNFAIR_LOCK | ULF_NO_ERRNO, l, 0);
+```
+
+**In words:** with `old != self` and no waiters, the slow path does **not** touch the
+word — it either takes `_os_unfair_lock_unowned_abort` (if `current` is not the
+owner) or the `ud2` "unlock_slow with no waiters" crash (if the NOWAITERS bit is
+set), and in the normal case only calls `__ulock_wake`. It never stores an owner.
+Moreover the slow path is only reached **after** the fast path already cleared the
+word: `os_unfair_lock_unlock` does `current = os_atomic_xchg(&l->oul_value,
+OS_LOCK_NO_OWNER, release)` (lock.c:627) and only then `return
+_os_unfair_lock_unlock_slow(l, self, current, 0)` (lock.c:629). So **no path
+leaves the word == self** — hypothesis (a) (A#1's unlock went slow and kept the
+owner) is refuted.
+
+### Step 2 — F0's window between the two A calls is closed
+
+```
+$ llvm-objdump -d --start-address=0x8eedcb --stop-address=0x8eedd6 "$FRAMEWORK"
+  8eedcb: movl  %eax, %ebx
+  8eedcd: shlq  $0x20, %rbx
+  8eedd1: callq 0x8eee10
+```
+
+Three instructions between A call #1's return (0x8eedcb) and A call #2 (0x8eedd1):
+two register ops and the call to A itself. No `call`/`jmp` outside the image, so
+no external acquire can happen between the calls — hypothesis "external acquire
+between the F0 calls" is closed statically.
+
+### Step 3 — every call inside A resolves outside the image
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep callq
+  8eee1d: callq 0xdbbf002   ; _os_unfair_lock_trylock   (ACQUIRE-A)
+  8eee7b: callq 0xdbbeffc   ; _os_unfair_lock_unlock    (UNLOCK)
+  8eeea3: callq 0xdbbf2f6   ; _getentropy               (init fill #1)
+  8eeec6: callq 0xdbbf2f6   ; _getentropy               (init fill #2)
+  8eeee6: callq 0x161ce0    ; in-image blocking wrapper
+```
+
+Resolution: 0xdbbf002 -> `_os_unfair_lock_trylock` (LSysX), 0xdbbeffc ->
+`_os_unfair_lock_unlock` (LSysX), 0xdbbf2f6 -> `_getentropy` (LSysX), and 0x161ce0
+is the in-image wrapper that (per #88) only forwards its rdi to
+`_os_unfair_lock_trylock` / `_os_unfair_lock_lock_with_options`. So A's only
+in-image call is the blocking wrapper, and it does not re-enter A or call any
+in-image function with the lock pointer; all other targets are external. No
+escaped-lock-pointer call into the image exists.
+
+### Verdict (control #89, one line)
+
+`_os_unfair_lock_unlock_slow` writes nothing and is reached only after the
+fast-path `xchg` already zeroed the word (lock.c:627/629) — no path leaves the
+word == self, so hypothesis (a) is refuted; the F0 window between the A calls is
+three instructions with no external call (hypothesis "acquire between calls"
+closed); and A's calls are all external (trylock/unlock/_getentropy) plus the
+in-image wrapper 0x161ce0 that forwards rdi only to the primitives — so the first
+acquire is not in A's own body.
+
+### Repro
+
+```sh
+LSP="$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib"
+llvm-objdump -d --arch-name=x86_64 --start-address=0x2960 --stop-address=0x2a80 "$LSP"
+grep -n "_os_unfair_lock_unlock_slow\|os_atomic_xchg(&l->oul_value, OS_LOCK_NO_OWNER" src/external/libplatform/src/os/lock.c
+llvm-objdump -d --start-address=0x8eedcb --stop-address=0x8eedd6 "$FRAMEWORK"
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep callq
+llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep -E "dbbf002|dbbeffc|dbbf2f6"
+```
