@@ -8829,3 +8829,102 @@ llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep -E "dbbf002|dbc0664"
 grep -n "os_unfair_lock_lock_with_options\|OS_UNFAIR_LOCK_ALLOW_ANONYMOUS_OWNER\|OS_ULOCK_IS_OWNER(current, self" src/external/libplatform/src/os/lock.c
 llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep -E "j(e|ne)|jmp"
 ```
+
+## Control #91 — first-acquirer set: no export, no indirect; A called only by F0; B dead; wrapper is generic
+
+**Date:** 2026-10-06
+**Branch:** task/wrapper-xref
+**Base:** pr-arm64 = 5ca40671f3c214bf4d2a46df1bd0bf486a576a79 (`git rev-parse` before branching)
+
+**Goal:** close the fork "who was the first acquire" — is there any road to the lock
+0x100667a0 outside the in-image tree (A 0x8eee10 / B 0x95d44c0 are the only static
+references per #69)?
+
+### Step 1 — exports: none of the three addresses is exported
+
+```
+$ llvm-objdump --macho --exports-trie "$FRAMEWORK"
+0x00002840  _ChromeAppModeStart_v8
+0x00002A00  _ChromeWebAppShortcutCopierMain
+0x00003FE0  _ChromeMain
+$ llvm-objdump --macho --exports-trie "$FRAMEWORK" | grep -iE "0x161ce0|0x8eee10|0x95d44c0"
+(nothing)
+```
+
+The exports trie has exactly **3 entries** (the same as the symbol table), none of
+them 0x161ce0 / 0x8eee10 / 0x95d44c0 — so an out-of-image *named* call is
+impossible for any of the three.
+
+### Step 2 — direct call/jmp census over a fresh full disasm
+
+```
+$ llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm-91.txt
+$ grep -cE "(callq|jmp)\s+0x161ce0" /tmp/cft-full-disasm-91.txt
+138
+$ grep -cE "(callq|jmp)\s+0x8eee10" /tmp/cft-full-disasm-91.txt
+2
+$ grep -cE "(callq|jmp)\s+0x95d44c0" /tmp/cft-full-disasm-91.txt
+1
+```
+
+- **0x8eee10 (A): 2** sites, both F0 (0x8eedc6, 0x8eedd1) — matches #80/#82.
+- **0x95d44c0 (B): 1** site, the thunk's own `jmp 0x95d44c0` at 0x95d44b5 — i.e.
+  **zero callers**.
+- **0x161ce0 (wrapper): 138** sites. The head expected only the A/B/F0 path, but
+  the wrapper is a **generic lock-acquire** used framework-wide; the A site
+  (0x8eeee6) is one of 138. Representative new sites (not previously named):
+  0x9edd, 0xa54e, 0xa55b, 0xb70d, 0x132f8, 0x187f5, 0x18fa1, 0x1b583, 0x21301,
+  0x46ef4, 0x64cf5e, 0x8eeee6 (A), 0x95d44e0 (B), … So the wrapper is not an
+  A-specific first acquirer.
+
+### Step 3 — indirect (rebase) targets inside the three bodies: none
+
+```
+$ llvm-objdump --macho --fixups "$FRAMEWORK"
+error: unknown argument '--fixups'        # not supported by this llvm (llvm19)
+$ # equivalent: the rebase table from --dyld-info
+$ python3 ... # scan /tmp/cft-dyldinfo.txt rebase targets
+rebase lines scanned: 1122079
+  0x161ce0..0x161e60: 0
+  0x8eee10..0x8eeef0: 0
+  0x95d44c0..0x95d4520: 0
+```
+
+`--fixups` is not a valid flag in this llvm; the rebase table (1,122,079 entries)
+was used instead. **No rebase target falls inside any of the three bodies**, so
+there is no data pointer (function pointer / vtable slot) that could enter them
+indirectly. (The export scan of Step 1 rules out the named road; this rules out
+the pointer road.)
+
+### Step 4 — B's callers: zero
+
+The only reference to 0x95d44c0 is its own thunk's `jmp` (0x95d44b5); the thunk
+0x95d44b0 has no `callq` caller either (#80). So **B is dead code** — it is
+never entered, and cannot be the first acquirer.
+
+### Verdict (control #91, one line)
+
+The set of possible first acquirers of 0x100667a0 is **closed**: A is called only
+by F0 (2 sites), B is dead (0 callers), none of the three addresses is exported
+and no rebase target lies inside their bodies — so there is **no out-of-image
+road** (neither export nor indirect pointer); the 138-caller 0x161ce0 is a
+generic lock wrapper, not an A-specific first acquirer.
+
+### Listing note (from #90)
+
+The wrapper listing in #90 elided 0x161ce1 without a marker; the line is:
+
+```
+  161ce1: 48 89 e5   movq %rsp, %rbp
+```
+
+### Repro
+
+```sh
+llvm-objdump --macho --exports-trie "$FRAMEWORK"
+llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm-91.txt
+grep -cE "(callq|jmp)\s+0x161ce0" /tmp/cft-full-disasm-91.txt
+grep -cE "(callq|jmp)\s+0x8eee10" /tmp/cft-full-disasm-91.txt
+grep -cE "(callq|jmp)\s+0x95d44c0" /tmp/cft-full-disasm-91.txt
+# rebase targets inside the bodies: scan /tmp/cft-dyldinfo.txt (from --macho --dyld-info)
+```
