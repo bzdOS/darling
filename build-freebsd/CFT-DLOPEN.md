@@ -8163,3 +8163,128 @@ find $DARLING_OVERLAY -type f | while read f; do case "$(file -b "$f")" in *Mach
 grep -nE "(callq|jmp|leaq)\s+0x1863280" /tmp/cft-full-disasm.txt
 grep -nE "(callq|jmp|leaq)\s+0x16e3f60" /tmp/cft-full-disasm.txt
 ```
+
+## Control #85 — full crash frame chain, the lock owner, and the os_unfair_lock word decode
+
+**Date:** 2026-10-06
+**Branch:** task/a-crash-chain
+**Base:** pr-arm64 = 2e9e0b7befa8d4d58524d386402ec6116b553343 (`git rev-parse` before branching)
+
+**Goal:** with in-image and interpose mechanisms measured absent (#83/#84), read the
+re-entry out of the crash data itself: the whole frame chain, the lock that
+aborted, and the meaning of the lock word.
+
+**Log note:** the recursive-abort crash dump is in the crash run
+`/tmp/iokit-probe-72-1.log` (512-word walk); `/tmp/iokit-probe-77-1.log` is the
+MLDR_TRAP_AT trap run and carries no crash dump. No rerun was needed.
+
+### Step 1 — full crash frame chain (top -> bottom), resolved to image+offset
+
+`decode-crash.py` on the log:
+
+```
+$ python3 build-freebsd/decode-crash.py /tmp/iokit-probe-72-1.log "$DARLING_OVERLAY" src/tests
+crash: signal 4 at 0x2d7fbac3237
+images mapped: 134 address range(s) named by the log ...
+  rip  0x2d7fbac3237  /usr/lib/system/libsystem_platform.dylib+0x8237  __os_unfair_lock_recursive_abort+0x7
+  stack 0x000002d7fbabd57a  libsystem_platform.dylib+0x257a        __os_unfair_lock_lock_slow+0xfa
+  stack 0x000002d7fbabd814  libsystem_platform.dylib+0x2814        _os_unfair_lock_lock_with_options+0xc4
+  stack 0x00000008279fbf2c  /usr/lib/dyld+0x14cf2c                  __main_thread+0xac
+  stack 0x000002d7fbf95e42  /Frameworks/Google+0x161e42             ?
+  stack 0x000002d7fc722eeb  /Frameworks/Google+0x8eeeeb             ?   <- A (0x8eee10)
+  stack 0x000002d7fc722dd6  /Frameworks/Google+0x8eedd6             ?   <- F0 (0x8eedc0)
+  stack 0x000002d7fd517f95  /Frameworks/Google+0x16e3f95            ?   <- 0x16e3f60
+  stack 0x000002d7fd697286  /Frameworks/Google+0x1863286            ?   <- 0x1863280
+```
+
+The log's own 512-word walk continues the chain (each line is image+offset):
+
+```
+  stack[1]   libsystem_platform.dylib+0x257a     __os_unfair_lock_lock_slow
+  stack[6]   Framework (data)+0x119d40           (data word)
+  stack[21]  libsystem_platform.dylib+0x2814     _os_unfair_lock_lock_with_options
+  stack[35]  Framework+0x161e42                  inside 0x161ce0 (blocking acquire)
+  stack[41]  Framework+0x8eeeeb                  A 0x8eee10, ret of blocking lock   <- A ENTRY
+  stack[45]  Framework+0x8eedd6                  F0 0x8eedc0, ret of A call #2
+  stack[49]  Framework+0x16e3f95                 0x16e3f60
+  stack[63]  Framework+0x1863286                 0x1863280                          <- 0x1863280
+  stack[93]  Framework+0x186287e                 0x1862820
+  stack[94]  libsystem_kernel.dylib+0x42e66      (kernel thunk)
+  stack[95]  Framework+0x64d063                  stub 0x64d020 (ret of _getentropy)
+  stack[105] Framework+0x212ab91                 0x212aa00
+  stack[139] Framework+0x212a9d2                 0x212a8c0
+  stack[171] Framework+0x212a567                 0x212a500
+  stack[185] Framework+0x212a4c0                 __init_offsets initializer
+  stack[219] Framework+0xdbc15fc                 __TEXT,__init_offsets section
+```
+
+So the whole chain is: initializer 0x212a4c0 -> ... -> 0x212aa00 -> 0x1862820 ->
+0x1863280 -> 0x16e3f60 -> F0 -> **A (0x8eeeeb)** -> blocking acquire 0x161ce0 ->
+`_os_unfair_lock_lock_with_options` -> `_os_unfair_lock_lock_slow` ->
+`__os_unfair_lock_recursive_abort` (ud2). The stub 0x64d063 is a residual on the
+stack (the stub's `_getentropy` return), not a live frame.
+
+### Step 2 — the lock that aborted: framework+0x100667a0 (A's lock, __common)
+
+The mldr handler dumps 32 bytes at `rbx`, the live lock register (the abort
+routine only takes `edi`):
+
+```
+[darling-mldr] lock word @0x2d80be9a7a0: 0000000100000307 42ab4e156a8fbc7b 358fb3c718ab2f3b 0000000000000000 (ok=1111 rdi=0x307)
+[darling-mldr] FATAL signal 4 (code=5) at addr=0x2d7fbac3237
+  rip=0x000002d7fbac3237  rax=0x0000000000000001  rbx=0x000002d80be9a7a0
+  rcx=0x0000000000000307  rdx=0x0000000000000307  rsi=0x0000000000050000
+  rdi=0x0000000000000307
+```
+
+The framework base in this run is 0x2d7fbe34000 (stack[185] 0x2d7fdf5e4c0 minus
+0x212a4c0), so the lock address `rbx = 0x2d80be9a7a0` resolves to
+**Framework+0x100667a0** — A's lock. It is the global in `__common` (BSS) that
+Controls #69/#71 analysed (the `__DATA`/`__common` singleton), **not** a
+different lock. The adjacent 8-byte token at +0x8/+0x10 (0x42ab4e15…,
+0x358fb3c7…) is A's PRNG state.
+
+### Step 3 — decode of the lock word 0000000100000307
+
+The dump prints the 8 bytes at 0x100667a0 as `0000000100000307`; split into the
+two 32-bit fields it is `[0x100667a0 = 0x00000307][0x100667a4 = 0x00000001]`.
+
+`os_unfair_lock` is a single `uint32_t` (`_os_unfair_lock_opaque`), and per
+`src/external/libplatform/src/os/lock.c` its value is the owner port itself, not
+a packed bitfield:
+
+```
+typedef os_lock_owner_t os_ulock_value_t;         // mach_port_name_t (uint32)
+// all thread mach port values always have the low bit set!
+#define OS_ULOCK_NOWAITERS_BIT ((os_ulock_value_t)1u)
+#define OS_ULOCK_OWNER(value) ((value) | OS_ULOCK_NOWAITERS_BIT)
+...
+if (unlikely(OS_ULOCK_IS_OWNER(current, self, allow_anonymous_owner))) {
+        return _os_unfair_lock_recursive_abort(self);
+}
+```
+
+So:
+- the **os_unfair_lock word** at 0x100667a0 = **0x00000307** = the owner mach
+  port **0x307** with `OS_ULOCK_NOWAITERS_BIT` (bit 0) set -> **owned, no
+  waiters**; the recursive abort fired because `(value | 1) == self == 0x307`;
+- the **flag** at 0x100667a4 = **0x00000001** is the framework's own token-init
+  flag (set by A's init path at 0x8eeed3), not part of the lock.
+
+### Verdict (control #85, one line)
+
+The full crash chain is initializer 0x212a4c0 -> ... -> F0 -> **A (0x8eeeeb)** ->
+blocking 0x161ce0 -> `__os_unfair_lock_recursive_abort`; the aborted lock is
+**Framework+0x100667a0** (A's `__common` lock, from rbx in the register dump),
+and its word `0000000100000307` decodes as `oul_value=0x00000307` (owner mach
+port 0x307, NOWAITERS bit set, no waiters) followed by the framework's flag
+`0x00000001` — so owner==self on A's own lock, one lock, recursion.
+
+### Repro
+
+```sh
+python3 build-freebsd/decode-crash.py /tmp/iokit-probe-72-1.log "$DARLING_OVERLAY" src/tests
+grep -nE "genuine SIGILL|lock word|reentry|stack\[|FATAL signal" /tmp/iokit-probe-72-1.log | head -30
+sed -n '1292597,1292603p' /tmp/iokit-probe-72-1.log      # FATAL header + register dump (rip/rbx/rdi)
+sed -n '425,445p' src/external/libplatform/src/os/lock.c # OS_ULOCK_* bit macros
+```
