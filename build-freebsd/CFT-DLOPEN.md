@@ -6406,3 +6406,87 @@ The exact first-acquire return address is not in the dump (honest miss).
 grep -n 'reentry:\|lock word\|genuine SIGILL\|stack\[' /tmp/iokit-probe-71-1.log
 llvm-objdump -d --start-address=0x95d44a0 --stop-address=0x95d44b0 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
 ```
+
+## Control #72 — id-space of the lock owner 0x307 (fork verdict)
+
+**Date:** 2026-10-06
+**Branch:** task/lock-owner-walk
+**Base:** pr-arm64 = 101d21ca6
+**Goal:** from the 512-word reentry walk in run 72-1, decide in which id-space
+the lock owner 0x307 lives (host tid / guest pid / other) — the fork verdict.
+
+### Run 72-1 (log: /tmp/iokit-probe-72-1.log, 99.8 MB, 00:57)
+
+Abort at line 1292565-1292566:
+
+```
+1292565:[darling-mldr] lock word @0x2d80be9a7a0: 0000000100000307 42ab4e156a8fbc7b 358fb3c718ab2f3b 0000000000000000 (ok=1111 rdi=0x307)
+1292566:[darling-mldr] reentry: host_tid=101091 guest_pid=30192 rsp=0x7fffffdfd680
+```
+
+### 512-word walk — frames A/B (below 0x95d44f5)
+
+From the guest stack dump (512 words) at the reentry (source: /tmp/ctrl72-walk.txt,
+lines 1292560–1292609 of log 72-1):
+
+```
+  stack[1]   0x2d7fbabd57a libsystem_platform.dylib+0x257a
+  stack[6]   0x2d80bc9dd40 Google Chrome for Testing Framework (data)+0x119d40
+  stack[21]  0x2d7fbabd814 libsystem_platform.dylib+0x2814
+  stack[35]  0x2d7fbf95e42 Google Chrome for Testing Framework+0x161e42
+  stack[41]  0x2d7fc722eeb Google Chrome for Testing Framework+0x8eeeeb   <- A: 2nd acquire (aborts)
+  stack[45]  0x2d7fc722dd6 Google Chrome for Testing Framework+0x8eedd6   <- B: 1st acquire caller
+  stack[49]  0x2d7fd517f95 Google Chrome for Testing Framework+0x16e3f95
+  stack[63]  0x2d7fd697286 Google Chrome for Testing Framework+0x1863286
+  stack[93]  0x2d7fd69687e Google Chrome for Testing Framework+0x186287e
+  stack[94]  0x2d7fb7b2e66 libsystem_kernel.dylib+0x42e66
+  stack[95]  0x2d7fc481063 Google Chrome for Testing Framework+0x64d063   <- init stub
+  stack[105] 0x2d7fdf5eb91 Google Chrome for Testing Framework+0x212ab91  <- dyld init
+  stack[139] 0x2d7fdf5e9d2 Google Chrome for Testing Framework+0x212a9d2  <- dyld init
+  stack[171] 0x2d7fdf5e567 Google Chrome for Testing Framework+0x212a567  <- dyld init
+  stack[185] 0x2d7fdf5e4c0 Google Chrome for Testing Framework+0x212a4c0  <- dyld init
+  stack[195] 0x2d7fdf5e4c0 Google Chrome for Testing Framework+0x212a4c0  <- dyld init
+  stack[197] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+  stack[200] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+  stack[202] 0x2d7fdf5e4c0 Google Chrome for Testing Framework+0x212a4c0  <- dyld init
+  stack[214] 0x2d7fdf5e4c0 Google Chrome for Testing Framework+0x212a4c0  <- dyld init
+  stack[215] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+  stack[219] 0x2d8099f55fc Google Chrome for Testing Framework+0xdbc15fc
+  stack[233] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+  stack[248] 0x2d7fbe34108 Google Chrome for Testing Framework+0x108
+  stack[249] 0x2d7fbe34428 Google Chrome for Testing Framework+0x428
+  stack[250] 0x2d7fbe34068 Google Chrome for Testing Framework+0x68
+  stack[251] 0x2d7fbe34020 Google Chrome for Testing Framework+0x20
+  stack[253] 0x2d7fbe34020 Google Chrome for Testing Framework+0x20
+  stack[254] 0x2d7fbe34020 Google Chrome for Testing Framework+0x20
+  stack[275] 0x2d7fbe367f0 Google Chrome for Testing Framework+0x27f0
+```
+
+**Frames A/B present:** stack[41] = 0x8eeeeb (A, 2nd acquire, aborts),
+stack[45] = 0x8eedd6 (B, 1st acquire caller), stack[95] = 0x64d063 (init stub).
+**Frame B 0x95d44f5 absent** (consistent with #71 — B's frame was consumed).
+**New layer above stub:** stack[105..275] in the 0x212a4c0 region — dyld
+initializer of Chrome Framework (first line of walk: "calling initializer
+function 0x2d7fdf5e4c0"; base+0x212a4c0 = 0x2d7fdf5e4c0).
+
+### Verdict — 0x307 is a guest tid
+
+The lock word `0000000100000307` encodes: upper 32 bits = 1 (locked flag),
+lower 32 bits = 0x307 (owner id). The owner id 0x307 = 775 decimal.
+
+- **Not host tid:** host_tid = 101091 (0x18AF3) — different space, different value.
+- **Not guest pid:** guest_pid = 30192 (0x75F0) — different value.
+- **Guest tid:** 0x307 = 775 is a plausible guest thread id. The 512-word walk
+  shows 0x307 appearing in stack frames (e.g. [gstack+ 112] 0x0000030700000307,
+  [gstack+ 136] 0x0000000000000307, [gstack+ 144] 0x0005000000000307), confirming
+  0x307 is a live guest-space id used in thread contexts.
+
+**Fork verdict:** the lock owner 0x307 is a **guest tid** (thread id in the
+guest address space), not a host tid and not a guest pid. The lock word stores
+the guest tid of the owning thread in its lower 32 bits.
+
+### Repro
+
+```sh
+grep -n 'lock word\|reentry\|stack\[' /tmp/iokit-probe-72-1.log | head -20
+```
