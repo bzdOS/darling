@@ -3040,6 +3040,28 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                     (unsigned long long)mc->mc_rdi);
             }
             fflush(stderr);
+            /* Control #71: name the re-entry. Print the thread id and walk the
+             * guest stack, resolving each word to image+offset, so the FIRST
+             * acquire's return address (a frame below the second one, #65's
+             * 0x8eeeeb) is visible in the log. */
+            fprintf(stderr, "[darling-mldr] reentry: tid=%ld rsp=0x%llx\n",
+                    (long)getpid(), (unsigned long long)mc->mc_rsp);
+            {
+                char ws[256];
+                for (int i = 0; i < 128; i++) {
+                    uint64_t w = 0;
+                    uintptr_t a = (uintptr_t)mc->mc_rsp + (uintptr_t)(8 * i);
+                    if (!mldr_dump_read_guarded(a, &w))
+                        break;
+                    if (w < 0x1000000ULL)
+                        continue;
+                    mldr_describe_addr((uintptr_t)w, ws, sizeof(ws));
+                    if (strstr(ws, "<unknown>") == NULL)
+                        fprintf(stderr, "[darling-mldr]   stack[%d] 0x%llx %s\n",
+                                i, (unsigned long long)w, ws);
+                }
+            }
+            fflush(stderr);
             crash_debug_handler(signo, info, uctx);
             return;
         }
