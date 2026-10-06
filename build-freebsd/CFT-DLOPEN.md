@@ -9387,7 +9387,7 @@ MLDR_TRAP_WATCH_OFF=0x100667a0  ... launch-dynamic  > /tmp/iokit-probe-97-<name>
 |---|---|---|---|
 | 1 | 0x8eedc0 (F0 entry, before A#1) | /tmp/iokit-probe-97-f0.log | **0x0000000000000000** (free) |
 | 2 | 0x8eedcb (A#1 return, before A#2) | /tmp/iokit-probe-97-a1ret.log | **0x0000000100000307** (owner 0x307) |
-| 3 | 0x8eee16 (A#2 entry, before trylock) | pending | pending |
+| 3 | 0x8eee16 (A entry, before trylock) | /tmp/iokit-probe-97-a2entry.log | **0x0000000000000000** (free) |
 
 Verbatim lines:
 
@@ -9398,7 +9398,29 @@ Verbatim lines:
 # trap 2 (0x8eedcb)
 [darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x8eedcb ===
   watch +0x100667a0 @0x16773a89a7a0 = 0x0000000100000307 (ok=1)
+# trap 3 (0x8eee16)
+[darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x8eee16 ===
+  watch +0x100667a0 @0x3256e1a9a7a0 = 0x0000000000000000 (ok=1)
 ```
+
+**Note on point 3:** 0x8eee16 is the shared entry of accessor A, so the one-shot
+trap fires on the **first** A call (A#1), not A#2 — the reading is A#1's entry.
+
+### What the three readings say
+
+```
+F0 entry (before A#1) : 0            (free)
+A#1 entry (0x8eee16)  : 0            (free)
+A#1 return (0x8eedcb) : 0x...00000307 (owner 0x307)
+```
+
+The 0 -> 0x307 transition happens **inside A#1**: its trylock (0x8eee1d)
+acquires the lock (owner=self), and the word is **still 0x307 at A#1's return**
+(0x8eedcb) — so A#1 did **not** leave the word cleared, i.e. it did not reach (or
+did not apply) the unlock 0x8eee7b before returning. The next call (A#2) then
+finds owner==self. This is the runtime answer to the contradiction: the word is
+not free at A#2's trylock, and the holder is A#1's own acquire, unclosed across
+A#1's return.
 
 ### Interpose recount (method #84) for the lock trio
 
