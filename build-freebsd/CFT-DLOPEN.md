@@ -9526,3 +9526,51 @@ llvm-objdump -d --start-address=0x8eedc0 --stop-address=0x8eee90 "$FRAMEWORK" | 
 llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdc00 "$FRAMEWORK"
 grep -nE "(callq|jmp)\s+0x8eee10" /tmp/cft-full-disasm-91.txt
 ```
+
+## Control #99 — the unlock IS executed on A#1's return path, but the word stays 0x307
+
+**Date:** 2026-10-06
+**Branch:** task/unlock-retval-trace
+**Base:** pr-arm64 = 9588fb9413dd0564d3d6eb75cf0c9b556556130b
+
+**Goal:** on A#1's return path, is the unlock 0x8eee7b executed and how does it end.
+
+**Method:** the mldr trap handler was extended to also print `rax` (one line:
+`rdi/rsi/rdx/rcx/rax`), rebuilt via `build-freebsd/build-mldr-only.sh`; then the
+same MLDR_TRAP_AT run as #97, two traps: at the unlock entry (0x8eee7b) and at the
+return of its `callq` (0x8eee80), each with `MLDR_TRAP_WATCH_OFF=0x100667a0`.
+
+### Table — verbatim log lines
+
+| run | event | trap | rip | rdi | rax | word 0x100667a0 |
+|---|---|---|---|---|---|---|
+| iokit-probe-99-unlock-entry.log | entry 0x8eee7b | hit | +0x8eee7b | 0x226b4de9a7a0 | 0x4c235f9ccad8eb24 | **0x0000000100000307** |
+| iokit-probe-99-unlock-ret.log | return 0x8eee80 | hit | +0x8eee80 | 0x5492e29a7a0 | 0xd2518199bfe1459e | **0x0000000100000307** |
+
+```
+# entry 0x8eee7b
+[darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x8eee7b ===
+  rdi=0x226b4de9a7a0 rsi=0x8 rdx=0x0 rcx=0x3259fc0ca71eefc3 rax=0x4c235f9ccad8eb24
+  watch +0x100667a0 @0x226b4de9a7a0 = 0x0000000100000307 (ok=1)
+# return 0x8eee80 (after callq 0xdbbeffc)
+[darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x8eee80 ===
+  rdi=0x5492e29a7a0 rsi=0x8 rdx=0x0 rcx=0x6ea3aad8ee6dbb0b rax=0xd2518199bfe1459e
+  watch +0x100667a0 @0x5492e29a7a0 = 0x0000000100000307 (ok=1)
+```
+
+### Verdict (control #99, one line)
+
+The unlock at 0x8eee7b **is executed** on A#1's return path (trap at its entry
+hits, `rdi` = the lock word 0x100667a0), but at the return of its `callq`
+(0x8eee80) the word is **still 0x0000000100000307** — the unlock did **not** clear
+it; `rax` is a void-function leftover (meaningless). So the word held across A#1's
+return is the un-cleared lock word, not a different holder.
+
+### Repro
+
+```sh
+# mldr rebuilt with the rax print (see build-freebsd/build-mldr-only.sh)
+sh /tmp/stub97-run.sh 0x8eee7b /tmp/iokit-probe-99-unlock-entry.log
+sh /tmp/stub97-run.sh 0x8eee80 /tmp/iokit-probe-99-unlock-ret.log
+grep -E "MLDR_TRAP_AT hit|rdi=0x|watch \+" /tmp/iokit-probe-99-unlock-*.log
+```

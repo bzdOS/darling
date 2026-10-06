@@ -1243,9 +1243,10 @@ mldr_report_trap(const struct mldr_trap *trap, const mcontext_t *mc)
 
     fprintf(stderr, "\n[darling-mldr] === MLDR_TRAP_AT hit: %s ===\n",
             trap->label);
-    fprintf(stderr, "  rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx\n",
+    fprintf(stderr, "  rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx rax=0x%llx\n",
             (unsigned long long)mc->mc_rdi, (unsigned long long)mc->mc_rsi,
-            (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx);
+            (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx,
+            (unsigned long long)mc->mc_rax);
 
     /* __cxa_throw(void *exc, std::type_info *tinfo, void (*dest)(void*)) —
      * tinfo->__type_name is the second pointer of the type_info object. */
