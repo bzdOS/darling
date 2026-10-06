@@ -8432,7 +8432,7 @@ exchange (UNLOCK).
 ### Step 2 — the unlock is `_os_unfair_lock_unlock`, and it CLEARS the owner
 
 ```
-$ llvm-objdump -d --start-address=0xdbbeffc --stop-address=0xdbb002 "$FRAMEWORK"
+$ llvm-objdump -d --start-address=0xdbbeffc --stop-address=0xdbbf002 "$FRAMEWORK"
   dbbeffc: ff 25 fe 40 5e 01   jmpq *0x15e40fe(%rip)   ## 0xf1a3100
 $ python3 -c "print(hex(0xdbbeffc+6+0x15e40fe))"
 0xf1a3100
@@ -8506,4 +8506,112 @@ python3 -c "print(hex(0xdbbeffc+6+0x15e40fe))"
 llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep 0xF1A3100
 llvm-nm "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep _os_unfair_lock_unlock
 llvm-objdump -d --arch-name=x86_64 --start-address=0x28c0 --stop-address=0x295b "$LSP"
+```
+
+## Control #88 — the abort at +0x8237, the blocking wrapper 0x161ce0, and the #87 stop-address typo
+
+**Date:** 2026-10-06
+**Branch:** task/lock-abort-map
+**Base:** pr-arm64 = c1dfa3564cef9b47c44f3d4d2845f91a992fa74c (`git rev-parse` before branching)
+
+### Step 1 — +0x8237 is the ud2 of `__os_unfair_lock_recursive_abort`, reached by the owner==self check
+
+```
+$ llvm-objdump -d --arch-name=x86_64 --start-address=0x81d0 --stop-address=0x8260 "$LSP"
+  8220: pushq %rbp
+  8221: movq  %rsp, %rbp
+  8224: movq  %rdi, -0x8(%rbp)
+  8228: movq  %rsi, -0x10(%rbp)
+  822c: ud2                       ; __os_lock_corruption_abort
+  8230: pushq %rbp
+  8231: movq  %rsp, %rbp
+  8234: movl  %edi, -0x4(%rbp)
+  8237: ud2                       ; __os_unfair_lock_recursive_abort   <- crash PC
+  8240: pushq %rbp
+  ...
+  8247: ud2                       ; __os_unfair_lock_unowned_abort
+  8257: ud2                       ; __os_unfair_lock_corruption_abort
+```
+
+So the crash PC is the `ud2` of **`__os_unfair_lock_recursive_abort`** (export
+@0x8230). It is entered from `_os_unfair_lock_lock_slow`
+(`src/external/libplatform/src/os/lock.c`, submodule @60b178e):
+
+```
+$ cd src/external/libplatform && git rev-parse HEAD
+60b178e0541e373634cec7af0ab685163d26a9d5
+$ grep -n "OS_ULOCK_IS_OWNER(current, self\|_os_unfair_lock_recursive_abort(self)" src/os/lock.c
+521:	while (unlikely((current = os_atomic_load(&l->oul_value, relaxed)) != OS_LOCK_NO_OWNER)) {
+524:		if (unlikely(OS_ULOCK_IS_OWNER(current, self, allow_anonymous_owner))) {
+525:			return _os_unfair_lock_recursive_abort(self);
+```
+
+**Condition, in words:** the lock value `current` is not `OS_LOCK_NO_OWNER` and
+`OS_ULOCK_OWNER(current) == self` — i.e. `(current | OS_ULOCK_NOWAITERS_BIT) ==
+self` (lock.c:437/524) — the **same thread already owns the lock** (recursion).
+It is *not* the NOWAITERS bit by itself: NOWAITERS only records waiters
+(lock.c:430-435); the abort branch is the owner==self test at 524.
+
+### Step 2 — blocking wrapper 0x161ce0: rdi from the caller, calls trylock + lock_with_options
+
+```
+$ llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161d10 "$FRAMEWORK"
+  161ce0: pushq %rbp
+  161ce1: movq  %rsp, %rbp
+  161ce4: pushq %r15
+  161ce6: pushq %r14
+  161ce8: pushq %r12
+  161cea: pushq %rbx
+  161ceb: movq  %rdi, %rbx          ; rbx = arg0 (lock pointer from the caller)
+  161cee: movl  $0x1, %r14d
+  161cf4: xorl  %r15d, %r15d
+  161cf7: movl  $0x10, %r12d
+  161cfd: movq  %rbx, %rdi          ; rdi = the same lock pointer
+  161d00: callq 0xdbbf002           ; _os_unfair_lock_trylock
+  161d05: testb %al, %al
+  161d07: jne   0x161e47            ; trylock ok -> return
+```
+
+The wrapper's calls, resolved by bind (slot -> LSysX):
+
+```
+$ llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -E "F1A3108|F1A5990"
+__DATA_CONST __got 0xF1A3108 ... bind 0x0 LSysX _os_unfair_lock_trylock
+__DATA_CONST __got 0xF1A5990 ... bind 0x0 LSysX _os_unfair_lock_lock_with_options (weak import)
+$ llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep -E "dbbf002|dbc0664"
+0x000000000dbbf002  1478 _os_unfair_lock_trylock
+0x000000000dbc0664  1482 _os_unfair_lock_lock_with_options
+```
+
+So 0x161ce0 calls **`_os_unfair_lock_trylock`** (0x161d00) and
+**`_os_unfair_lock_lock_with_options`** (0x161e3d, the blocking acquire). Its
+rdi comes from the caller (A passes rdi=0x100667a0); the wrapper only saves it in
+rbx and forwards it. The wrapper **does not write the lock word itself** — it has
+no store to 0x100667a0 (only the forwarded pointer); the owner write happens
+inside the primitives. So the wrapper is not the owner writer.
+
+### Step 3 — #87 stop-address typo fixed
+
+In `## Control #87` the disasm command's stop address had a missing `f` in the
+hex (stop < start — a paste typo). Corrected to `--stop-address=0xdbbf002`
+(0xdbbeffc + 6), so the one-stub slice is valid; a grep for the old five-digit
+value over the file is now empty.
+
+### Verdict (control #88, one line)
+
++0x8237 is the `ud2` of `__os_unfair_lock_recursive_abort`, reached by the
+owner==self check at `lock.c:524` (`(current|NOWAITERS)==self`) -> call at
+`lock.c:525`; the blocking wrapper 0x161ce0 forwards the caller's rdi to
+`_os_unfair_lock_trylock` / `_os_unfair_lock_lock_with_options` (LSysX) and
+**writes nothing** into 0x100667a0; the #87 stop-address typo is fixed.
+
+### Repro
+
+```sh
+LSP="$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib"
+llvm-objdump -d --arch-name=x86_64 --start-address=0x81d0 --stop-address=0x8260 "$LSP"
+( cd src/external/libplatform && git rev-parse HEAD )
+grep -n "OS_ULOCK_IS_OWNER(current, self\|_os_unfair_lock_recursive_abort(self)" src/external/libplatform/src/os/lock.c
+llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161d10 "$FRAMEWORK"
+llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -E "F1A3108|F1A5990"
 ```
