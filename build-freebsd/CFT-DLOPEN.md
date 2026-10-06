@@ -7768,3 +7768,145 @@ PY
 llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -icE "95d44b0|95d44c0"
 sed -n '2335,2366p' src/external/dyld/src/ImageLoaderMachO.cpp
 ```
+
+## Control #82 — A-cluster unlock path: the second acquire's trylock fails and falls into the blocking lock; (a) and (c) refuted
+
+**Date:** 2026-10-06
+**Branch:** task/a-unlock-path
+**Base:** pr-arm64 = d64d624e2903e59ff42bde180d6a1f271f8de767 (`git rev-parse` before branching)
+
+**Goal:** explain how the second call of accessor A sees `owner==self` on
+0x100667a0 although "every A path unlocks".
+
+### Step 1 — verbatim A cluster 0x8eedc0..0x8eeef8 (rel32 recomputed)
+
+F0 wrapper `0x8eedc0` (two calls of A, combined into a 64-bit value):
+
+```
+$ llvm-objdump -d --start-address=0x8eedc0 --stop-address=0x8eeef8 "$FRAMEWORK"
+  8eedc0: 55                pushq %rbp
+  8eedc1: 48 89 e5          movq  %rsp, %rbp
+  8eedc4: 53                pushq %rbx
+  8eedc5: 50                pushq %rax
+  8eedc6: e8 45 00 00 00    callq 0x8eee10        ; A call #1  (ret 0x8eedcb)
+  8eedcb: 89 c3             movl  %eax, %ebx
+  8eedcd: 48 c1 e3 20       shlq  $0x20, %rbx
+  8eedd1: e8 3a 00 00 00    callq 0x8eee10        ; A call #2  (ret 0x8eedd6)
+  8eedd6: 48 8b 0d 3b 43 8b 0e  movq 0xe8b433b(%rip), %rcx  ## 0xf1a3118
+  ...                    ; combine eax<<32|eax into rax, xorshift guard
+  8eee0d: c3                retq
+```
+
+Accessor A `0x8eee10` (the lock/token object at 0x100667a0):
+
+```
+  8eee10: 55                pushq %rbp
+  8eee11: 48 89 e5          movq  %rsp, %rbp
+  8eee14: 53                pushq %rbx
+  8eee15: 50                pushq %rax
+  8eee16: 48 8d 3d 83 79 77 0f  leaq 0xf777983(%rip), %rdi  ## 0x100667a0   (rdi = lock)
+  8eee1d: e8 e0 01 2d 0d    callq 0xdbbf002        ; _os_unfair_lock_trylock  ACQUIRE-A
+  8eee22: 84 c0             testb %al, %al
+  8eee24: 0f 84 b5 00 00 00 je    0x8eeedf        ; trylock failed -> blocking lock
+  8eee2a: 80 3d 73 79 77 0f 01  cmpb $1, 0xf777973(%rip)  ## 0x100667a4     (flag)
+  8eee31: 75 56             jne   0x8eee89        ; flag != 1 -> init
+  8eee33: 48 8b 05 76 79 77 0f  movq 0xf777976(%rip), %rax  ## 0x100667b0
+  8eee3a: 48 8d 3d 5f 79 77 0f  leaq 0xf77795f(%rip), %rdi  ## 0x100667a0   (rdi = lock for unlock)
+  8eee41: 48 8b 0d 60 79 77 0f  movq 0xf777960(%rip), %rcx  ## 0x100667a8
+  8eee48: 48 89 05 59 79 77 0f  movq %rax, 0xf777959(%rip)  ## 0x100667a8
+  ...                    ; xorshift on 0x100667a8/0x100667b0 (PRNG state)
+  8eee6d: 48 89 1d 3c 79 77 0f  movq %rbx, 0xf77793c(%rip)  ## 0x100667b0
+  8eee74: 48 01 c3          addq  %rax, %rbx
+  8eee77: 48 c1 eb 20       shrq  $0x20, %rbx
+  8eee7b: e8 7c 01 2d 0d    callq 0xdbbeffc        ; _os_unfair_lock_unlock  UNLOCK
+  8eee80: 89 d8             movl  %ebx, %eax
+  8eee82: 48 83 c4 08       addq  $0x8, %rsp
+  8eee86: 5b                popq  %rbx
+  8eee87: 5d                popq  %rbp
+  8eee88: c3                retq
+  8eee89: 0f 57 c0          xorps %xmm0, %xmm0     ; init: zero token
+  8eee8c: 0f 11 05 15 79 77 0f  movups %xmm0, 0xf777915(%rip)  ## 0x100667a8
+  8eee93: 48 8d 7d f0       leaq  -0x10(%rbp), %rdi
+  8eee97: 48 c7 07 00 00 00 00  movq $0x0, (%rdi)
+  8eee9e: be 08 00 00 00    movl  $0x8, %esi
+  8eeea3: e8 4e 04 2d 0d    callq 0xdbbf2f6        ; _getentropy (fill #1)  [rel32 -> 0xdbbf2f6]
+  8eeea8: 85 c0             testl %eax, %eax
+  8eeeaa: 75 44             jne   0x8eeef0        ; error -> int3/ud2
+  8eeeac: 48 8d 7d f0       leaq  -0x10(%rbp), %rdi
+  8eeeb0: 48 8b 07          movq  (%rdi), %rax
+  8eeeb3: 48 89 05 ee 78 77 0f  movq %rax, 0xf7778ee(%rip)  ## 0x100667a8
+  8eeeba: 48 c7 07 00 00 00 00  movq $0x0, (%rdi)
+  8eeec1: be 08 00 00 00    movl  $0x8, %esi
+  8eeec6: e8 2b 04 2d 0d    callq 0xdbbf2f6        ; _getentropy (fill #2)  [rel32 -> 0xdbbf2f6]
+  8eeecb: 85 c0             testl %eax, %eax
+  8eeecd: 75 24             jne   0x8eeef3        ; error -> int3/ud2
+  8eeecf: 48 8b 45 f0       movq  -0x10(%rbp), %rax
+  8eeed3: c6 05 ca 78 77 0f 01  movb $0x1, 0xf7778ca(%rip)  ## 0x100667a4   (flag = 1)
+  8eeeda: e9 5b ff ff ff    jmp   0x8eee3a        ; -> unlock path
+  8eeedf: 48 8d 3d ba 78 77 0f  leaq 0xf7778ba(%rip), %rdi  ## 0x100667a0   (rdi = lock)
+  8eeee6: e8 f5 2d 87 ff    callq 0x161ce0        ; blocking acquire       ACQUIRE-B
+  8eeeeb: e9 3a ff ff ff    jmp   0x8eee2a        ; -> flag check
+  8eeef0: cc / 0f 0b       int3; ud2
+  8eeef3: cc / 0f 0b       int3; ud2
+```
+
+rel32 recomputes: 0x8eee16+7+0xf777983=0x100667a0; 0x8eee2a+7+0xf777973=0x100667a4;
+0x8eee33+7+0xf777976=0x100667b0; 0x8eee3a+7+0xf77795f=0x100667a0;
+0x8eee41+7+0xf777960=0x100667a8; 0x8eee48+7+0xf777959=0x100667a8;
+0x8eee6d+7+0xf77793c=0x100667b0; 0x8eee8c+7+0xf777915=0x100667a8;
+0x8eeea3+5+0x0d2d044e=0xdbbf2f6; 0x8eeec6+5+0x0d2d042b=0xdbbf2f6;
+0x8eeeb3+7+0xf7778ee=0x100667a8; 0x8eeed3+7+0xf7778ca=0x100667a4;
+0x8eeedf+7+0xf7778ba=0x100667a0; 0x8eee7b+5+0x0d2d017c=0xdbbeffc;
+0x8eee1d+5+0x0d2d01e0=0xdbbf002; 0x8eeee6+5+0xff872df5=0x161ce0.
+
+### Step 2 — acquire/unlock points of 0x100667a0 and the role of flag 0x100667a4
+
+| site | instruction | lock arg | role |
+|---|---|---|---|
+| 0x8eee1d | `callq 0xdbbf002` = `_os_unfair_lock_trylock` | 0x100667a0 | ACQUIRE-A (both calls) |
+| 0x8eeee6 | `callq 0x161ce0` (blocking) | 0x100667a0 | ACQUIRE-B (trylock failed) |
+| 0x8eee7b | `callq 0xdbbeffc` = `_os_unfair_lock_unlock` | 0x100667a0 | UNLOCK |
+
+Flag 0x100667a4: **read** only at 0x8eee2a (`cmpb $1`), **written** only at
+0x8eeed3 (init, =1) inside A (and at 0x95d44fa in B, which #81 showed is
+unreachable). The flag gates the **init** (0x8eee89), not the unlock: at
+flag==1 A falls through 0x8eee33 -> 0x8eee3a -> UNLOCK; at flag!=1 A runs the
+init and `jmp 0x8eee3a` -> UNLOCK. Every path reaches 0x8eee7b (or traps at
+0x8eeef0/0x8eeef3 on getentropy error). **No branch skips the unlock** — the
+head's candidate (a) is refuted by the listing.
+
+### Step 3 — full-image xref of 0x100667a0: only A
+
+```
+$ llvm-objdump -d "$FRAMEWORK" | grep -nE "100667a0"
+  8eee16: leaq 0xf777983(%rip), %rdi   ## 0x100667a0   (A)
+  8eee3a: leaq 0xf77795f(%rip), %rdi   ## 0x100667a0   (A)
+  8eeedf: leaq 0xf7778ba(%rip), %rdi   ## 0x100667a0   (A)
+```
+
+Three sites, all in A. The only other chain function that takes locks is
+0x1862820, and its acquires are on different addresses: 0x186285f (`rdi+0xc0`, a
+runtime address — 0x10066940 for the object 0x10066880 built by 0x212aa00),
+0x1862a71 (0xfdef098), 0x1862abd (**0x10066798**).
+So no chain function acquires 0x100667a0 — the head's candidate (c) is refuted.
+
+### Verdict (control #82, one line)
+
+The second call's ACQUIRE-A (`trylock` at 0x8eee1d on 0x100667a0) fails and
+falls into ACQUIRE-B (blocking at 0x8eeee6), where the owner is self: measured,
+the A listing has **no unlock-skipping branch** (both flag branches reach
+0x8eee7b) so it is not (a), and **only A references 0x100667a0** (0x1862820's
+locks are 0x10066940/0xfdef098/0x10066798) so it is not (c); the only remaining
+mechanism is (b), a re-entrant A entry while an earlier A still holds the lock —
+whose re-entry point is not visible in the A cluster itself (its locked region's
+only call is the load-bound `_getentropy`, 0x8eeea3/0x8eeec6), an honest miss.
+
+### Repro
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-objdump -d --start-address=0x8eedc0 --stop-address=0x8eeef8 "$FRAMEWORK"
+llvm-objdump -d --start-address=0x1862820 --stop-address=0x1862b60 "$FRAMEWORK" | grep -E "callq\s+0xdbbf002|callq\s+0xdbbeffc|callq\s+0x161ce0"
+llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt
+grep -nE "100667a0" /tmp/cft-full-disasm.txt
+```
