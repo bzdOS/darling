@@ -3091,6 +3091,92 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
         mldr_tlog("SIGILL LEAVE", (long)mc->mc_rax, (long)linux_nr);
 }
+
+/* ── SIGTRAP handler (Control #76: instrumented stub 0x64d020 entry) ─────── */
+
+/*
+ * purpose:  Catch the 0xCC planted at the Chrome framework stub 0x64d020
+ *           entry (a one-byte file patch of the overlay image, NOT an
+ *           MLDR_TRAP_AT plant) and report the live caller: at stub entry
+ *           nothing has been pushed yet, so [rsp] is the caller's return
+ *           address. Then emulate the overwritten `pushq %rbp` and resume,
+ *           so every entry is reported, not just the first.
+ *
+ * input:    signo — SIGTRAP; info — siginfo_t; uctx — ucontext_t*
+ * output:   (none — modifies *uctx in place when resuming)
+ * sideEffects: prints one `stub-entry` block per hit (site, [rsp] raw +
+ *              resolved, 8 stack words raw hex); advances rip past the int3
+ *              with the push emulated; re-raises as the default action for
+ *              any int3 that is not our site.
+ */
+static int _mldr_stub_entry_hits = 0;
+
+static void
+sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
+{
+    ucontext_t *uctx = (ucontext_t *)uctx_void;
+    mcontext_t *mc = &uctx->uc_mcontext;
+    /* FreeBSD delivers int3 with rip PAST the 1-byte instruction. */
+    uintptr_t site = (uintptr_t)mc->mc_rip - 1;
+    const uint8_t *at = (const uint8_t *)site;
+    char descr[256];
+
+    (void)info;
+    mldr_describe_addr(site, descr, sizeof(descr));
+    if (at[0] == 0xcc && strstr(descr, "+0x64d020") != NULL) {
+        uint64_t ret = 0;
+        int ret_ok = mldr_dump_read_guarded((uintptr_t)mc->mc_rsp, &ret);
+        char caller[256];
+        int hit;
+
+        _mldr_stub_entry_hits++;
+        hit = _mldr_stub_entry_hits;
+        if (ret_ok)
+            mldr_describe_addr((uintptr_t)ret, caller, sizeof(caller));
+        else
+            snprintf(caller, sizeof(caller), "<unreadable>");
+        fprintf(stderr,
+            "[darling-mldr] stub-entry: int3 hit #%d at %s (site=0x%llx)"
+            " rsp=0x%llx [rsp]=0x%llx %s\n",
+            hit, descr, (unsigned long long)site,
+            (unsigned long long)mc->mc_rsp,
+            (unsigned long long)ret, caller);
+        {
+            int i;
+            for (i = 0; i < 8; i++) {
+                uint64_t w = 0;
+                int ok = mldr_dump_read_guarded(
+                    (uintptr_t)mc->mc_rsp + (uintptr_t)(8 * i), &w);
+                fprintf(stderr,
+                    "[darling-mldr] stub-entry: stack[%d]=0x%016llx%s\n",
+                    i, (unsigned long long)w, ok ? "" : " (unreadable)");
+            }
+        }
+        fflush(stderr);
+        /* Emulate the overwritten `pushq %rbp` (original first byte 0x55)
+         * and resume past the int3, so the next entry traps again. */
+        {
+            uintptr_t nsp = (uintptr_t)mc->mc_rsp - 8;
+            uint64_t probe = 0;
+            if (mldr_dump_read_guarded(nsp, &probe)) {
+                *(volatile uint64_t *)nsp = (uint64_t)mc->mc_rbp;
+                mc->mc_rsp = nsp;
+                mc->mc_rip = site + 1;
+                return;
+            }
+            fprintf(stderr,
+                "[darling-mldr] stub-entry: stack below rsp unreadable,"
+                " dying honestly\n");
+            fflush(stderr);
+        }
+    }
+    /* Not our site (or cannot resume): honest death. */
+    {
+        struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+        sigaction(signo, &sa_dfl, NULL);
+        raise(signo);
+    }
+}
 #endif /* __x86_64__ */
 
 /* ── public API ────────────────────────────────────────────────────────────── */
@@ -3304,6 +3390,19 @@ setup_macos_syscall_trap(void)
     if (sigaction(SIGILL, &sa_ill, NULL) < 0) {
         fprintf(stderr,
             "[darling-mldr] FATAL: sigaction(SIGILL) failed: %s\n",
+            strerror(errno));
+    }
+
+    /* Control #76: SIGTRAP for the 0xCC planted at the Chrome framework
+     * stub 0x64d020 entry (file patch, reported + resumed per hit). */
+    struct sigaction sa_trap;
+    memset(&sa_trap, 0, sizeof(sa_trap));
+    sa_trap.sa_sigaction = sigtrap_handler;
+    sigemptyset(&sa_trap.sa_mask);
+    sa_trap.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    if (sigaction(SIGTRAP, &sa_trap, NULL) < 0) {
+        fprintf(stderr,
+            "[darling-mldr] FATAL: sigaction(SIGTRAP) failed: %s\n",
             strerror(errno));
     }
 
