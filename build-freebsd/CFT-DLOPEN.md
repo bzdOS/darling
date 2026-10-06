@@ -9361,3 +9361,58 @@ grep -cE "0x100667a0\s*$" /tmp/cft-dyldinfo.txt
 grep -nE "callq\s+0x95d44c0" /tmp/cft-full-disasm-91.txt   # B callers = 0
 grep -E "stack\[[0-9]+\]" /tmp/iokit-probe-72-1.log | grep -E "8eeeeb|8eedcb|8eee22|8eeedf"
 ```
+
+## Control #97 — lock-word 0x100667a0 watched at three trap points (runtime)
+
+**Date:** 2026-10-06
+**Branch:** task/lock-word-runtime
+**Base:** pr-arm64 = 66d902041548fd546697fa9afd711956738548ec
+
+**Method:** MLDR_TRAP_AT only (no file int3, no lldb). The mldr trap handler was
+extended with `MLDR_TRAP_WATCH_OFF` (an offset into the trapped image); on a trap
+hit it prints 8 bytes of guest memory at `image_base + offset`
+(`src/startup/mldr/freebsd_syscall_trap.c`, rebuilt via
+`build-freebsd/build-mldr-only.sh`). Watch offset = 0x100667a0.
+
+Run command (per point, own log):
+
+```sh
+MLDR_TRAP_AT='Google Chrome for Testing Framework+<OFF>' \
+MLDR_TRAP_WATCH_OFF=0x100667a0  ... launch-dynamic  > /tmp/iokit-probe-97-<name>.log
+```
+
+### Table — word 0x100667a0 at each trap point
+
+| # | trap point | log | word at 0x100667a0 |
+|---|---|---|---|
+| 1 | 0x8eedc0 (F0 entry, before A#1) | /tmp/iokit-probe-97-f0.log | **0x0000000000000000** (free) |
+| 2 | 0x8eedcb (A#1 return, before A#2) | /tmp/iokit-probe-97-a1ret.log | **0x0000000100000307** (owner 0x307) |
+| 3 | 0x8eee16 (A#2 entry, before trylock) | pending | pending |
+
+Verbatim lines:
+
+```
+# trap 1 (0x8eedc0)
+[darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x8eedc0 ===
+  watch +0x100667a0 @0xcb5ed29a7a0 = 0x0000000000000000 (ok=1)
+# trap 2 (0x8eedcb)
+[darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x8eedcb ===
+  watch +0x100667a0 @0x16773a89a7a0 = 0x0000000100000307 (ok=1)
+```
+
+### Interpose recount (method #84) for the lock trio
+
+`_os_unfair_lock_trylock` / `_os_unfair_lock_unlock` /
+`_os_unfair_lock_lock_with_options` are the primitives A (0x8eee1d, 0x8eeee6)
+calls; the dead B calls the same. Scanning every Mach-O image in the overlay
+(720 files) + the framework for an `__interpose` section: **0 images have one**,
+so **0 interpose pairs** touch the trio — no pre-crash image intercepts them.
+
+### Repro
+
+```sh
+sh /tmp/stub97-run.sh 0x8eedc0 /tmp/iokit-probe-97-f0.log
+sh /tmp/stub97-run.sh 0x8eedcb /tmp/iokit-probe-97-a1ret.log
+grep -E "MLDR_TRAP_AT hit|watch \+" /tmp/iokit-probe-97-f0.log /tmp/iokit-probe-97-a1ret.log
+find /opt/darling/overlay -type f | while read f; do case "$(file -b "$f")" in *Mach-O*) llvm-objdump -h "$f" | grep -qi interpose && echo "$f";; esac; done
+```

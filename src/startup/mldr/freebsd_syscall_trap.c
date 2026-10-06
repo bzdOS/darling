@@ -1081,6 +1081,7 @@ struct mldr_image {
 
 struct mldr_trap {
     uintptr_t addr;
+    uintptr_t image_base;
     char      label[96];
 };
 
@@ -1204,6 +1205,7 @@ mldr_plant_traps(uintptr_t base, size_t size, const char *name)
 
                         struct mldr_trap *t = &_mldr_traps[_mldr_trap_count++];
                         t->addr = (uintptr_t)at;
+                        t->image_base = base;
                         snprintf(t->label, sizeof(t->label), "%s+0x%lx",
                                  name, off);
                         fprintf(stderr,
@@ -1273,6 +1275,23 @@ mldr_report_trap(const struct mldr_trap *trap, const mcontext_t *mc)
                         mldr_describe_addr(slot, buf, sizeof(buf)));
                 break;
             }
+        }
+    }
+    /* Control #97: optional lock-word watch. MLDR_TRAP_WATCH_OFF is an offset
+     * into the trapped image; print 8 bytes of guest memory at
+     * trap->image_base + offset, so the lock word can be read at each trap
+     * point without a debugger. */
+    {
+        const char *woff = getenv("MLDR_TRAP_WATCH_OFF");
+
+        if (woff != NULL) {
+            unsigned long o = strtoul(woff, NULL, 0);
+            uintptr_t wa = trap->image_base + (uintptr_t)o;
+            uint64_t wv = 0;
+            int ok = mldr_dump_read_guarded(wa, &wv);
+
+            fprintf(stderr, "  watch +0x%lx @0x%llx = 0x%016llx (ok=%d)\n",
+                    o, (unsigned long long)wa, (unsigned long long)wv, ok);
         }
     }
     fflush(stderr);
