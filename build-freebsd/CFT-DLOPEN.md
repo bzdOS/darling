@@ -6319,3 +6319,90 @@ on the recursive abort print both. That names the outer holder directly.
 llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eee90 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
 llvm-objdump -d --start-address=0x95d44c0 --stop-address=0x95d4520 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
 ```
+
+## Control #71 — naming the first acquire of the global lock at the recursive abort
+
+**Date:** 2026-10-06
+**Branch:** task/reentry-abort-path
+**Base:** pr-arm64 = d13efa69c0d57f82bfd2edee237117e2d150fe70
+**Goal:** from the #70 honest miss, name the address of the FIRST acquire of
+fw+0x100667a0 by the thread that then hits __os_unfair_lock_recursive_abort.
+
+### Instrumentation (step 1, committed)
+
+On mldr's foreign-ud2 path, after the lock-word dump: print the thread id and
+walk 128 guest stack words, resolving each to image+offset.
+
+### Run 71-1 (new log name; not overwritten)
+
+```
+$ grep -n 'reentry:\|lock word\|genuine SIGILL\|stack\[' /tmp/iokit-probe-71-1.log
+1292563: genuine SIGILL (ud2, not a patched trampoline) at libsystem_platform.dylib+0x8237 ...
+1292564: lock word @0x1063f149a7a0: 0000000100000307 46d2dba5fb640975 b21fa2c5228f01a4 0000000000000000 (ok=1111 rdi=0x307)
+1292565: reentry: tid=45142 rsp=0x7fffffdfd680
+1292566:   stack[1]   0x1063e10bd57a libsystem_platform.dylib+0x257a
+1292567:   stack[6]   0x1063f129dd40 Google Chrome for Testing Framework (data)+0x119d40
+1292568:   stack[21]  0x1063e10bd814 libsystem_platform.dylib+0x2814
+1292569:   stack[35]  0x1063e1595e42 Google Chrome for Testing Framework+0x161e42
+1292570:   stack[41]  0x1063e1d22eeb Google Chrome for Testing Framework+0x8eeeeb
+1292571:   stack[45]  0x1063e1d22dd6 Google Chrome for Testing Framework+0x8eedd6
+1292572:   stack[49]  0x1063e2b17f95 Google Chrome for Testing Framework+0x16e3f95
+1292573:   stack[63]  0x1063e2c97286 Google Chrome for Testing Framework+0x1863286
+1292574:   stack[93]  0x1063e2c9687e Google Chrome for Testing Framework+0x186287e
+1292575:   stack[94]  0x1063e0db2e66 libsystem_kernel.dylib+0x42e66
+1292576:   stack[95]  0x1063e1a81063 Google Chrome for Testing Framework+0x64d063
+1292577:   stack[105] 0x1063e355eb91 Google Chrome for Testing Framework+0x212ab91
+```
+
+### The two acquires
+
+- **Second acquire (aborts):** stack[41] = Chrome fw+0x8eeeeb — the return of the
+  blocking lock at 0x8eeee6 in accessor A (0x8eee10-0x8eeeeb).
+- **First acquire:** not named by a frame. The chain that leads to the abort is
+  stack[95] = Chrome fw+0x64d063 — inside the init stub 0x64d020, exactly what
+  accessor B calls from its locked region (callq 0x95d44f5, after B's own
+  trylock 0x95d44d0 / blocking lock 0x95d44e0). So the first acquire is B's, and
+  the measured chain is:
+
+```
+  B: trylock/lock fw+0x100667a0 (0x95d44d0 / 0x95d44e0)   <- FIRST acquire (inferred)
+    -> B: init callq 0x64d020 at 0x95d44f5
+    -> init stub 0x64d020 (stack[95] = 0x64d063)
+    -> F0 0x8eedd6 (stack[45]) -> A 0x8eee10
+    -> A: blocking lock 0x161ce0 at 0x8eeee6 (stack[41] = 0x8eeeeb)  <- SECOND acquire
+    -> __os_unfair_lock_recursive_abort
+```
+
+The exact first-acquire return address (B's 0x95d44d5 / 0x95d44e5) is NOT in the
+128-word dump — B's frame was already consumed when the abort fired. That is the
+honest limit of the stack-walk measurement: the chain is measured, the
+first-acquire instruction is inferred from B's own locked region.
+
+### 0x95d44a0 bytes (refines #70)
+
+```
+$ llvm-objdump -d --start-address=0x95d44a0 --stop-address=0x95d44b0 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+  95d44a0: 55                pushq %rbp
+  95d44a1: 48 89 e5          movq  %rsp, %rbp
+  95d44a4: 48 89 37          movq  %rsi, (%rdi)
+  95d44a7: 48 89 77 08       movq  %rsi, 0x8(%rdi)
+  95d44ab: 5d                popq  %rbp
+  95d44ac: c3                retq
+```
+
+Six instructions (prologue + two stores + epilogue), not three — #70's
+"3-instruction setter" is refined to "a trivial two-field setter".
+
+### Verdict
+
+First acquire = accessor B's lock at 0x95d44d0 (trylock) / 0x95d44e0 (blocking),
+**inferred**; the measured chain is B's init call 0x95d44f5 -> init stub 0x64d020
+-> F0 0x8eedd6 -> A 0x8eee10 -> A's second acquire 0x8eeeeb -> recursive abort.
+The exact first-acquire return address is not in the dump (honest miss).
+
+### Repro
+
+```sh
+grep -n 'reentry:\|lock word\|genuine SIGILL\|stack\[' /tmp/iokit-probe-71-1.log
+llvm-objdump -d --start-address=0x95d44a0 --stop-address=0x95d44b0 "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+```
