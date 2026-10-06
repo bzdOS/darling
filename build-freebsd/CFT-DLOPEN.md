@@ -8288,3 +8288,113 @@ grep -nE "genuine SIGILL|lock word|reentry|stack\[|FATAL signal" /tmp/iokit-prob
 sed -n '1292597,1292603p' /tmp/iokit-probe-72-1.log      # FATAL header + register dump (rip/rbx/rdi)
 sed -n '425,445p' src/external/libplatform/src/os/lock.c # OS_ULOCK_* bit macros
 ```
+
+## Control #86 — first acquirer from the residuals; A's unlock is unconditional; 0x1863280 is inside 0x1863180
+
+**Date:** 2026-10-06
+**Branch:** task/a-first-acquire
+**Base:** pr-arm64 = 0bbf4776bf052bfd581339b300214d566627cb13 (`git rev-parse` before branching)
+
+**Goal:** name who held A's lock (0x100667a0) when the second entry aborted, using
+the raw stack residuals; and settle two attribution questions (A's unlock
+conditionality; whether 0x1863280 is a function).
+
+### Step 1 — residual scan of the raw stack walk (run 72-1)
+
+Framework base in that run = 0x2d7fbe34000, so the candidate return words map to:
+
+```
+0x8eedcb -> 0x2d7fc722dcb   F0 call #1 return
+0x8eedd6 -> 0x2d7fc722dd6   F0 call #2 return (live)
+0x64d063 -> 0x2d7fc481063   stub 0x64d020, ret of _getentropy
+0x64cf80 -> 0x2d7fc480f80   constructor 0x64cf80
+0x212ab3f-> 0x2d7fdf5eb3f   ret of callq 0xccdb60 #1
+0x212ab50-> 0x2d7fdf5eb50   ret of callq 0xccdb60 #2
+0x8eeeeb -> 0x2d7fc722eeb   A, ret of blocking 0x161ce0 (live)
+```
+
+Search over the raw `[gstack+..]` lines and the resolved `stack[..]` lines:
+
+| word | present? | index |
+|---|---|---|
+| 0x8eedcb (F0 call #1) | **absent** | — |
+| 0x8eedd6 (F0 call #2) | present | stack[45], gstack+360 |
+| 0x64d063 (stub residual) | present | stack[95] |
+| 0x64cf80 (ctor 0x64cf80) | **absent** | — |
+| 0x212ab3f (ccdb60 #1 ret) | **absent** | — |
+| 0x212ab50 (ccdb60 #2 ret) | **absent** | — |
+| 0x8eeeeb (A) | present | stack[41], gstack+328 |
+
+So **F0 call #1 returned** (its return word is gone); the live chain keeps only
+F0 call #2 (0x8eedd6). The stub's `_getentropy` return 0x64d063 survives as a
+residual, but the constructor that calls the stub (0xccdb60/0x64cf80) left no
+return word — so the stub branch, too, had already returned. Neither returned
+path leaves a live lock-holder frame in the residuals.
+
+### Step 2 — A's unlock is unconditional
+
+All branches in A 0x8eee10..0x8eeef0:
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
+  8eee24: je   0x8eeedf     ; trylock failed -> blocking acquire
+  8eee31: jne  0x8eee89     ; flag != 1 -> init
+  8eeeaa: jne  0x8eeef0     ; getentropy error -> int3/ud2
+  8eeecd: jne  0x8eeef3     ; getentropy error -> int3/ud2
+  8eeeda: jmp  0x8eee3a     ; init -> unlock path
+  8eeeeb: jmp  0x8eee2a     ; blocking -> flag check
+```
+
+Every target is either the init (0x8eee89), the blocking acquire (0x8eeedf), the
+unlock path (0x8eee3a), the flag check (0x8eee2a), or a trap (0x8eeef0/0x8eeef3).
+**No jcc targets 0x8eee80..0x8eee88 (past the unlock 0x8eee7b)**: the unlock at
+0x8eee7b is unconditional — no runtime condition jumps over it.
+
+Call #1 vs call #2 differ only in state: F0 calls A twice with no arguments (A
+sets its own rdi to 0x100667a0), so the only difference is the flag 0x100667a4 —
+call #1 sees flag 0, takes init (0x8eee89) and sets flag=1 at 0x8eeed3; call #2
+sees flag 1 and skips init at 0x8eee33. Both reach the unlock.
+
+### Step 3 — 0x1863280 is not a function: it is inside 0x1863180
+
+```
+$ llvm-objdump -d --start-address=0x1863260 --stop-address=0x18632a0 "$FRAMEWORK"
+ 1863281: e8 da 0c e8 ff   callq 0x16e3f60
+ 1863286: 48 89 05 ...     movq %rax, 0xfde3000    ; the crash-stack frame
+$ llvm-objdump -d --start-address=0x1863180 --stop-address=0x1863480 "$FRAMEWORK" | grep pushq
+ 1863180: pushq %rbp
+ 1863470: pushq %rbp
+```
+
+The only prologues between 0x1863180 and 0x1863470 are at 0x1863180 and
+0x1863470: **0x1863280 is not a function entry**, it is offset +0x100 inside the
+body of **0x1863180**. So #84's "0x1863280 has no caller / unreachable" was an
+attribution artifact — the crash frame 0x1863286 is a return address *inside*
+0x1863180, which **is** reachable (0x1862820 -> callq 0x1863180 at 0x1862879).
+This removes the #84/#85 "unreachable frame" contradiction: the live chain
+0x212a4c0 -> ... -> 0x1862820 -> 0x1863180(+0x106) -> 0x16e3f60 -> F0 -> A is
+fully reachable.
+
+### Verdict (control #86, one line)
+
+The residual scan does **not** name the lock holder: F0 call #1 returned
+(0x8eedcb absent), and the stub branch returned too (no ctor return words), so no
+returned frame holds A's lock; A's unlock is **unconditional** (no jcc past
+0x8eee7b), and 0x1863280 is **inside 0x1863180** (not an unreachable function) —
+therefore the holder is not in the in-image call tree and the next check is the
+lock word's initialization (0x100667a0 in `__common` = 0 at load; live value
+owner 0x307).
+
+### Repro
+
+```sh
+grep -nE "\[gstack\+|stack\[" /tmp/iokit-probe-72-1.log | head -40
+python3 - <<'PY'
+base=0x2d7fbe34000
+for n,o in [("F0#1",0x8eedcb),("F0#2",0x8eedd6),("stub",0x64d063),("ctor",0x64cf80),("ccdb60#1",0x212ab3f),("ccdb60#2",0x212ab50)]:
+    print(n, hex(base+o))
+PY
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
+llvm-objdump -d --start-address=0x1863260 --stop-address=0x18632a0 "$FRAMEWORK"
+llvm-objdump -d --start-address=0x1863180 --stop-address=0x1863480 "$FRAMEWORK" | grep pushq
+```
