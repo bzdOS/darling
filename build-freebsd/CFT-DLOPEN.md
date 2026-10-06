@@ -7648,3 +7648,123 @@ llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep dbbf2f6
 llvm-nm "$FRAMEWORK" | grep getentropy
 llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeee0 "$FRAMEWORK"
 ```
+
+## Control #81 — holder of the B-thunk pointer: none in the framework; dyld computes initializer entries from __init_offsets
+
+**Date:** 2026-10-06
+**Branch:** task/b-thunk-xref
+**Base:** pr-arm64 = a0f498d77c9189995f322cfea883e2ae0e1f3b07 (`git rev-parse` before branching)
+
+**Goal:** find what holds/computes the pointer to B's thunk (0x95d44b0 ->
+`jmp 0x95d44c0`) and why B's entry happens twice.
+
+### Step 1 — full static xref of B (0x95d44c0) and thunk (0x95d44b0): measured ZERO
+
+The framework has no `__mod_init_func`, `__objc_nlclslist`, `__objc_nlcatlist`
+or `__la_symbol_ptr`; it does have `__got`, `__const`, `__data`. All were swept.
+
+(a) Whole-`__text` disassembly grep for any mention of the two addresses (a
+`callq`/`jmp`/`lea` target would show as `0x95d44b0` / `0x95d44c0` in the
+operand or the `##` comment):
+
+```
+$ llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt      # 3.8 GB
+$ grep -nE "95d44b0|95d44c0" /tmp/cft-full-disasm.txt
+40161049: 95d44b0: 55           pushq %rbp          <- the thunk's own prologue
+40161052: 95d44b5: e9 06 00 00 00  jmp 0x95d44c0    <- the thunk's own jump
+40161054: 95d44c0: 55           pushq %rbp          <- B's own prologue
+```
+
+Only three hits, all self-definitions. No `callq`, no `leaq`, no data reference.
+
+(b) Raw little-endian pointer scan over the whole file (both 8-byte and 4-byte):
+
+```
+$ python3 - "$FRAMEWORK"   # find(val.to_bytes(width,'little'))
+8B 0x95d44b0 NONE
+8B 0x95d44c0 NONE
+4B 0x95d44b0 NONE
+4B 0x95d44c0 NONE
+4B 0x95d44a0 NONE
+```
+
+(c) Chained-fixup rebase targets (`--macho --dyld-info`, 1,122,079 rebases):
+
+```
+$ llvm-objdump --macho --dyld-info "$FRAMEWORK" > /tmp/cft-dyldinfo.txt
+$ grep -icE "95d44b0|95d44c0" /tmp/cft-dyldinfo.txt
+0
+```
+
+So the pointer to B is held **nowhere** — not as bytes, not as a rebase target.
+B is unreachable from the framework's static image.
+
+### Step 2 — the loader's entry is computed, not stored
+
+dyld's Mach-O initializer walk reads the initializer addresses out of the
+image and *computes* the entry as `machHeader + offset` (it never stores a
+pointer to the initializer):
+
+```
+$ sed -n '2335,2366p' src/ImageLoaderMachO.cpp
+					else if ( type == S_INIT_FUNC_OFFSETS ) {
+						const uint32_t* inits = (uint32_t*)(sect->addr + fSlide);
+						...
+						for (size_t j=0; j < count; ++j) {
+							uint32_t funcOffset = inits[j];
+							...
+                            Initializer func = (Initializer)((uint8_t*)this->machHeader() + funcOffset);
+							...
+                                func(context.argc, context.argv, context.envp, context.apple, &context.programVars);
+```
+
+`file:line` — `src/ImageLoaderMachO.cpp:2335` (`S_INIT_FUNC_OFFSETS`), the entry
+computation at **:2355** (`machHeader() + funcOffset`), the call at **:2364**;
+reached from `ImageLoaderMachO::doModInitFunctions` (:2290) via
+`doInitialization` (:2423), driven by `dyld::initializeMainExecutable`
+(`dyld2.cpp:1741` -> `sMainExecutable->runInitializers`).
+
+The framework's `__TEXT,__init_offsets` (addr 0xdbc15fc, size 8) holds two
+32-bit offsets:
+
+```
+$ python3 - "$FRAMEWORK"   # parse LC_SEGMENT_64, read __init_offsets
+__TEXT,__init_offsets addr=0xdbc15fc size=0x8
+  init[0] offset=0x212a4c0 -> machHeader+offset = 0x212a4c0
+  init[1] offset=0x2065300 -> machHeader+offset = 0x2065300
+```
+
+So the loader's data-computed entry is the initializer **0x212a4c0**
+(_ChromeMain's dyld initializer) and 0x2065300 — **B is not among them**, and B
+is referenced by no image data, so the loader does not call B either.
+
+### Verdict (control #81, one line)
+
+There is **no holder** of the pointer to B's thunk: 0x95d44b0/0x95d44c0 occur
+nowhere in the image (0 call/lea targets, 0 raw 8/4-byte values, 0 rebase
+targets among 1,122,079); the loader's only data-computed entries are the
+`__init_offsets` initializers **0x212a4c0** and 0x2065300
+(`src/ImageLoaderMachO.cpp:2355`, `machHeader()+funcOffset`), which do not
+include B. The #80 premise "B's entry is a dyld data-pointer" is therefore
+refuted: B is unreachable, so it cannot be the first acquirer. The only entry
+the loader does compute is the initializer 0x212a4c0, whose chain reaches F0 and
+its two calls of accessor A (0x8eedc6 / 0x8eedd1); how the second call sees
+`owner==self` while every A path unlocks stays the open point, and it cannot be
+B.
+
+### Repro
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt
+grep -nE "95d44b0|95d44c0" /tmp/cft-full-disasm.txt
+python3 - "$FRAMEWORK" <<'PY'
+import sys
+d=open(sys.argv[1],'rb').read()
+for n,v in [("8B 0x95d44b0",0x95d44b0),("8B 0x95d44c0",0x95d44c0),("4B 0x95d44b0",0x95d44b0),("4B 0x95d44c0",0x95d44c0)]:
+    w=8 if n.startswith("8B") else 4
+    print(n, "NONE" if d.find(v.to_bytes(w,'little'))<0 else "FOUND")
+PY
+llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -icE "95d44b0|95d44c0"
+sed -n '2335,2366p' src/external/dyld/src/ImageLoaderMachO.cpp
+```
