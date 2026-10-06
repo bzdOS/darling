@@ -9292,3 +9292,72 @@ abort cuts the blocking branch at the wrapper before the unlock.
 ```sh
 llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
 ```
+
+## Control #96 — xref of 0x100667a0: only A and dead B; no other acquire to name
+
+**Date:** 2026-10-06
+**Branch:** task/lock-first-acquire
+**Base:** pr-arm64 = dd2cefa91a28c03d552960bbe38d21e6886c842e (`git rev-parse` before branching)
+
+**Goal:** after #95 (A#2's trylock fails with owner==self, A#1 returned), find the
+*other* unclosed acquire of the same thread that holds 0x100667a0 — or refute it.
+
+### Step 1 — every reference to 0x100667a0 in the framework
+
+```
+$ grep -nE "0x100667a0" /tmp/cft-full-disasm-91.txt
+  8eee16: leaq 0xf777983(%rip), %rdi  ## 0x100667a0   (A, ACQUIRE-A arg)
+  8eee3a: leaq 0xf77795f(%rip), %rdi  ## 0x100667a0   (A, UNLOCK arg)
+  8eeedf: leaq 0xf7778ba(%rip), %rdi  ## 0x100667a0   (A, ACQUIRE-B/wrapper arg)
+  95d44c9: leaq 0x6a922d0(%rip), %rdi ## 0x100667a0   (B)
+  95d44d9: leaq 0x6a922c0(%rip), %rdi ## 0x100667a0   (B)
+  95d4510: leaq 0x6a92289(%rip), %rdi ## 0x100667a0   (B)
+$ grep -cE "0x100667a0\s*$" /tmp/cft-dyldinfo.txt   # rebase/data-xref to the lock
+0
+```
+
+**Six code references, all in A (3) and B (3); zero data-xref** (no rebase target
+is 0x100667a0). So no code outside A/B materializes `&0x100667a0`, and no data
+slot points at it.
+
+### Step 2 — acquire sites and their frames in the 72-1 dump
+
+| site | what | ret address(es) | frame in 72-1 dump? |
+|---|---|---|---|
+| A 0x8eee1d | trylock ACQUIRE-A | 0x8eee22 (ok) / 0x8eeedf (fail) | 0x8eeeeb is in the dump, 0x8eee22/0x8eeedf are not |
+| A 0x8eeee6 | wrapper ACQUIRE-B | 0x8eeeeb | **present** (0x8eeeeb) |
+| B 0x95d44d0 | trylock | 0x95d44d5 / 0x95d44e5 | absent (B dead) |
+| B 0x95d44e0 | blocking | 0x95d44e5 | absent (B dead) |
+
+B has no caller (#91: zero callq; #92: B dead), so its frames cannot be on the
+stack. A's only frame present is 0x8eeeeb — the return of the **wrapper call at
+0x8eeee6**, i.e. A#2's own blocking acquire, which is exactly the aborting call,
+not a prior one. A#1's return (0x8eedcb) is absent (#94).
+
+### Step 3 — verdict
+
+The scanned sites are the six xrefs above (A's ACQUIRE-A 0x8eee1d / ACQUIRE-B
+0x8eeee6, B's 0x95d44d0 / 0x95d44e0) plus the two wrapper callees
+(`_os_unfair_lock_trylock` / `_os_unfair_lock_lock_with_options`). **No other
+acquire site exists**, and no acquire frame of a *different* prior acquire is in
+the dump: A's only frame (0x8eeeeb) is A#2's own blocking call, and A#1 returned.
+So the owner==self word at A#2 is **not** held by a nameable earlier in-image
+acquire — either the word is **stale** (an acquire whose owner write was not
+cleared) or the holder's frame is **outside the dump stack**. The first acquire
+is therefore **not named** by this pass.
+
+### Verdict (control #96, one line)
+
+xref of 0x100667a0 = 6 code refs (A×3, B×3) + 0 data-xref; acquire sites are A
+0x8eee1d / 0x8eeee6 and dead B 0x95d44d0 / 0x95d44e0; the only frame present
+(0x8eeeeb) is A#2's own wrapper call and A#1 returned — so **no first acquire is
+nameable**, the word is either stale or its holder is outside the dump stack.
+
+### Repro
+
+```sh
+grep -nE "0x100667a0" /tmp/cft-full-disasm-91.txt
+grep -cE "0x100667a0\s*$" /tmp/cft-dyldinfo.txt
+grep -nE "callq\s+0x95d44c0" /tmp/cft-full-disasm-91.txt   # B callers = 0
+grep -E "stack\[[0-9]+\]" /tmp/iokit-probe-72-1.log | grep -E "8eeeeb|8eedcb|8eee22|8eeedf"
+```
