@@ -6532,6 +6532,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x212a567 — _ChromeMain+0xa7 (global writes)**
 
 ```
+212a562: e8 59 03 00 00          callq 0x212a8c0  ## creates return addr 0x212a567
 212a567: 48 8d 05 e2 58 66 02    leaq  0x26658e2(%rip), %rax
 212a56e: 48 89 05 fb 32 d8 0d    movq  %rax, 0xdd832fb(%rip)
 212a575: 48 8d 05 f4 32 d8 0d    leaq  0xdd832f4(%rip), %rax
@@ -6546,6 +6547,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x212a9d2 — _ChromeMain+0x512 (global write + guard check)**
 
 ```
+212a9cd: e8 2e 00 00 00          callq 0x212aa00  ## creates return addr 0x212a9d2
 212a9d2: 48 89 1d 67 be f3 0d    movq  %rbx, 0xdf3be67(%rip)  ## 0x10066840
 212a9d9: c6 05 20 f7 f3 0d 00    movb  $0x0, 0xdf3f720(%rip)  ## 0x1006a100
 212a9e0: 48 8b 05 39 86 07 0d    movq  0xd078639(%rip), %rax
@@ -6562,6 +6564,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x212ab91 — _ChromeMain+0x6d1 (guard check)**
 
 ```
+212ab8c: e8 8f 7c 73 ff          callq 0x1862820  ## creates return addr 0x212ab91
 212ab91: 48 8b 05 88 84 07 0d    movq  0xd078488(%rip), %rax
 212ab98: 48 8b 00                movq  (%rax), %rax
 212ab9b: 48 3b 45 e0             cmpq  -0x20(%rbp), %rax
@@ -6588,7 +6591,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 64d02f: 48 8d 7d f0             leaq  -0x10(%rbp), %rdi
 64d033: 48 c7 07 00 00 00 00    movq  $0x0, (%rdi)
 64d03a: be 08 00 00 00          movl  $0x8, %esi
-64d03f: e8 b2 22 57 0d          callq 0xdbbf2f6  ## dispatch_once
+64d03f: e8 b2 22 57 0d          callq 0xdbbf2f6  ## _dispatch_once stub
 64d044: 85 c0                   testl %eax, %eax
 64d046: 75 2e                   jne   0x64d076  ## ud2
 64d048: 48 8d 7d f0             leaq  -0x10(%rbp), %rdi
@@ -6596,7 +6599,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 64d04f: 48 89 03                movq  %rax, (%rbx)
 64d052: 48 c7 07 00 00 00 00    movq  $0x0, (%rdi)
 64d059: be 08 00 00 00          movl  $0x8, %esi
-64d05e: e8 93 22 57 0d          callq 0xdbbf2f6  ## dispatch_once
+64d05e: e8 93 22 57 0d          callq 0xdbbf2f6  ## _dispatch_once stub
 64d063: 85 c0                   testl %eax, %eax
 64d065: 75 12                   jne   0x64d079  ## ud2
 64d067: 48 8b 45 f0             movq  -0x10(%rbp), %rax
@@ -6614,6 +6617,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x186287e — _ChromeMain+0x185e9e (guard byte check)**
 
 ```
+1862879: e8 02 09 00 00          callq 0x1863180  ## creates return addr 0x186287e
 186287e: 41 80 7e 12 01          cmpb  $0x1, 0x12(%r14)
 1862883: 75 26                   jne   0x18628ab
 1862885: 48 83 3d 83 07 58 0e ff cmpq  $-0x1, 0xe580783(%rip)
@@ -6628,6 +6632,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x1863286 — _ChromeMain+0x185ea6 (global write + null check)**
 
 ```
+1863281: e8 da 0c e8 ff          callq 0x16e3f60  ## creates return addr 0x1863286
 1863286: 48 89 05 73 fd 57 0e    movq  %rax, 0xe57fd73(%rip)  ## 0xfde3000
 186328d: 48 85 c0                testq %rax, %rax
 1863290: 0f 84 4d 01 00 00       je    0x18633e3
@@ -6635,7 +6640,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 18632a0: 48 89 c1                movq  %rax, %rcx
 18632a3: 48 01 d9                addq  %rbx, %rcx
 18632a6: 48 89 0d 5b fd 57 0e    movq  %rcx, 0xe57fd5b(%rip)  ## 0xfde3008
-18632ad: 4c 8d 35 cc 27 80 0e    leaq  0xe8027cc(%rip), %r14  ## 0x10065a80
+18632ed: 4c 8d 35 cc 27 80 0e    leaq  0xe8027cc(%rip), %r14  ## 0x10065a80
 18632b4: 4c 89 f7                movq  %r14, %rdi
 18632b7: be 01 00 00 00          movl  $0x1, %esi
 18632bc: 48 89 c2                movq  %rax, %rdx
@@ -6645,6 +6650,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x16e3f95 — _ChromeMain+0x16dffb (call to 0x16e4240)**
 
 ```
+16e3f90: e8 2b ae 20 ff          callq 0x8eedc0  ## creates return addr 0x16e3f95
 16e3f95: 49 89 c6                movq  %rax, %r14
 16e3f98: 49 21 de                andq  %rbx, %r14
 16e3f9b: 4d 01 fe                addq  %r15, %r14
@@ -6664,6 +6670,7 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 **Frame 0x8eedd6 — _ChromeMain+0x8eaf6 (global read + arithmetic)**
 
 ```
+8eedd1: e8 02 00 00 00          callq 0x8eedd6  ## creates return addr 0x8eedd6
 8eedd6: 48 8b 0d 3b 43 8b 0e    movq  0xe8b433b(%rip), %rcx  ## 0xf1a3118
 8eeddd: 31 d2                   xorl  %edx, %edx
 8eeddf: 48 2b 11                subq  (%rcx), %rdx
@@ -6694,10 +6701,12 @@ No smaller symbols exist between 0x3fe0 and 0x212a4c0.
 
 ```
 _ChromeMain (dyld init, 0x212a4c0)
-  → _ChromeMain+0x6d1 (0x212ab91, guard check)
-  → _ChromeMain+0x512 (0x212a9d2, global write + guard)
   → _ChromeMain+0xa7 (0x212a567, global writes)
+  → _ChromeMain+0x512 (0x212a9d2, global write + guard)
+  → _ChromeMain+0x6d1 (0x212ab91, guard check)
+  → [stack 96-104 unresolved]
   → stub 0x64d020+0x43 (0x64d063, dispatch_once result check)
+  → libsystem_kernel+0x42e66 (stack[94])
   → _ChromeMain+0x185e9e (0x186287e, guard byte check)
   → _ChromeMain+0x185ea6 (0x1863286, global write + null check)
   → _ChromeMain+0x16dffb (0x16e3f95, call to 0x16e4240)
@@ -6705,12 +6714,12 @@ _ChromeMain (dyld init, 0x212a4c0)
   → _ChromeMain+0x8eafb (0x8eeeeb, 2nd acquire → abort)
 ```
 
-### Contradiction #71 vs 72-1 — resolved
+### Contradiction #71 vs 72-1 — not fully resolved
 
 **#71 said:** stub 0x64d020 is called by setter B (callq 0x95d44f5).
 **72-1 shows:** frame 0x95d44f5 is absent; the caller is _ChromeMain (0x212a4c0).
 
-**Resolution:** stub 0x64d020 has **three** call sites in the binary:
+**Stub 0x64d020 has three call sites in the binary:**
 
 ```
 64cfa5: callq 0x64d020   ## caller 1
@@ -6730,7 +6739,10 @@ sites. The #71 path (setter B) and the 72-1 path (dyld initializer) are two
 different entry points into the same stub. The contradiction is resolved: both
 observations are correct, they describe different runs with different callers.
 
-### Mechanism — guard flag, not deferred dyld init
+### Mechanism — recursive abort, not guard flag
+
+The crash is **SIGILL at rip=libsystem_platform+0x8237** (recursive abort of
+the lock), **not** ud2 of stub 0x64d020 (0x64d077/0x64d07a).
 
 The stub 0x64d020 uses **dispatch_once** (0xdbbf2f6) as a guard:
 
@@ -6754,14 +6766,11 @@ In run 72-1, the stub was entered while the lock was already held (owner
 
 ```sh
 # Disassemble stub 0x64d020
-llvm-objdump -d --start-address=0x64d020 --stop-address=0x64d080 \
-  "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+llvm-objdump -d --start-address=0x64d020 --stop-address=0x64d080   "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework
 
 # Find all call sites of stub 0x64d020
-llvm-objdump -d "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework \
-  | grep "callq.*0x64d020"
+llvm-objdump -d "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework   | grep "callq.*0x64d020"
 
 # Disassemble abort site 0x8eeeeb
-llvm-objdump -d --start-address=0x8eeee6 --stop-address=0x8eeef0 \
-  "$DARLING_OVERLAY"/Frameworks/.../Google\ Chrome\ for\ Testing\ Framework
+llvm-objdump -d --start-address=0x8eeee6 --stop-address=0x8eeef0   "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework
 ```
