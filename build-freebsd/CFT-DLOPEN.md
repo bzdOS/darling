@@ -8928,3 +8928,108 @@ grep -cE "(callq|jmp)\s+0x8eee10" /tmp/cft-full-disasm-91.txt
 grep -cE "(callq|jmp)\s+0x95d44c0" /tmp/cft-full-disasm-91.txt
 # rebase targets inside the bodies: scan /tmp/cft-dyldinfo.txt (from --macho --dyld-info)
 ```
+
+## Control #92 — init cascade to 0xccdb60; no second-acquire site for 0x100667a0
+
+**Date:** 2026-10-06
+**Branch:** task/init-caller-xref
+**Base:** pr-arm64 = 0dc39f984b1f5ad134b9d9cb608892f2ef1b1a3a (`git rev-parse` before branching)
+
+**Goal:** name the static chain to the abort-caller and settle whether any site in
+it can acquire 0x100667a0 a second time on the same thread.
+
+### Step 1 — function window around 0xccdb8f
+
+```
+$ llvm-objdump -d --start-address=0xccdb00 --stop-address=0xccdc00 "$FRAMEWORK"
+  ccdb55: popq  %rbx
+  ccdb56: popq  %r14
+  ccdb58: popq  %rbp
+  ccdb59: retq                     ; previous function ends here
+  ccdb5a: nopw  (%rax,%rax)        ; padding
+  ccdb60: pushq %rbp               ; <-- function entry
+  ccdb61: movq  %rsp, %rbp
+  ...
+  ccdb8b: leaq  0x28(%rbx), %rdi
+  ccdb8f: callq 0x64d020           ; init stub (the #77 trap site)
+  ccdbf6: retq
+```
+
+So 0xccdb60 is a **function entry** (retq + nopw padding precedes it); its only
+call inside is the init stub 0x64d020 at 0xccdb8f (disp32 0xff97f48c, i.e.
+0xccdb94 - 0x680b74 -> 0x64d020).
+
+### Step 2 — callers of 0xccdb60: four
+
+```
+$ grep -cE "callq\s+0xccdb60" /tmp/cft-full-disasm-91.txt
+4
+  ccdb20: callq 0xccdb60     (in the function ending at 0xccdb59)
+  ccdb31: callq 0xccdb60     (same function)
+  212ab3a: callq 0xccdb60    (in 0x212aa00; rel32 0xfeba3021 -> 0xccdb60)
+  212ab4b: callq 0xccdb60    (in 0x212aa00)
+```
+
+### Step 3 — cascade frames
+
+- **0x212ab3f** is the return of `callq 0xccdb60` at 0x212ab3a, inside
+  **0x212aa00** (its prologue: `pushq %rbp; movq %rsp,%rbp; ...`). Outgoing
+  calls of 0x212aa00: 0xdbbefc6 `___bzero`, 0xdbbefba `_memcpy`,
+  0xdbbefb4 `_strlen`, 0xdbbef66 `___stack_chk_fail` (all LSysX), `0xccdb60`
+  (x2), `0x1862820`.
+- **0x212a9d2** is the return of `callq 0x212aa00` at 0x212a9cd, inside
+  **0x212a8c0**. Its only calls are 0x212aa00 (0x212a9cd) and 0xdbbef66
+  `___stack_chk_fail`.
+
+Incoming: 0x212aa00 has 6 callers (0xabdc, 0x64d19b, 0x12e64ef, 0x212a9cd,
+0x49a311d, 0x95d544d); 0x212a8c0 has **one** caller, 0x212a562, inside the
+`__init_offsets` initializer 0x212a4c0.
+
+### Step 4 — the chain, stitched
+
+```
+0x212a4c0 (__init_offsets initializer, called by dyld)
+  -> 0x212a8c0   @0x212a562
+  -> 0x212aa00   @0x212a9cd
+       -> 0xccdb60  @0x212ab3a / 0x212ab4b   -> init stub 0x64d020 @0xccdb8f
+       -> 0x1862820 @0x212ab8c  -> ... -> F0 0x8eedc0 -> A 0x8eee10
+```
+
+So the chain **does pass through the init stub 0x64d020** (#77): the
+0x212aa00 -> 0xccdb60 edge leads to the stub. The F0/A branch is a **sibling**
+under the same 0x212aa00.
+
+### Step 5 — second-acquire site? No
+
+```
+$ grep -cE "0x100667a0" /tmp/cft-full-disasm-91.txt
+6
+  A: 0x8eee16, 0x8eee3a, 0x8eeedf   (3 leaq)
+  B: 0x95d44c9, 0x95d44d9, 0x95d4510 (3 leaq)
+```
+
+Only **A and B materialize `&0x100667a0`** (6 sites total); B is dead (#91: zero
+callers), and A is called only by F0 (2 sites, #91). No function in the chain —
+0xccdb60, 0x212aa00, 0x212a8c0, 0x1862820, 0x16e3f60, F0, or the generic wrapper
+0x161ce0's other 137 callers — materializes `&0x100667a0`, so none can acquire it
+via the wrapper (whose rdi is the caller's pointer). The closure of #69/#91
+**holds**: there is no second-acquire site in the chain.
+
+### Verdict (control #92, one line)
+
+The chain is dyld -> 0x212a4c0 -> 0x212a8c0 -> 0x212aa00 -> {0xccdb60 -> init
+stub 0x64d020; 0x1862820 -> ... -> F0 -> A}; **no second-acquire site exists** for
+0x100667a0 in it (only A/B materialize it, B dead, A called only from F0), so the
+owner at the 2nd acquire can only be A itself on the same thread — the in-image
+road to a *different* acquirer is refuted, and the remaining explanation is
+runtime (not static bytes).
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0xccdb00 --stop-address=0xccdc00 "$FRAMEWORK"
+grep -cE "callq\s+0xccdb60" /tmp/cft-full-disasm-91.txt
+grep -nE "(callq|jmp)\s+0x212aa00" /tmp/cft-full-disasm-91.txt
+grep -nE "(callq|jmp)\s+0x212a8c0" /tmp/cft-full-disasm-91.txt
+grep -cE "0x100667a0" /tmp/cft-full-disasm-91.txt
+```
