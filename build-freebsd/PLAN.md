@@ -657,6 +657,7 @@ exact-length гарантий запрещён; (b) libSystem.B НЕ реген�
 **Порядок обновления стабов (финальный)**:
 
 #### 9.9 Тулинг-раунд 2 + сужение стены №6 (2026-08-28, поздний вечер)
+> **SUPERSEDED (2026-10):** архив; актуальный фронтир — §9.11 (октябрьская серия build-freebsd/CFT-DLOPEN.md, Control #71–#77).
 **Стена №6 локализована**: dyld падает в `ImageLoader::trieWalk+0xa4` — обход
 exports-trie Chrome-фреймворка при резолве символа. Все КРУПНЫЕ зависимости
 по отдельности грузятся OK (бисекция: CF/CG/CoreText/Foundation/AppKit/Metal/
@@ -681,6 +682,7 @@ Extras) → `patch-macho-reqver.py` (compat=0 у Chrome) → `patch-overlay-vers
 (compat+current=FFFFFFFF у провайдеров overlay, ВКЛЮЧАЯ свежие обёртки).
 
 #### 9.10 Тулинг-раунд 3: импорты Chrome чисты, фронтир — нотификации/инициализаторы
+> **SUPERSEDED (2026-10):** архив; актуальный фронтир — §9.11 (октябрьская серия build-freebsd/CFT-DLOPEN.md, Control #71–#77).
 **Диагностика**: `build-freebsd/chained-fixups-inspect.py` — оффлайн-валидатор
 LC_DYLD_CHAINED_FIXUPS (заголовок, таблица импортов, chain starts, ордианлы).
 Результат: **таблица импортов Chrome валидна и УЖЕ в раскладке этого dyld**
@@ -699,6 +701,7 @@ LC_DYLD_CHAINED_FIXUPS (заголовок, таблица импортов, cha
 по какой таблице идёт вызов (fgAddImageCallbacks), и вычислить, КАКОЙ образ
 
 #### 9.10.1 Тулинг-раунд 4 (2026-08-29): crash-handler + гостевая трассировка
+> **SUPERSEDED (2026-10):** архив; актуальный фронтир — §9.11 (октябрьская серия build-freebsd/CFT-DLOPEN.md, Control #71–#77).
 
 **Что сделано** (только mldr, без пересборки dyld — это долго, нужны все system_*,
 libc_static и т.д.; сорсы dyld2.cpp пропатчены, но не скомпилированы):
@@ -780,6 +783,7 @@ AppKit, CoreFoundation — 21, 26, ? символов соответственн
 бисекция Extras — следующие шаги, записаны как таски.
 
 #### 9.10.2 Тулинг-раунд 5 (2026-08-31): dyld-trace.dylib
+> **SUPERSEDED (2026-10):** архив; актуальный фронтир — §9.11 (октябрьская серия build-freebsd/CFT-DLOPEN.md, Control #71–#77).
 
 Когда полная пересборка dyld (задача «dyld rebuild») признана нереализуемой в
 этом workspace (submodule-ы в $DARLING_SRC_DIR не развёрнуты, .git нет,
@@ -883,6 +887,39 @@ stat=0 + image not found, 3: dyld-trace + clean dlopen failure). Фикс =
   симлинка `$LOCAL/tmp/Frameworks -> ../Frameworks`.
 - Порядок обновления стабов: `gen-all-extras.py` → `patch-overlay-versions.py`
   → патчи Chrome-фреймворка (`patch-macho-reqver.py`).
+
+
+#### 9.11 Фронтир 2026-10 (октябрьская серия build-freebsd/CFT-DLOPEN.md)
+
+**Где стоим:** dyld мапит Chrome Framework; dlopen доходит до инициализаторов;
+краш — рекурсивный abort `os_unfair_lock` (`libsystem_platform.dylib+0x8237`,
+lock word `0000000100000307`) через init-стаб `0x64d020`. Живой вызывающий
+назван динамикой (CFT-DLOPEN.md Control #77): сайт **0xccdb8f** (функция с
+**0xccdb60**, вход из init-каскада фреймворка +0x212ab3f/+0x212a9d2) — не
+сеттер B (0x95d44f5) и не 0x64cfa5.
+
+**Lane-вердикты (не повторять / рабочий инструмент):**
+- файловый int3-патч входа стаба = тихая смерть гостя 2/2 без единой строки
+  lane (Control #76) — не повторять;
+- lldb на связке mldr закрыта («Cannot get process architecture»,
+  Control #75) — не повторять;
+- рабочий инструмент — штатный MLDR_TRAP_AT (runtime ud2 по факту мапа образа,
+  one-shot fatal, печатает raw [rsp] + резолв вызывающего; Control #77).
+
+**Следующий шаг — символизация цепи вызова:** по локально доступным символам
+Chrome for Testing v154.0.8029.0 (ничего не скачивать) привязать 0xccdb60 и
+кадры каскада (+0x212ab3f/+0x212a9d2) к именам; если символов нет — статика
+(xref/дизасм 0xccdb60 и каскада) либо ловушка второго acquire. Команда
+проверки:
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+llvm-nm -n "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework | awk '$1 <= "0000000000ccdb60"' | tail -3
+llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdc00 "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework | head -40
+```
+
+Ожидаемо: ближайший символ ниже 0xccdb60 (или подтверждение stripped) +
+дизасм caller-функции; дальше — решение по цепи.
 
 
 #### 9.4 Полезные артефакты
