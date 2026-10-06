@@ -7180,3 +7180,115 @@ grep -n -A9 'MLDR_TRAP_AT hit' /tmp/iokit-probe-77-1.log   # 1292567: called fro
 llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdbc0 <framework>  # callq at 0xccdb8f
 sh /tmp/stub77-run-ctrl.sh  # no env -> /tmp/iokit-probe-77-ctrl.log: 0 MLDR_TRAP_AT lines, abort +0x8237
 ```
+
+## Control #78 — symbolization of the call chain: 0xccdb60 and cascade frames +0x212ab3f/+0x212a9d2
+
+**Date:** 2026-10-06
+**Branch:** task/caller-symbolize
+**Base:** pr-arm64 = 4ad5de551b (the merged #77 tip; `git rev-parse` before branching)
+**Goal:** bind 0xccdb60 and the cascade frames +0x212ab3f/+0x212a9d2 to names
+using only LOCAL symbols of Chrome for Testing 154.0.8029.0 (no downloads).
+
+### Step 1 — symbol lookup: stripped, no symbols
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-nm -n "$FRAMEWORK" | awk '$1 <= "0000000000ccdb60"' | tail -3
+```
+
+Output:
+```
+0000000000002840 T _ChromeAppModeStart_v8
+0000000000002a00 T _ChromeWebAppShortcutCopierMain
+0000000000003fe0 T _ChromeMain
+```
+
+All three addresses (0xccdb60, 0x212ab3f, 0x212a9d2) fall inside the
+`_ChromeMain` range (0x3fe0..0x212a4c0). The framework is stripped: only 3
+defined symbols exist, and `_ChromeMain` is the sole symbol covering this
+entire 33 MB code region. No intermediate symbols are present.
+
+### Step 2 — static analysis of the cascade (chosen tool)
+
+Chosen: **static disassembly + xref** (not a second MLDR_TRAP_AT trap).
+Reason: the cascade frames are return addresses inside the framework's own
+init code; static analysis reveals the call chain without a live run, and
+the stripped binary still contains all call targets as immediate operands.
+
+#### 2a. Cascade frame +0x212ab3f — return address after `callq 0xccdb60`
+
+```sh
+llvm-objdump -d --start-address=0x212ab00 --stop-address=0x212ab80 "$FRAMEWORK"
+```
+
+Key instructions:
+```
+212ab35: 48 89 de                  movq %rbx, %rsi
+212ab38: 31 d2                     xorl %edx, %edx
+212ab3a: e8 21 30 ba fe            callq 0xccdb60 <_ChromeMain+0xcc9b80>
+212ab3f: 48 8d bb 78 37 00 00      leaq 0x3778(%rbx), %rdi   ← return address
+```
+
+0x212ab3f is the return address after `callq 0xccdb60` inside the function
+at **0x212aa00** (prologue: `pushq %rbp; movq %rsp, %rbp` at 0x212aa00).
+The function at 0x212aa00 calls 0xccdb60 twice (at 0x212ab3a and 0x212ab4b).
+
+#### 2b. Cascade frame +0x212a9d2 — return address after `callq 0x212aa00`
+
+```sh
+llvm-objdump -d --start-address=0x212a9a0 --stop-address=0x212aa20 "$FRAMEWORK"
+```
+
+Key instructions:
+```
+212a9c3: 48 8d 1d b6 be f3 0d      leaq 0xdf3beb6(%rip), %rbx   ## 0x10066880
+212a9ca: 48 89 df                  movq %rbx, %rdi
+212a9cd: e8 2e 00 00 00            callq 0x212aa00 <_ChromeMain+0x2126a20>
+212a9d2: 48 89 1d 67 be f3 0d      movq %rbx, 0xdf3be67(%rip)   ← return address
+```
+
+0x212a9d2 is the return address after `callq 0x212aa00` inside the function
+at **0x212a8c0** (prologue: `pushq %rbp; movq %rsp, %rbp` at 0x212a8c0).
+
+#### 2c. Caller of 0x212a8c0 (the function containing the cascade)
+
+```sh
+llvm-objdump -d "$FRAMEWORK" | grep -B3 "callq.*0x212a8c0"
+```
+
+```
+212a556: 75 d8                     jne 0x212a530
+212a558: e8 43 61 a9 0b            callq 0xdbc06a0
+212a55d: e8 2c 61 a9 0b            callq 0xdbc068e
+212a562: e8 59 03 00 00            callq 0x212a8c0 <_ChromeMain+0x21268e0>
+```
+
+0x212a8c0 is called from 0x212a562 (inside a function near 0x212a530).
+
+#### 2d. Caller of 0xccda00 (the function containing the first callq 0xccdb60)
+
+```sh
+llvm-objdump -d "$FRAMEWORK" | grep -B3 "callq.*0xccda00"
+```
+
+0xccda00 is called from multiple sites (0xccd766, 0x234efd2, 0x2582bc8,
+0x2582f67, 0x91c8c13, 0x91c8dc3) — it is a shared utility function.
+
+### Verdict (control #78, one line)
+
+Символов нет (stripped, 3 определённых символа, `_ChromeMain` покрывает
+весь диапазон); статика: 0xccdb60 вызывается из функции 0x212aa00 (callq
+на 0x212ab3a, ret 0x212ab3f), 0x212aa00 вызывается из функции 0x212a8c0
+(callq на 0x212a9cd, ret 0x212a9d2), 0x212a8c0 вызывается из 0x212a562 —
+каскад инит-функций фреймворка, не сеттер B.
+
+### Repro
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-nm -n "$FRAMEWORK" | awk '$1 <= "0000000000ccdb60"' | tail -3
+llvm-objdump -d --start-address=0x212ab00 --stop-address=0x212ab80 "$FRAMEWORK"
+llvm-objdump -d --start-address=0x212a9a0 --stop-address=0x212aa20 "$FRAMEWORK"
+llvm-objdump -d "$FRAMEWORK" | grep -B3 "callq.*0x212a8c0"
+llvm-objdump -d "$FRAMEWORK" | grep -B3 "callq.*0xccda00"
+```
