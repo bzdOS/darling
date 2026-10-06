@@ -7094,3 +7094,89 @@ python3 -c "d=bytearray(open(<framework>,'rb').read()); assert d[0x64d020]==0xcc
 sha256sum <framework>   # == 45710f8bc23b4328baffbe7dcba91a0d0803ac68807fad9a436507d5e3df8ed1
 sh /tmp/stub76-run-ctrl2.sh           # -> /tmp/iokit-probe-76-ctrl2.log: 0 stub-entry, abort at libsystem_platform+0x8237
 ```
+
+## Control #77 — stub 0x64d020 entry via MLDR_TRAP_AT: live caller is site 0xccdb8f
+
+**Date:** 2026-10-06
+**Branch:** task/stub-trap-at-entry
+**Base:** pr-arm64 = 3ee6dba2db (the merged #76 tip; `git rev-parse` before branching)
+**Goal:** trap the stub entry with the stock MLDR_TRAP_AT machinery (runtime
+ud2 at map time, no file patch, no offset doubt) and name the live caller —
+one of the 3 callq sites from #74 (0x64cfa5, 0xccdb8f, 0x95d44f5).
+
+### Step 1 — arm (env quoting trap, then the real run)
+
+`MLDR_TRAP_AT='Google Chrome for Testing Framework+0x64d020'` — the image
+name is exactly what `mldr_describe_addr` prints in the #71–#76 logs, and
+`mldr_note_mapping` matches it by `mldr_basename(kf_path)`. First attempt died
+at startup with `env: Chrome: No such file or directory`: the value's spaces
+split the unquoted `${RUN}` accumulation in the runner. Fix (in
+`/tmp/stub77-run.sh`): pass it as one quoted argument —
+`sudo env "MLDR_TRAP_AT=${MLDR_TRAP_AT}" ${RUN}`. Reran with
+`DARLING_SMOKE_REFRESH=1` (fresh staging; overlay file untouched, byte 0x55,
+sha 45710f8b… verified before the run). Log `/tmp/iokit-probe-77-1.log`.
+
+Arm line (mldr plants at map time, own address = base + offset):
+
+```
+26542:[darling-mldr] MLDR_TRAP_AT: armed Google Chrome for Testing Framework+0x64d020 at 0x2e0714e81020
+```
+
+### Step 2 — the hit: caller is 0xccdb8f
+
+```
+1292567:[darling-mldr] === MLDR_TRAP_AT hit: Google Chrome for Testing Framework+0x64d020 ===
+  rdi=0x2e072489df68 rsi=0x2e072489a880 rdx=0x0 rcx=0x7fffffdfd900
+  called from Google Chrome for Testing Framework+0xccdb94
+  stack slots resolving into known images:
+    [rsp+  0] Google Chrome for Testing Framework+0xccdb94
+    [rsp+ 48] Google Chrome for Testing Framework+0x212ab3f
+    [rsp+160] libsystem_platform.dylib+0x737f
+    [rsp+224] libsystem_malloc.dylib+0x7750
+    [rsp+256] libsystem_kernel.dylib+0x5005e
+    [rsp+272] libdyld.dylib+0x1e61
+    [rsp+320] Google Chrome for Testing Framework+0x212a9d2
+```
+
+`[rsp]` raw = site + 5 of the 5-byte `callq` at **0xccdb8f**
+(`e8 8c f4 97 ff`, target 0x64d020) — return address 0xccdb94 matches
+exactly. The caller function opens at 0xccdb60 (pushq %rbp prologue, inside
+the giant `_ChromeMain` range): stores its args into the object at rdi, then
+`leaq 0x28(%rbx),%rdi; callq 0x64d020`. Above frames ([rsp+48] +0x212ab3f,
+[rsp+320] +0x212a9d2) sit in the dyld-initializer region of #73 — the stub is
+entered from the framework's own init cascade, not from setter B. One hit
+(one-shot trap, fatal by design); the only `MLDR_TRAP_AT hit` in the log.
+
+Side note: #74 claimed all 3 call sites sit "outside _ChromeMain" — 0xccdb8f
+lies inside its 0x3fe0..0x212a4c0 range, so that claim is refined: the live
+site is an in-`_ChromeMain` direct call.
+
+### Step 3 — control (no env): classic abort, lane silent
+
+Log `/tmp/iokit-probe-77-ctrl.log` (same recipe, cached staging, no
+MLDR_TRAP_AT): 0 `MLDR_TRAP_AT` lines, and the abort path is reachable —
+
+```
+1292564:[darling-mldr] genuine SIGILL (ud2, not a patched trampoline) at libsystem_platform.dylib+0x8237 rip=0x6fadaec3237 rax=0x1
+1292566:[darling-mldr] reentry: host_tid=101009 guest_pid=76399 rsp=0x7fffffdfd680
+1292597:[darling-mldr] FATAL signal 4 (code=5) at addr=0x6fadaec3237
+```
+
+### Verdict (control #77, one line)
+
+Живьём стаб 0x64d020 зовёт сайт **0xccdb8f** (функция с 0xccdb60, `leaq
+0x28(%rbx),%rdi` перед callq; ret 0xccdb94 = [rsp] raw и resolved): путь —
+инит-каскад фреймворка (+0x212ab3f/+0x212a9d2 выше), не сеттер B (0x95d44f5) и
+не 0x64cfa5; ловушка fatal one-shot (1 hit); контроль без env — штатный abort
++0x8237; файлового патча не было (overlay 0x55, sha 45710f8b… до и после).
+
+### Repro
+
+```sh
+export MLDR_TRAP_AT='Google Chrome for Testing Framework+0x64d020'
+# pass as ONE quoted env arg (spaces!): sudo env "MLDR_TRAP_AT=${MLDR_TRAP_AT}" ${RUN}
+sh /tmp/stub77-run.sh   # 60-2 chain + REFRESH -> /tmp/iokit-probe-77-1.log
+grep -n -A9 'MLDR_TRAP_AT hit' /tmp/iokit-probe-77-1.log   # 1292567: called from ...+0xccdb94
+llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdbc0 <framework>  # callq at 0xccdb8f
+sh /tmp/stub77-run-ctrl.sh  # no env -> /tmp/iokit-probe-77-ctrl.log: 0 MLDR_TRAP_AT lines, abort +0x8237
+```
