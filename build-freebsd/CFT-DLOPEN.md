@@ -9436,5 +9436,5 @@ so **0 interpose pairs** touch the trio — no pre-crash image intercepts them.
 sh /tmp/stub97-run.sh 0x8eedc0 /tmp/iokit-probe-97-f0.log
 sh /tmp/stub97-run.sh 0x8eedcb /tmp/iokit-probe-97-a1ret.log
 grep -E "MLDR_TRAP_AT hit|watch \+" /tmp/iokit-probe-97-f0.log /tmp/iokit-probe-97-a1ret.log
-find /opt/darling/overlay -type f | while read f; do case "$(file -b "$f")" in *Mach-O*) llvm-objdump -h "$f" | grep -qi interpose && echo "$f";; esac; done
+find $DARLING_OVERLAY -type f | while read f; do case "$(file -b "$f")" in *Mach-O*) llvm-objdump -h "$f" | grep -qi interpose && echo "$f";; esac; done
 ```
