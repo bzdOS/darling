@@ -7292,3 +7292,166 @@ llvm-objdump -d --start-address=0x212a9a0 --stop-address=0x212aa20 "$FRAMEWORK"
 llvm-objdump -d "$FRAMEWORK" | grep -B3 "callq.*0x212a8c0"
 llvm-objdump -d "$FRAMEWORK" | grep -B3 "callq.*0xccda00"
 ```
+
+## Control #79 — first acquire of the lock at Chrome fw+0x100667a0 (static lock-path)
+
+**Date:** 2026-10-06
+**Branch:** task/lock-acquire-xref
+**Base:** pr-arm64 = 6852a98e91 (the merged #78 tip; `git rev-parse` before branching)
+**Goal:** from static disassembly only (no run), name the lock-word address, the
+first acquire, and the full path from stub 0x64d020 to the second acquire;
+decide "one-lock recursion" vs "two different locks".
+
+### Step 1 — rbx+0x28 is NOT a lock: the stub is a random-id generator
+
+`llvm-objdump -d --start-address=0x64d020 --stop-address=0x64d080`:
+
+```
+  64d020: 55                pushq %rbp
+  64d021: 48 89 e5          movq  %rsp, %rbp
+  64d024: 53                pushq %rbx
+  64d025: 50                pushq %rax
+  64d026: 48 89 fb          movq  %rdi, %rbx        ; rbx = arg (object)
+  64d029: 0f 57 c0          xorps %xmm0, %xmm0
+  64d02c: 0f 11 07          movups %xmm0, (%rdi)    ; zero 16 bytes
+  64d02f: 48 8d 7d f0       leaq  -0x10(%rbp), %rdi
+  64d03a: be 08 00 00 00    movl  $0x8, %esi
+  64d03f: e8 b2 22 57 0d    callq 0xdbbf2f6        ; _getentropy(buf, 8)
+  64d044: 85 c0             testl %eax, %eax
+  64d046: 75 2e             jne   0x64d076        ; error -> int3/ud2
+  64d04c: 48 8b 07          movq  (%rdi), %rax
+  64d04f: 48 89 03          movq  %rax, (%rbx)      ; obj[0] = rand64
+  64d059: be 08 00 00 00    movl  $0x8, %esi
+  64d05e: e8 93 22 57 0d    callq 0xdbbf2f6        ; _getentropy(buf, 8)
+  64d067: 48 8b 45 f0       movq  -0x10(%rbp), %rax
+  64d06b: 48 89 43 08       movq  %rax, 0x8(%rbx)   ; obj[8] = rand64
+  64d075: c3                retq
+```
+
+The stub has **no** `os_unfair_lock_trylock / lock / unlock` call: it calls
+`_getentropy` twice (stub 0xdbbf2f6 -> GOT 0xf1a3520, bound to `_getentropy`)
+and stores 16 bytes. So `rbx+0x28` (the stub's arg from the constructor at
+0xccdb8f) is a 128-bit random id, **not** the lock word. The #77 candidate is
+refuted by the disassembly.
+
+### Step 2 — the lock word is 0x100667a0
+
+Stub binding proof (the three stub targets):
+
+```
+$ llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -E '0xF1A3100|0xF1A3108|0xF1A3520|0xF1A5990'
+__DATA_CONST __got 0xF1A3100 ... LSysX _os_unfair_lock_unlock
+__DATA_CONST __got 0xF1A3108 ... LSysX _os_unfair_lock_trylock
+__DATA_CONST __got 0xF1A3520 ... LSysX _getentropy
+__DATA_CONST __got 0xF1A5990 ... LSysX _os_unfair_lock_lock_with_options (weak import)
+```
+
+So: 0xdbbf002 = trylock, 0xdbbeffc = unlock, 0x161ce0 = the blocking acquire
+(0x161ce0 calls trylock at 0x161d00 and `_os_unfair_lock_lock_with_options` at
+0x161e3d -> 0xdbc0664; a second acquire by the owner aborts inside libsystem).
+
+Exactly two functions reference 0x100667a0 (the #69 census): accessor A at
+0x8eee10 and accessor B at 0x95d44c0. Both take **the same** lock word:
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeee0 "$FRAMEWORK"
+  8eee16: leaq 0x100667a0(%rip), %rdi   ; A: trylock target
+  8eee1d: callq 0xdbbf002               ; _os_unfair_lock_trylock
+  8eee24: je    0x8eeedf                ; failed -> blocking
+  8eee3a: leaq 0x100667a0(%rip), %rdi
+  8eee7b: callq 0xdbbeffc               ; _os_unfair_lock_unlock
+  8eeedf: leaq 0x100667a0(%rip), %rdi
+  8eeee6: callq 0x161ce0                ; blocking acquire  -> 0x8eeeeb
+$ llvm-objdump -d --start-address=0x95d44c0 --stop-address=0x95d4520 "$FRAMEWORK"
+  95d44c9: leaq 0x100667a0(%rip), %rdi
+  95d44d0: callq 0xdbbf002               ; _os_unfair_lock_trylock
+  95d44d9: leaq 0x100667a0(%rip), %rdi
+  95d44e0: callq 0x161ce0                ; blocking acquire
+  95d44ee: leaq 0x100667a8(%rip), %rdi
+  95d44f5: callq 0x64d020                ; stub (init 0x100667a8)
+  95d4510: leaq 0x100667a0(%rip), %rdi
+  95d451d: jmp   0xdbbeffc               ; _os_unfair_lock_unlock
+```
+
+### Step 3 — first acquire = accessor B (the only acquire wrapping the stub)
+
+The stub 0x64d020 has three direct callers (full `__text` xref):
+
+| site | enclosing function | under the lock? |
+|---|---|---|
+| 0x64cfa5 | constructor 0x64cf80 (`leaq 0x28(%rbx),%rdi`) | no |
+| 0xccdb8f | constructor 0xccdb60 (`leaq 0x28(%rbx),%rdi`, #77/#78) | no |
+| 0x95d44f5 | accessor B 0x95d44c0 | **yes** (0x100667a0) |
+
+Only B's stub call sits inside a locked region: B's trylock 0x95d44d0 /
+blocking 0x95d44e0 -> stub 0x95d44f5 -> unlock 0x95d451d. So in the abort chain
+the **first acquire is B** (0x95d44d0 trylock, fallback 0x95d44e0 blocking),
+exactly the #71 inference. The exact B return address is still absent from the
+#71/#72 stack dump (B is reached through the tail thunk 0x95d44b0 `jmp
+0x95d44c0`, and has no direct `callq` caller — a registered callback, the #70
+honest miss).
+
+The **second acquire is A** (0x8eee10): its blocking lock 0x161ce0 at 0x8eeee6
+(`leaq 0x100667a0` at 0x8eeedf), return address 0x8eeeeb — the frame measured in
+#65/#71 and the site of `__os_unfair_lock_recursive_abort`.
+
+### Step 4 — path from the stub to the second acquire
+
+The #71/#72 512-word walk gives the frames above the stub:
+
+```
+  stub 0x64d063 (residual)
+    -> 0x186287e  (function 0x1862820, return from callq 0x1863180 at 0x1862879)
+    -> 0x1863286  (function 0x1863280, return from callq 0x16e3f60 at 0x1863281)
+    -> 0x16e3f95  (function 0x16e3f60, return from callq 0x8eedc0 at 0x16e3f90)
+    -> 0x8eedd6   (F0 0x8eedc0, return from callq 0x8eee10 at 0x8eedd1)
+    -> 0x8eeeeb   (A 0x8eee10, return from blocking lock 0x161ce0)  <- 2nd acquire
+```
+
+Static structure of that chain:
+
+```
+$ llvm-objdump -d --start-address=0x8eedc0 --stop-address=0x8eee10 "$FRAMEWORK"
+  8eedc6: callq 0x8eee10        ; F0 -> A (call 1)
+  8eedd1: callq 0x8eee10        ; F0 -> A (call 2)  -> ret 0x8eedd6
+$ llvm-objdump -d --start-address=0x16e3f60 --stop-address=0x16e3fa0 "$FRAMEWORK"
+  16e3f90: callq 0x8eedc0       ; -> F0
+$ llvm-objdump -d --start-address=0x1863280 --stop-address=0x1863340 "$FRAMEWORK"
+  1863281: callq 0x16e3f60
+$ llvm-objdump -d --start-address=0x1862820 --stop-address=0x1862880 "$FRAMEWORK"
+  1862855: leaq 0xc0(%rbx), %r15
+  186285f: callq 0xdbbf002      ; trylock on rdi+0xc0
+  1862879: callq 0x1863180
+```
+
+**Note (second, distinct lock in the chain):** the outer frame 0x1862820 takes
+`trylock` on `rdi+0xc0`, i.e. a *runtime* address — in this chain `rdi =
+0x10066880` (0x212aa00 passes its object, set at 0x212a9c3), so that lock is
+0x10066940, **not** 0x100667a0. It is a different lock, held lower in the chain;
+the recursion that aborts is not on it.
+
+### Verdict (control #79, one line)
+
+Lock word = **0x100667a0** (not rbx+0x28: the stub only runs `_getentropy` x2 and
+writes a 128-bit random id); first acquire = accessor **B** 0x95d44d0 trylock /
+0x95d44e0 blocking (the only acquire wrapping the stub 0x95d44f5), second acquire
+= accessor **A** 0x161ce0 at 0x8eeee6 (ret 0x8eeeeb); **one lock — recursion of
+0x100667a0 with owner==self** (owner 0x307 = guest tid per #72). The chain also
+passes through a different lock (0x1862820 on rdi+0xc0 = 0x10066940), but that is
+not the one that recurses. Honest miss unchanged: the stub -> F0 re-entry is an
+indirect callback (the stub calls only `_getentropy`), so the exact re-entry
+instruction is not statically provable; the frames are the #71/#72 walk.
+
+### Repro
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-objdump -d --start-address=0x64d020 --stop-address=0x64d080 "$FRAMEWORK"   # stub: getentropy x2, no lock
+llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -E '0xF1A3100|0xF1A3108|0xF1A3520|0xF1A5990'
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeee0 "$FRAMEWORK"   # A locks 0x100667a0
+llvm-objdump -d --start-address=0x95d44c0 --stop-address=0x95d4520 "$FRAMEWORK" # B locks 0x100667a0, calls stub 0x95d44f5
+llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt
+grep -nE "callq\s+0x64d020" /tmp/cft-full-disasm.txt   # 3 callers: 0x64cfa5, 0xccdb8f, 0x95d44f5
+grep -nE "callq\s+0x8eee10" /tmp/cft-full-disasm.txt   # A: only F0 0x8eedc6/0x8eedd1
+grep -nE "callq\s+0x8eedc0" /tmp/cft-full-disasm.txt   # F0: only 0x16e3f60
+```
