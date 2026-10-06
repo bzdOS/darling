@@ -9438,3 +9438,91 @@ sh /tmp/stub97-run.sh 0x8eedcb /tmp/iokit-probe-97-a1ret.log
 grep -E "MLDR_TRAP_AT hit|watch \+" /tmp/iokit-probe-97-f0.log /tmp/iokit-probe-97-a1ret.log
 find $DARLING_OVERLAY -type f | while read f; do case "$(file -b "$f")" in *Mach-O*) llvm-objdump -h "$f" | grep -qi interpose && echo "$f";; esac; done
 ```
+
+## Control #98 — symbolization of the lock chain: stripped, and A has no early return past the unlock
+
+**Date:** 2026-10-06
+**Branch:** task/symbolize-lock-chain
+**Base:** pr-arm64 = f25ffba7f17522e60696ae0b9a490004ed39ad1b
+
+**Goal (PLAN §9.11):** bind A (0x8eee16/0x8eee1d/0x8eee7b/0x8eedcb, F0 entry
+0x8eedc0), the live caller 0xccdb8f / function 0xccdb60 and the cascade frames
++0x212ab3f/+0x212a9d2 to names using LOCAL symbols; if stripped, disassemble A and
+0xccdb60 and show the early-return path past the unlock 0x8eee7b.
+
+### Step 1 — nm: the framework is stripped
+
+```
+$ llvm-nm -n "$FRAMEWORK" | awk '$1 ~ /^[0-9a-f]+$/ && $1 <= "0000000000ccdb60"' | tail -3
+0000000000002840 T _ChromeAppModeStart_v8
+0000000000002a00 T _ChromeWebAppShortcutCopierMain
+0000000000003fe0 T _ChromeMain
+$ llvm-nm -n "$FRAMEWORK" | awk '$1 ~ /^[0-9a-f]+$/' | wc -l
+3
+```
+
+Only 3 defined symbols; A (0x8eee10), F0 (0x8eedc0), 0xccdb60, 0x212ab3f and
+0x212a9d2 all fall inside the single `_ChromeMain` range (0x3fe0..0x212a4c0) —
+**no name binds to any of them**.
+
+### Step 2 — disasm A 0x8eedc0..0x8eee90: the only ret is after the unlock
+
+```
+$ llvm-objdump -d --start-address=0x8eedc0 --stop-address=0x8eee90 "$FRAMEWORK"
+  8eedc0: pushq %rbp
+  ...
+  8eedc6: callq 0x8eee10          ; A call #1
+  8eedcb: movl  %eax, %ebx        ; <-- trap point 2 (#97), word held here
+  8eedcd: shlq  $0x20, %rbx
+  8eedd1: callq 0x8eee10          ; A call #2
+  8eedd6: ...                     ; F0 combine
+  8eee0d: retq                    ; F0 return
+  8eee10: pushq %rbp              ; <-- A entry (0x8eee16 = leaq &lock)
+  8eee16: leaq  0x100667a0(%rip), %rdi
+  8eee1d: callq 0xdbbf002         ; _os_unfair_lock_trylock
+  8eee24: je    0x8eeedf          ; trylock fail -> blocking wrapper
+  8eee31: jne   0x8eee89          ; flag != 1 -> init
+  8eee7b: callq 0xdbbeffc         ; _os_unfair_lock_unlock
+  8eee88: retq                    ; <-- A's ONLY ret, after the unlock
+  8eee89: ... init ... jmp 0x8eee3a
+  8eeedf: leaq  0x100667a0(%rip), %rdi
+  8eeee6: callq 0x161ce0          ; blocking wrapper
+  8eeeeb: jmp   0x8eee2a
+```
+
+A's **only `retq` is 0x8eee88, after the unlock 0x8eee7b**; every branch target
+(0x8eeedf, 0x8eee89, 0x8eee3a, 0x8eee2a) leads back to the unlock path or a trap.
+There is **no early-return path in A that skips the unlock** — so the static
+control flow does not by itself explain #97's "word still 0x307 at A#1's return".
+
+### Step 3 — caller 0xccdb60 (stripped) and xref
+
+```
+$ llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdc00 "$FRAMEWORK"
+  0xccdb60: pushq %rbp
+  0xccdb82: jne 0xccdbf7
+  0xccdb8b: leaq 0x28(%rbx), %rdi
+  0xccdb8f: callq 0x64d020        ; init stub
+  0xccdbf6: retq
+$ grep -nE "(callq|jmp)\s+0x8eee10" /tmp/cft-full-disasm-91.txt   # A callers
+  8eedc6, 8eedd1                  ; F0 only
+$ grep -nE "(callq|jmp)\s+0xccdb60" /tmp/cft-full-disasm-91.txt  # 0xccdb60 callers
+  ccdb20, ccdb31, 212ab3a, 212ab4b
+```
+
+### Verdict (control #98, one line)
+
+The framework is **stripped** (3 defined symbols; A, F0, 0xccdb60, +0x212ab3f,
++0x212a9d2 all unnamed inside `_ChromeMain`); A's disasm shows its **only `retq`
+after the unlock** (no early return past 0x8eee7b), so the static control flow
+does not explain #97's held word at A#1's return — the name binding is impossible
+here and the runtime fact stands on its own.
+
+### Repro
+
+```sh
+llvm-nm -n "$FRAMEWORK" | awk '$1 ~ /^[0-9a-f]+$/ && $1 <= "0000000000ccdb60"' | tail -3
+llvm-objdump -d --start-address=0x8eedc0 --stop-address=0x8eee90 "$FRAMEWORK" | grep -E "retq|callq|j"
+llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdc00 "$FRAMEWORK"
+grep -nE "(callq|jmp)\s+0x8eee10" /tmp/cft-full-disasm-91.txt
+```
