@@ -6925,3 +6925,67 @@ llvm-objdump -d --start-address=0x3fe0 --stop-address=0x212a4c0 \
   "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework \
   | grep -E "movq.*\(%rip\).*%r|callq.*\*%r|jmpq.*\*%r"
 ```
+
+## Control #75 — dynamic trap on stub 0x64d020 entry
+
+**Date:** 2026-10-06
+**Branch:** task/stub-caller-dynamic
+**Base:** pr-arm64 = 231773ea1
+**Goal:** capture the return address at stub 0x64d020 entry in a live run
+with recursive abort, using lldb attach + breakpoint.
+
+### Attempt 1: lldb attach to mldr process
+
+```sh
+sudo lldb -p 46490 -o "image list" -o "detach" -o "quit"
+```
+
+**Result:**
+
+```
+(lldb) process attach --pid 46490
+error: attach failed: Cannot get process architecture
+```
+
+lldb cannot attach to the mldr process — "Cannot get process architecture".
+This is a FreeBSD lldb limitation with the mldr process.
+
+### Attempt 2: direct mldr execution
+
+```sh
+sudo env DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... \
+  DARLING_TEST_BINARY=cft-fwmacho-probe-macho \
+  "$DARLING_BUILD_DIR"/dserver/mldr-real/mldr
+```
+
+**Result:**
+
+```
+mldr is part of Darling. It is not to be executed directly.
+```
+
+mldr cannot be executed directly — it requires darlingserver as a parent.
+
+### Verdict
+
+The dynamic trap on stub 0x64d020 entry **did not fire** due to environment
+limitations:
+
+1. mldr cannot be executed directly (requires darlingserver parent)
+2. lldb attach to mldr process fails with "Cannot get process architecture"
+
+The caller of stub 0x64d020 in a live run remains **unresolved** by dynamic
+means. The static analysis from Control #74 stands: 3 call sites
+(0x64cfa5, 0xccdb8f, 0x95d44f5), none in _ChromeMain, no function pointer.
+
+### Repro
+
+```sh
+# Attempt lldb attach
+sudo lldb -p <pid> -o "image list" -o "detach" -o "quit"
+
+# Attempt direct mldr execution
+sudo env DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... \
+  DARLING_TEST_BINARY=cft-fwmacho-probe-macho \
+  "$DARLING_BUILD_DIR"/dserver/mldr-real/mldr
+```
