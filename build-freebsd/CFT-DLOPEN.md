@@ -8718,3 +8718,114 @@ llvm-objdump -d --start-address=0x8eedcb --stop-address=0x8eedd6 "$FRAMEWORK"
 llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep callq
 llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep -E "dbbf002|dbbeffc|dbbf2f6"
 ```
+
+## Control #90 — the blocking wrapper returns with the lock held; A's CFG always reaches unlock
+
+**Date:** 2026-10-06
+**Branch:** task/wrapper-exit-cfg
+**Base:** pr-arm64 = 39958c9e3721d18ec3896b45efc7baba9a82ebdd (`git rev-parse` before branching)
+
+### Step 1 — wrapper 0x161ce0: trylock-ok path is a bare return (lock stays held)
+
+```
+$ llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161e60 "$FRAMEWORK"
+  161ce0: pushq %rbp
+  161ce4: pushq %r15
+  161ce6: pushq %r14
+  161ce8: pushq %r12
+  161cea: pushq %rbx
+  161ceb: movq  %rdi, %rbx          ; rbx = arg0 (lock ptr from the caller)
+  161cee: movl  $0x1, %r14d         ; spin seed
+  161cf4: xorl  %r15d, %r15d        ; spin accumulator
+  161cf7: movl  $0x10, %r12d        ; spin cap
+  161cfd: movq  %rbx, %rdi
+  161d00: callq 0xdbbf002           ; _os_unfair_lock_trylock
+  161d05: testb %al, %al
+  161d07: jne   0x161e47            ; trylock OK -> bare return (lock held)
+  161d0d: ... pause spin loop 0x161d0d..0x161d38 ...
+  161e21: xorl  %r14d, %r14d
+  161e24: xorl  %r15d, %r15d
+  161e27: movq  %rbx, %rdi          ; rdi = lock ptr
+  161e2a: cmpq  $0x0, 0xf043b5e(%rip)   ## 0xf1a5990
+  161e32: je    0x161f3b
+  161e38: movl  $0x50000, %esi      ; rsi = options = 0x50000
+  161e3d: callq 0xdbc0664           ; _os_unfair_lock_lock_with_options
+  161e42: testb %r15b, %r15b
+  161e45: jne   0x161e5d
+  161e47: popq  %rbx
+  161e48: popq  %r12
+  161e4a: popq  %r14
+  161e4c: popq  %r15
+  161e4e: popq  %rbp
+  161e4f: retq
+```
+
+The trylock-ok path (0x161e47) is a **bare epilogue** — pop/ret, **no unlock and
+no tail-jmp**: the wrapper returns with the lock held (owner=self). The
+blocking path calls `_os_unfair_lock_lock_with_options` (0x161e3d) and also
+returns at 0x161e47 with the lock held.
+
+Argument table for `_os_unfair_lock_lock_with_options` (0x161e3d) vs
+`lock.c` (`os_unfair_lock_lock_with_options(os_unfair_lock_t lock,
+os_unfair_lock_options_t options)`):
+
+| reg | value at 0x161e3d | lock.c parameter |
+|---|---|---|
+| rdi | rbx = the lock ptr (A's 0x100667a0) | `lock` |
+| rsi | 0x50000 | `options` |
+
+The #88 values `r14d=1, r15d=0, r12d=0x10` are the wrapper's **spin seed /
+accumulator / cap** (the pause loop at 0x161d0d), not lock options. So the
+options byte passed to the lock is `0x50000`; `allow_anonymous_owner = options &
+OS_UNFAIR_LOCK_ALLOW_ANONYMOUS_OWNER (0x01000000) = 0`, so the owner==self check
+at `lock.c:524` runs with `allow_anonymous_owner = 0` — the options **do not**
+change the outcome of that check.
+
+### Step 2 — A's CFG (0x8eee10..0x8eeef0)
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep -E "j(e|ne)|jmp"
+  8eee24: je   0x8eeedf    ; trylock FAIL -> blocking wrapper 0x161ce0 (0x8eeee6)
+  8eee31: jne  0x8eee89    ; flag != 1  -> init
+  8eeeaa: jne  0x8eeef0    ; getentropy error -> int3/ud2
+  8eeecd: jne  0x8eeef3    ; getentropy error -> int3/ud2
+  8eeeda: jmp  0x8eee3a    ; init -> unlock path
+  8eeeeb: jmp  0x8eee2a    ; blocking -> flag check
+```
+
+| jcc/jmp | target | path |
+|---|---|---|
+| 0x8eee24 `je` | 0x8eeedf | trylock FAIL -> wrapper 0x161ce0 @0x8eeee6 -> jmp 0x8eee2a |
+| 0x8eee31 `jne` | 0x8eee89 | flag!=1 -> init (getentropy) -> jmp 0x8eee3a |
+| 0x8eeeaa/0x8eeecd `jne` | 0x8eeef0/0x8eeef3 | getentropy error -> trap |
+| 0x8eeeda `jmp` | 0x8eee3a | init -> unlock path |
+| 0x8eeeeb `jmp` | 0x8eee2a | wrapper return -> flag check |
+
+The trylock-OK branch falls through to 0x8eee2a (flag check) -> 0x8eee3a ->
+UNLOCK 0x8eee7b. The trylock-FAIL branch goes to the wrapper 0x8eeee6, whose
+return jumps to 0x8eee2a -> 0x8eee3a -> UNLOCK 0x8eee7b. The tail
+unlock(0x8eee7b) -> flag write(0x8eeed3 is only on the init branch) -> the
+epilogue is straight-line: **every non-trapping path reaches the unlock**.
+
+### Step 3 — verdict
+
+- Completed A#1 on the trylock-OK path: acquires (trylock) then reaches unlock
+  0x8eee7b -> **releases** (owner cleared, #87) -> **does not** leave owner=self.
+- Completed A#1 on the trylock-FAIL path: the wrapper 0x161ce0 returns with the
+  lock held, A then continues to 0x8eee2a -> 0x8eee3a -> unlock 0x8eee7b ->
+  **releases** -> **does not** leave owner=self.
+- Wrapper options 0x50000 give `allow_anonymous_owner = 0`, so they **do not**
+  change the `owner==self` check at lock.c:524.
+
+So a completed A#1 leaves the lock **not held** on both paths, and the wrapper's
+options do not relax the check — the "first acquire" remains unresolved by
+static bytes (consistent with #86/#87/#89).
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x161ce0 --stop-address=0x161e60 "$FRAMEWORK"
+llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep -E "dbbf002|dbc0664"
+grep -n "os_unfair_lock_lock_with_options\|OS_UNFAIR_LOCK_ALLOW_ANONYMOUS_OWNER\|OS_ULOCK_IS_OWNER(current, self" src/external/libplatform/src/os/lock.c
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep -E "j(e|ne)|jmp"
+```
