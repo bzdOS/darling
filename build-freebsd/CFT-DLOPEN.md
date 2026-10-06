@@ -9574,3 +9574,41 @@ sh /tmp/stub97-run.sh 0x8eee7b /tmp/iokit-probe-99-unlock-entry.log
 sh /tmp/stub97-run.sh 0x8eee80 /tmp/iokit-probe-99-unlock-ret.log
 grep -E "MLDR_TRAP_AT hit|rdi=0x|watch \+" /tmp/iokit-probe-99-unlock-*.log
 ```
+
+## Control #100 — callee 0xdbbeffc is a symbol stub for _os_unfair_lock_unlock
+
+**Date:** 2026-10-06
+**Branch:** task/unlock-callee
+**Base:** pr-arm64 = 7f477fd20a6bd690ef9c41cab286539d5bc7f953
+
+**Goal:** name the callee at 0xdbbeffc — the target of the `callq` from A at 0x8eee7b
+(Control #99 measured it executing but not clearing the lock word).
+
+**Method:** full disassembly with grep for the address:
+```sh
+timeout 90 llvm-objdump --macho --disassemble-all \
+  "$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework" \
+  | grep -B2 -A2 "dbbeffc"
+```
+
+### Verbatim disassembly
+
+```
+9e37: e9 c0 51 bb 0d    jmp 0xdbbeffc ## symbol stub for: _os_unfair_lock_unlock
+a1f2: e8 05 4e bb 0d    callq 0xdbbeffc ## symbol stub for: _os_unfair_lock_unlock
+a3df: e8 18 4c bb 0d    callq 0xdbbeffc ## symbol stub for: _os_unfair_lock_unlock
+```
+
+### Verdict (one line)
+
+0xdbbeffc is a **symbol stub** for `_os_unfair_lock_unlock` — the unlock function
+that Control #99 measured as executing but not clearing the lock word. The stub
+jumps to the real implementation in libsystem_platform.
+
+### Repro
+
+```sh
+timeout 90 llvm-objdump --macho --disassemble-all \
+  "$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework" \
+  | grep -B2 -A2 "dbbeffc"
+```
