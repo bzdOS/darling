@@ -6731,8 +6731,8 @@ In run 71-1, the active call site was 0x95d44f5 (setter B). In run 72-1, the
 active call site was **not** 0x95d44f5 — the stub was reached via a different
 path. The 72-1 walk shows _ChromeMain (0x212a4c0) as the caller, but
 _ChromeMain does **not** contain a direct `callq 0x64d020`. The stub is reached
-through a function pointer or inline code within _ChromeMain that does not
-appear as a separate call site in the disassembly.
+through a function pointer or inline code within _ChromeMain (hypothesis) that
+does not appear as a separate call site in the disassembly.
 
 **Verdict:** the stub 0x64d020 is a **shared initializer** called from multiple
 sites. The #71 path (setter B) and the 72-1 path (dyld initializer) are two
@@ -6744,23 +6744,22 @@ resolved: the exact caller in 72-1 is not identified (stack 96-104 unresolved).
 The crash is **SIGILL at rip=libsystem_platform+0x8237** (recursive abort of
 the lock), **not** ud2 of stub 0x64d020 (0x64d077/0x64d07a).
 
-The stub 0x64d020 uses **dispatch_once** (0xdbbf2f6) as a guard:
+The stub 0x64d020 calls 0xdbbf2f6 (a dyld stub in the Framework's __stubs
+section, resolved at runtime) and checks the return value:
 
 1. Zeroes 16 bytes at (%rdi) — the lock structure
-2. Calls dispatch_once with a local token and size 8
-3. If dispatch_once returns non-zero → **ud2** (abort)
+2. Calls 0xdbbf2f6 with a local token and size 8
+3. testl %eax, %eax; jne 0x64d076 (ud2)
 4. Otherwise copies 8 bytes from token to (%rbx)
-5. Calls dispatch_once again with the same token
-6. If dispatch_once returns non-zero → **ud2** (abort)
+5. Calls 0xdbbf2f6 again with the same token
+6. testl %eax, %eax; jne 0x64d079 (ud2)
 7. Otherwise copies 8 bytes from token to 0x8(%rbx)
 
-The guard is the **dispatch_once return value**: if the initialization was
-already performed (or is in progress), dispatch_once returns non-zero and the
-stub aborts with ud2. This is a **guard flag** mechanism, not deferred dyld
-initialization.
-
-In run 72-1, the stub was entered while the lock was already held (owner
-0x307 = guest tid). The dispatch_once guard detected the re-entry and aborted.
+The stub 0x64d020 is a **shared initializer** called from multiple sites
+(0x64cfa5, 0xccdb8f, 0x95d44f5). In run 72-1, the stub was entered while the
+lock was already held (owner 0x307 = guest tid). The recursive abort at
+libsystem_platform+0x8237 fired because the same thread attempted to acquire
+the lock a second time.
 
 ### Repro
 
