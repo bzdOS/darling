@@ -9144,3 +9144,79 @@ grep -nE "(callq|jmp)\s+0x" /tmp/cft-full-disasm-91.txt > /tmp/calls-91.txt
 # edges into __text only), BFS from {0x8eee10,0x161ce0,0xdbc0664,0x8eedc0},
 # then BFS-with-parent to print the shortest path to 0x212aa00 / 0x8eedc0
 ```
+
+## Control #94 — runtime check of the #93 cycle: the wrapper→0xcce330→0x64d080 branch is REFUTED
+
+**Date:** 2026-10-06
+**Branch:** task/reentry-runtime
+**Base:** pr-arm64 = 37d7ab9841b7427271316c44ed0d09a9ad7ca057 (`git rev-parse` before branching)
+
+**Goal:** confirm or refute the #93 re-entry cycle on the abort that already
+reproduces (no new patches).
+
+**Run:** the abort is already captured in the crash run `/tmp/iokit-probe-72-1.log`
+(guest stack dump from the mldr crash handler); no fresh run was needed, no
+patch applied.
+
+### Step 1-2 — decoded stack at the abort (addresses)
+
+```
+$ python3 build-freebsd/decode-crash.py /tmp/iokit-probe-72-1.log "$DARLING_OVERLAY" src/tests
+  rip   libsystem_platform.dylib+0x8237   __os_unfair_lock_recursive_abort+0x7
+  stack libsystem_platform.dylib+0x257a
+  stack libsystem_platform.dylib+0x2814
+  stack dyld+0x14cf2c
+  stack Framework+0x161e42     <- wrapper 0x161ce0, after lock_with_options @0x161e3d
+  stack Framework+0x8eeeeb     <- A, return of the wrapper call @0x8eeee6
+  stack Framework+0x8eedd6     <- F0, return of A call #2 @0x8eedd1
+  stack Framework+0x16e3f95    <- 0x16e3f60
+  stack Framework+0x1863286    <- inside 0x1863180
+  stack Framework+0x186287e    <- 0x1862820
+  stack Framework+0x212ab91    <- 0x212aa00
+  stack Framework+0x212a9d2    <- 0x212a8c0
+  stack Framework+0x212a567
+  stack Framework+0x212a4c0    <- __init_offsets initializer
+```
+
+So the live chain is: **initializer 0x212a4c0 -> … -> 0x212aa00 -> 0x1862820 ->
+0x1863180 -> 0x16e3f60 -> F0 -> A#2 -> wrapper 0x161ce0 -> lock_with_options ->
+recursive abort**.
+
+### Step 3 — per-edge verdict against the #93 cycle
+
+Presence of each cycle address in the 72-1 dump (`grep` over the log):
+
+| #93 edge | site | in dump? |
+|---|---|---|
+| F0 -> A (call #2) | 0x8eedd1, ret 0x8eedd6 | **present** (0x8eedd6) |
+| A -> wrapper 0x161ce0 | 0x8eeee6, ret 0x8eeeeb | **present** (0x161e42, 0x8eeeeb) |
+| wrapper -> 0xcce330 | 0x161e53 / 0x161e5d | **ABSENT** |
+| 0xcce330 -> … | — | **ABSENT** |
+| … -> 0x64d080 -> 0x212aa00 | 0x64d19b | **ABSENT** |
+| 0x212aa00 -> 0x1862820 | 0x212ab8c, ret 0x212ab91 | **present** (0x212ab91) |
+| 0x1862820 -> 0x1863180 | 0x1862879, ret 0x186287e | **present** (0x186287e) |
+| 0x1863180 -> 0x16e3f60 | 0x1863281, ret 0x1863286 | **present** (0x1863286) |
+| 0x16e3f60 -> F0 | 0x16e3f90, ret 0x16e3f95 | **present** (0x16e3f95) |
+| A#1 still on stack | 0x8eedcb (ret of A call #1) | **ABSENT** |
+
+The wrapper 0x161ce0 is on the stack, but on the **lock_with_options** path
+(0x161e42), not the 0xcce330 path (0x161e53 absent). A#1's return (0x8eedcb) is
+absent, so A#1 had returned; the aborting A is A#2 (0x8eedd6).
+
+### Verdict (control #94, one line)
+
+The #93 closing branch **wrapper -> 0xcce330 -> … -> 0x64d080 -> 0x212aa00 is
+REFUTED** at runtime: the dump has the wrapper only on the lock_with_options path
+(0x161e42) and none of 0x161e53 / 0xcce330 / 0x64d080, while the direct chain
+0x212aa00 -> 0x1862820 -> 0x1863180 -> 0x16e3f60 -> F0 -> A#2 -> wrapper ->
+lock_with_options -> abort is fully present; A#1 had returned (0x8eedcb absent),
+so the re-entry is **not** through the wrapper's 0xcce330 branch.
+
+### Repro
+
+```sh
+python3 build-freebsd/decode-crash.py /tmp/iokit-probe-72-1.log "$DARLING_OVERLAY" src/tests
+grep -E "stack\[(35|41|45|49|63|93|105|139|171|185)\]" /tmp/iokit-probe-72-1.log
+# presence check per #93 address:
+grep -cE "Framework\+0x(161e42|161e53|cce330|64d080|8eeeeb|8eedcb|212ab91)" /tmp/iokit-probe-72-1.log
+```
