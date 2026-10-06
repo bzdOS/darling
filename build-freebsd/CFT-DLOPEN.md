@@ -8398,3 +8398,112 @@ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
 llvm-objdump -d --start-address=0x1863260 --stop-address=0x18632a0 "$FRAMEWORK"
 llvm-objdump -d --start-address=0x1863180 --stop-address=0x1863480 "$FRAMEWORK" | grep pushq
 ```
+
+## Control #87 — who writes A's owner field, and what the unlock does to it
+
+**Date:** 2026-10-06
+**Branch:** task/a-lock-owner
+**Base:** pr-arm64 = 4d39ca1e491a0539558278d58edfbb2f0942e6d2 (`git rev-parse` before branching)
+
+**Goal:** trace the owner field of A's lock (0x100667a0) — which instruction writes
+it, and whether the unlock clears it — to explain why owner 0x307 survives into
+the second acquire.
+
+### Step 1 — A does not write 0x100667a0; it only passes it to the lock primitives
+
+Every reference to 0x100667a0 in A 0x8eee10..0x8eeef0:
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
+  8eee16: leaq 0x100667a0(%rip), %rdi   ; rdi = &lock  (trylock arg)
+  8eee1d: callq 0xdbbf002               ; _os_unfair_lock_trylock
+  8eee3a: leaq 0x100667a0(%rip), %rdi   ; rdi = &lock  (unlock arg)
+  8eee7b: callq 0xdbbeffc               ; _os_unfair_lock_unlock
+  8eeedf: leaq 0x100667a0(%rip), %rdi   ; rdi = &lock  (blocking arg)
+  8eeee6: callq 0x161ce0                ; blocking acquire
+```
+
+A never stores to 0x100667a0. Its only stores are to the token (0x100667a8 at
+0x8eee48/0x8eeeb3/0x8eee8c, 0x100667b0 at 0x8eee6d) and the flag (0x100667a4 at
+0x8eeed3). So the **owner word is written only inside the lock primitives**, via
+the pointer A passes in rdi: the trylock's cmpxchg (ACQUIRE-A) and the unlock's
+exchange (UNLOCK).
+
+### Step 2 — the unlock is `_os_unfair_lock_unlock`, and it CLEARS the owner
+
+```
+$ llvm-objdump -d --start-address=0xdbbeffc --stop-address=0xdbb002 "$FRAMEWORK"
+  dbbeffc: ff 25 fe 40 5e 01   jmpq *0x15e40fe(%rip)   ## 0xf1a3100
+$ python3 -c "print(hex(0xdbbeffc+6+0x15e40fe))"
+0xf1a3100
+$ llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep 0xF1A3100
+__DATA_CONST __got 0xF1A3100 ... bind 0x0 LSysX _os_unfair_lock_unlock
+$ llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep dbbeffc
+0x000000000dbbeffc  1479 _os_unfair_lock_unlock
+```
+
+Provider chain: the bind names `LSysX`; `LSysX` -> `LC_REEXPORT_DYLIB
+libSystem.B.dylib` -> `LC_REEXPORT_DYLIB libsystem_platform.dylib`, where the
+symbol is real code:
+
+```
+$ LSP="$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib"
+$ llvm-nm "$LSP" | grep _os_unfair_lock_unlock
+00000000000028c0 T _os_unfair_lock_unlock
+$ llvm-objdump -d --arch-name=x86_64 --start-address=0x28c0 --stop-address=0x295b "$LSP"
+  28c0: pushq %rbp
+  28c1: movq  %rsp, %rbp
+  28c4: subq  $0x40, %rsp
+  28c8: movq  %rdi, -0x18(%rbp)          ; lock
+  28d0: movq  %rax, -0x20(%rbp)          ; l
+  28d4: movq  $0x3, -0x8(%rbp)           ; __TSD_MACH_THREAD_SELF
+  28e0: movl  %gs:(,%rax,8), %eax        ; self
+  28ee: movl  %eax, -0x24(%rbp)
+  28f1: movq  -0x20(%rbp), %rcx          ; rcx = l
+  28f5: movl  $0x0, -0x34(%rbp)          ; 0
+  2908: movl  -0x30(%rbp), %eax          ; eax = 0
+  290b: xchgl %eax, (%rcx)               ; os_atomic_xchg(&l->oul_value, 0)  <- clears owner
+  290d: movl  %eax, -0x3c(%rbp)          ; current = old value
+  2925: cmpl  -0x24(%rbp), %eax          ; current == self ?
+  293a: je    0x2945                     ; yes -> return
+  2940: jmp   0x2956                     ; no  -> _os_unfair_lock_unlock_slow
+```
+
+So the unlock **clears the owner**: it exchanges `oul_value` with `OS_LOCK_NO_OWNER`
+(0). The source agrees (`src/external/libplatform/src/os/lock.c:627`:
+`current = os_atomic_xchg(&l->oul_value, OS_LOCK_NO_OWNER, release)`). **Verdict:
+unlock erases the owner field.**
+
+### Step 3 — owner 0x307 lifecycle
+
+- ACQUIRE (trylock 0x8eee1d / blocking 0x161ce0) writes owner = self = 0x307.
+- UNLOCK (0x8eee7b) exchanges the word with 0 — it **erases** owner.
+- Therefore a **completed** A call cannot leave owner 0x307 in the word; and #86
+  showed F0 call #1 returned (0x8eedcb absent), i.e. A #1 did reach its epilogue.
+- Yet A #2's trylock fails and falls into the blocking lock with owner == self.
+
+So the word being non-empty at the second acquire is **not** explained by a
+completed A #1 still holding it (the unlock would have cleared it), and #82
+showed A is the only in-image writer of 0x100667a0. Measured absence of an
+in-image re-acquirer -> the next check is the lock word's own initialization
+(0x100667a0 is in `__common`/BSS, zero at load; the live 0x00000307 was written
+at runtime), i.e. the first acquire is not resolvable from static bytes alone.
+
+### Verdict (control #87, one line)
+
+The owner field is written only by the lock primitives A calls (A stores only the
+token/flag); the unlock 0xdbbeffc resolves to `_os_unfair_lock_unlock`
+(LSysX -> libSystem.B -> libsystem_platform, T @0x28c0) whose `xchgl %eax,(%rcx)`
+with eax=0 **erases** the owner — so a completed A #1 cannot be the holder, no
+in-image re-acquirer exists (#82), and the first acquire is not statically
+resolvable (lock word in `__common`, runtime-written).
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK" | grep -E "0x100667a0|callq\s+0xdbbeffc|callq\s+0x161ce0"
+python3 -c "print(hex(0xdbbeffc+6+0x15e40fe))"
+llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep 0xF1A3100
+llvm-nm "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep _os_unfair_lock_unlock
+llvm-objdump -d --arch-name=x86_64 --start-address=0x28c0 --stop-address=0x295b "$LSP"
+```
