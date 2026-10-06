@@ -3040,15 +3040,21 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                     (unsigned long long)mc->mc_rdi);
             }
             fflush(stderr);
-            /* Control #71: name the re-entry. Print the thread id and walk the
-             * guest stack, resolving each word to image+offset, so the FIRST
-             * acquire's return address (a frame below the second one, #65's
-             * 0x8eeeeb) is visible in the log. */
-            fprintf(stderr, "[darling-mldr] reentry: tid=%ld rsp=0x%llx\n",
-                    (long)getpid(), (unsigned long long)mc->mc_rsp);
+            /* Control #71/#72: name the re-entry. Print the host thread id
+             * (thr_self, which is also what the guest gettid() returns — see
+             * LINUX_SYS_gettid above) next to the guest pid, and walk the
+             * guest stack resolving each word to image+offset. #72 raised the
+             * depth to 512 so an earlier holder of the lock would show up. */
+            {
+                long host_tid = 0;
+                freebsd_raw_syscall(SYS_thr_self, (long)&host_tid, 0, 0, 0, 0, 0);
+                fprintf(stderr,
+                    "[darling-mldr] reentry: host_tid=%ld guest_pid=%ld rsp=0x%llx\n",
+                    host_tid, (long)getpid(), (unsigned long long)mc->mc_rsp);
+            }
             {
                 char ws[256];
-                for (int i = 0; i < 128; i++) {
+                for (int i = 0; i < 512; i++) {
                     uint64_t w = 0;
                     uintptr_t a = (uintptr_t)mc->mc_rsp + (uintptr_t)(8 * i);
                     if (!mldr_dump_read_guarded(a, &w))
