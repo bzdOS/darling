@@ -9220,3 +9220,75 @@ grep -E "stack\[(35|41|45|49|63|93|105|139|171|185)\]" /tmp/iokit-probe-72-1.log
 # presence check per #93 address:
 grep -cE "Framework\+0x(161e42|161e53|cce330|64d080|8eeeeb|8eedcb|212ab91)" /tmp/iokit-probe-72-1.log
 ```
+
+## Control #95 — the edge into the wrapper block is 0x8eee24 `je` on the trylock result
+
+**Date:** 2026-10-06
+**Branch:** task/a-window-cfg
+**Base:** pr-arm64 = a4eb64e60dc0c4e8d68f63cf6b8829534b8eb15a (`git rev-parse` before branching)
+
+**Goal:** name the edge by which A#2 reaches the wrapper call (0x8eeee6) without
+passing the unlock 0x8eee7b, resolving the apparent conflict with #90 ("both
+non-trapping branches reach unlock").
+
+### Step 1 — A window 0x8eee10..0x8eeef0, transitions
+
+```
+$ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
+  8eee1d: callq 0xdbbf002        ; _os_unfair_lock_trylock
+  8eee22: testb %al, %al         ; al = trylock result
+  8eee24: je    0x8eeedf         ; <-- EDGE: al==0 -> blocking block
+  8eee2a: cmpb  $1, 0x100667a4   ; flag
+  8eee31: jne   0x8eee89         ; flag!=1 -> init
+  ...
+  8eee7b: callq 0xdbbeffc        ; _os_unfair_lock_unlock
+  8eeea3: callq 0xdbbf2f6        ; _getentropy (init)
+  8eeec6: callq 0xdbbf2f6        ; _getentropy (init)
+  8eeeda: jmp   0x8eee3a         ; init -> unlock path
+  8eeedf: leaq  0x100667a0(%rip), %rdi   ; blocking block entry
+  8eeee6: callq 0x161ce0         ; wrapper (blocking acquire)
+  8eeeeb: jmp   0x8eee2a         ; wrapper return -> flag check
+```
+
+| from | insn | checks | target | meaning |
+|---|---|---|---|---|
+| 0x8eee22 | `testb %al,%al` | al (trylock result) | — | — |
+| **0x8eee24** | **`je 0x8eeedf`** | **al == 0** | **0x8eeedf** | **trylock FAILED -> blocking** |
+| 0x8eee31 | `jne 0x8eee89` | flag != 1 | 0x8eee89 | init |
+| 0x8eeeda | `jmp 0x8eee3a` | — | 0x8eee3a | init -> unlock path |
+| 0x8eeeeb | `jmp 0x8eee2a` | — | 0x8eee2a | wrapper return -> flag check |
+
+### Step 2 — the named edge and the A#1/A#2 difference
+
+**The edge into the wrapper block is 0x8eee24 `je 0x8eeedf`, condition
+`al == 0`** — the result of the trylock at 0x8eee1d, i.e. the lock was already
+held. It is the only entrance to the blocking block (0x8eeedf) in the whole A
+window.
+
+So there is no conflict with #90: the blocking path **does** reach the unlock
+(0x8eeedf -> wrapper 0x8eeee6 -> `jmp 0x8eee2a` -> ... -> 0x8eee7b), but the
+wrapper's `_os_unfair_lock_lock_with_options` call **aborts before returning**
+(recursive, owner==self), so A#2 never gets to 0x8eee7b. #90's "both branches
+reach unlock" is about reachability; the abort cuts the blocking branch at the
+wrapper.
+
+**Source of the A#1/A#2 difference:** the **lock word** (0x100667a0), which
+decides the trylock result at 0x8eee1d. A#1: word free -> trylock succeeds (al=1)
+-> falls through to 0x8eee2a -> 0x8eee7b unlock. A#2: word owner==self ->
+trylock fails (al=0) -> `je 0x8eeedf` -> wrapper -> lock_with_options -> abort.
+The global flag 0x100667a4 is read later (0x8eee31) and only selects the init
+path; the first call's eax (F0's combined result) is consumed in F0, not in A.
+
+### Verdict (control #95, one line)
+
+The edge into the wrapper block is **0x8eee24 `je 0x8eeedf` (`al == 0`, the
+trylock result)**; the state that differs between A#1 and A#2 is the **lock word
+0x100667a0** (free -> trylock ok; owner==self -> trylock fails -> wrapper ->
+lock_with_options -> recursive abort), and #90 is not contradicted because the
+abort cuts the blocking branch at the wrapper before the unlock.
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeef0 "$FRAMEWORK"
+```
