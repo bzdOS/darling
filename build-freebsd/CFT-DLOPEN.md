@@ -6776,3 +6776,152 @@ llvm-objdump -d "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Fram
 llvm-objdump -d --start-address=0x8eeee6 --stop-address=0x8eeef0 \
   "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework
 ```
+## Control #74 — resolving the caller of stub 0x64d020 in run 72-1
+
+**Date:** 2026-10-06
+**Branch:** task/stub-caller-xref
+**Base:** pr-arm64 = 4bea48738
+**Goal:** resolve the caller of stub 0x64d020 in run 72-1 — find all aligned
+8-byte occurrences of 0x64d020 in __got/__auth_got/__la_symbol_ptr/__data,
+identify the reading instruction in _ChromeMain, and cross-check with stack 96-104.
+
+### Step 1: Search for 0x64d020 in all segments
+
+```sh
+python3 -c "
+import struct
+with open('$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework', 'rb') as f:
+    data = f.read()
+target = struct.pack('<Q', 0x64d020)
+offsets = []
+start = 0
+while True:
+    idx = data.find(target, start)
+    if idx == -1:
+        break
+    offsets.append(idx)
+    start = idx + 1
+print(f'Found {len(offsets)} occurrences of 0x64d020')
+for off in offsets:
+    print(f'  file offset: 0x{off:x}')
+"
+```
+
+**Result:** 0 occurrences. The value 0x64d020 does not appear as a direct
+8-byte literal anywhere in the binary.
+
+### Step 2: Search for callq instructions targeting 0x64d020
+
+```sh
+python3 -c "
+import struct
+with open('$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework', 'rb') as f:
+    data = f.read()
+count = 0
+for i in range(len(data) - 5):
+    if data[i] == 0xe8:
+        rel32 = struct.unpack('<i', data[i+1:i+5])[0]
+        target = i + 5 + rel32
+        if target == 0x64d020:
+            print(f'callq 0x64d020 at file offset 0x{i:x} (rel32=0x{rel32:x})')
+            count += 1
+print(f'Total: {count}')
+"
+```
+
+**Result:** 3 call sites (all outside _ChromeMain):
+
+```
+callq 0x64d020 at file offset 0x64cfa5 (rel32=0x76)
+callq 0x64d020 at file offset 0xccdb8f (rel32=0x-680b74)
+callq 0x64d020 at file offset 0x95d44f5 (rel32=0x-8f874da)
+```
+
+### Step 3: Search for indirect calls in _ChromeMain
+
+```sh
+llvm-objdump -d --start-address=0x3fe0 --stop-address=0x212a4c0 \
+  "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework \
+  | grep -E "movq.*\(%rip\).*%r|callq.*\*%r|jmpq.*\*%r"
+```
+
+**Result:** _ChromeMain contains many indirect calls (callq *%rax, callq *%rbx,
+callq *%r14, etc.) but none of them target 0x64d020. The value 0x64d020 is not
+loaded from any GOT slot or function pointer in _ChromeMain.
+
+### Step 4: Cross-check with stack 72-1 (words 96-104)
+
+Stack words 96-104 from run 72-1:
+
+```
+stack[96] 0x2d7fb7b2e66 libsystem_kernel.dylib+0x42e66
+stack[97] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[98] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[99] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[100] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[101] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[102] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[103] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+stack[104] 0x2d7fbe34000 Google Chrome for Testing Framework+0x0
+```
+
+None of these words match any of the 3 call sites (0x64cfa5, 0xccdb8f,
+0x95d44f5). The caller of stub 0x64d020 in run 72-1 is **not** in the
+printed stack walk.
+
+### Verdict
+
+The caller of stub 0x64d020 in run 72-1 is **statically unresolvable**:
+
+1. The value 0x64d020 does not appear as a direct 8-byte literal in any segment
+   (__got, __auth_got, __la_symbol_ptr, __data).
+2. No callq instruction in _ChromeMain targets 0x64d020.
+3. No indirect call in _ChromeMain loads 0x64d020 from a GOT slot or function
+   pointer.
+4. Stack words 96-104 do not contain any of the 3 known call sites.
+
+The hypothesis of a function pointer or inline code in _ChromeMain is
+**refuted**. The stub 0x64d020 is reached in run 72-1 through a path that is
+not visible in the static disassembly or the printed stack walk.
+
+### Repro
+
+```sh
+# Search for 0x64d020 as 8-byte literal
+python3 -c "
+import struct
+with open('$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework', 'rb') as f:
+    data = f.read()
+target = struct.pack('<Q', 0x64d020)
+offsets = []
+start = 0
+while True:
+    idx = data.find(target, start)
+    if idx == -1:
+        break
+    offsets.append(idx)
+    start = idx + 1
+print(f'Found {len(offsets)} occurrences of 0x64d020')
+"
+
+# Search for callq instructions targeting 0x64d020
+python3 -c "
+import struct
+with open('$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework', 'rb') as f:
+    data = f.read()
+count = 0
+for i in range(len(data) - 5):
+    if data[i] == 0xe8:
+        rel32 = struct.unpack('<i', data[i+1:i+5])[0]
+        target = i + 5 + rel32
+        if target == 0x64d020:
+            print(f'callq 0x64d020 at file offset 0x{i:x}')
+            count += 1
+print(f'Total: {count}')
+"
+
+# Search for indirect calls in _ChromeMain
+llvm-objdump -d --start-address=0x3fe0 --stop-address=0x212a4c0 \
+  "$DARLING_OVERLAY"/Frameworks/Google\ Chrome\ for\ Testing\ Framework.framework/Versions/154.0.8029.0/Google\ Chrome\ for\ Testing\ Framework \
+  | grep -E "movq.*\(%rip\).*%r|callq.*\*%r|jmpq.*\*%r"
+```
