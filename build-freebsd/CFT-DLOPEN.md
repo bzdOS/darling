@@ -7910,3 +7910,121 @@ llvm-objdump -d --start-address=0x1862820 --stop-address=0x1862b60 "$FRAMEWORK" 
 llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt
 grep -nE "100667a0" /tmp/cft-full-disasm.txt
 ```
+
+## Control #83 — A re-entry point: no in-image caller exists; chain symbolization is stripped
+
+**Date:** 2026-10-06
+**Branch:** task/a-reentry-xref
+**Base:** pr-arm64 = cd4525527146fc651981b1a986bdc0f630607470 (`git rev-parse` before branching)
+**Track milestone:** dyld passes the Chrome framework's initializers.
+
+Two priorities in one control: (1) symbolization of the call chain (plan §9.11),
+(2) the exact re-entry point into accessor A (0x8eee10).
+
+### Priority 1 — symbolization of 0xccdb60 and the cascade frames: stripped
+
+```
+$ llvm-nm -n "$FRAMEWORK" | awk '$1 ~ /^[0-9a-f]+$/ && $1 <= "0000000000ccdb60"' | tail -3
+0000000000002840 T _ChromeAppModeStart_v8
+0000000000002a00 T _ChromeWebAppShortcutCopierMain
+0000000000003fe0 T _ChromeMain
+$ llvm-nm -n "$FRAMEWORK" | awk '$1 ~ /^[0-9a-f]+$/' | wc -l
+3
+```
+
+The same nearest-below result holds for 0x212ab3f and 0x212a9d2 (all three sit
+inside the single `_ChromeMain` range 0x3fe0..0x212a4c0): the framework is
+**stripped**, 3 defined symbols, nearest below = `_ChromeMain` @0x3fe0. (Matches
+Control #78; re-measured here on the new base.)
+
+### Priority 2a — full-image xref of accessor A 0x8eee10: only F0
+
+```
+$ llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt
+$ grep -nE "callq\s+0x8eee10" /tmp/cft-full-disasm.txt
+  8eedc6: e8 45 00 00 00    callq 0x8eee10   ; F0 call #1
+  8eedd1: e8 3a 00 00 00    callq 0x8eee10   ; F0 call #2
+$ grep -nE "0x8eee10" /tmp/cft-full-disasm.txt | grep -vE "callq\s+0x8eee10"
+(empty)
+```
+
+Two `callq` sites, both in F0 (0x8eedc0); no other `callq`, no `leaq`, no data
+reference. Raw pointer scan and rebase targets also come back empty:
+
+```
+$ python3 - "$FRAMEWORK"   # 8-byte and 4-byte LE search for 0x8eee10
+8B 0x8eee10: NONE
+4B 0x8eee10: NONE
+$ grep -icE "0x8EEE10" /tmp/cft-dyldinfo.txt   # rebase targets
+0
+```
+
+So **no in-image path re-enters A**: the only caller is F0's two calls.
+
+### Priority 2b — binding class of _getentropy (0x8eeea3 / 0x8eeec6 -> 0xdbbf2f6)
+
+```
+$ llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -i 0xF1A3520
+__DATA_CONST __got 0xF1A3520 0x80100000000000A9 bind 0x0 LSysX _getentropy
+$ llvm-objdump --macho --lazy-bind "$FRAMEWORK" | grep -c 0xF1A3520
+0
+```
+
+The stub 0xdbbf2f6 (`jmpq *0x15e4224(%rip)` -> slot 0xf1a3520) binds
+`_getentropy` **non-lazily** via the chained-fixup import table: the slot lives in
+`__DATA_CONST,__got`, there is no `__la_symbol_ptr` section, and the lazy-bind
+table carries no entry for it. So it is **resolved at load**, not at the first
+call: dyld fills the GOT while fixing up the image, and nothing else runs at the
+call itself. The provider is `libsystem_kernel.dylib` (`T _getentropy` @0x42e5c),
+not `libsystem_platform`:
+
+```
+$ LSPK="$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib"
+$ llvm-nm "$LSPK" | grep -i getentropy
+0000000000042e5c T _getentropy
+0000000000059b90 t _sys_getentropy
+```
+
+### Priority 2c — path from the stub and the initializer to F0 / A
+
+Verified static edges:
+
+```
+0x212a4c0 (__init_offsets initializer) -> callq 0x212a8c0 @0x212a562
+0x212a8c0 -> callq 0x212aa00 @0x212a9cd   (rdi = 0x10066880, leaq @0x212a9c3)
+0x212aa00 -> callq 0xccdb60 @0x212ab3a    (rdi = rbx+0x36c0) -> stub 0x64d020 @0xccdb8f
+0x212aa00 -> callq 0xccdb60 @0x212ab4b    (rdi = rbx+0x3778)
+0x212aa00 -> callq 0x1862820 @0x212ab8c   (rdi = rbx = 0x10066880)
+0x1862820 -> callq 0x1863180 @0x1862879
+```
+
+So the stub (its #72 frame 0x64d063) and the F0/A branch are **siblings** under
+0x212aa00: the stub is reached through the constructors 0xccdb60/0x64cf80, while
+F0/A is reached through 0x1862820. The F0 -> A edge is F0's own two `callq`
+(0x8eedc6 / 0x8eedd1). Note: the abort-stack frame 0x1863280 (which calls
+0x16e3f60 -> F0) has **no static caller** (`grep -nE "callq\s+0x1863280"` and any
+`jmp`/`lea` to it are empty), so that middle link is not statically pinned.
+
+### Verdict (control #83, one line)
+
+Measured absence of an in-image path into A: the only callers of 0x8eee10 are
+F0's two `callq` (0x8eedc6 / 0x8eedd1), with no data pointer or rebase target, and
+`_getentropy` is a non-lazy chained-fixup bind (resolved at load, nothing at the
+call) — so the image does not re-enter A, and the next suspect is **_getentropy
+interposition** (the sole call in A's locked region, 0x8eeea3/0x8eeec6); the
+symbolization priority is a **stripped** measure (0xccdb60 nearest below
+`_ChromeMain` @0x3fe0).
+
+### Repro
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+LSPK="$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib"
+llvm-nm -n "$FRAMEWORK" | awk '$1 ~ /^[0-9a-f]+$/ && $1 <= "0000000000ccdb60"' | tail -3
+llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm.txt
+grep -nE "callq\s+0x8eee10" /tmp/cft-full-disasm.txt
+grep -nE "0x8eee10" /tmp/cft-full-disasm.txt | grep -vE "callq\s+0x8eee10"
+llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -i 0xF1A3520
+llvm-objdump --macho --lazy-bind "$FRAMEWORK" | grep -c 0xF1A3520
+llvm-nm "$LSPK" | grep -i getentropy
+```
