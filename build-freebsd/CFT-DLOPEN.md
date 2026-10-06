@@ -9033,3 +9033,114 @@ grep -nE "(callq|jmp)\s+0x212aa00" /tmp/cft-full-disasm-91.txt
 grep -nE "(callq|jmp)\s+0x212a8c0" /tmp/cft-full-disasm-91.txt
 grep -cE "0x100667a0" /tmp/cft-full-disasm-91.txt
 ```
+
+## Control #93 — the A re-entry cycle is statically closed: A -> wrapper -> … -> 0x212aa00 -> … -> F0 -> A
+
+**Date:** 2026-10-06
+**Branch:** task/init-recursion
+**Base:** pr-arm64 = d2c39488c4e30d34a8027e0c4da5f152d339c00b (`git rev-parse` before branching)
+
+**Goal:** close or refute the nested re-entry: while A#1 holds the lock (before its
+unlock), does control leave A into the chain and come back to F0/A?
+
+### Step 1 — stub 0x64d020 boundaries; 0x64d19b is NOT in it
+
+```
+$ llvm-objdump -d --start-address=0x64d000 --stop-address=0x64d200 "$FRAMEWORK"
+  64d00c: retq                     ; prev function ends
+  64d013: nopw ...                 ; padding
+  64d020: pushq %rbp               ; stub entry
+  64d03f: callq 0xdbbf2f6          ; _getentropy
+  64d05e: callq 0xdbbf2f6          ; _getentropy
+  64d075: retq                     ; stub ends
+  64d07c: nopl (%rax)
+  64d080: pushq %rbp               ; neighbour function
+  ...
+  64d19b: callq 0x212aa00          ; <- the #92 caller is HERE, not in the stub
+```
+
+So the stub is 0x64d020..0x64d075; **0x64d19b lives in the neighbour 0x64d080**.
+
+### Step 2 — outgoing of the stub and the neighbour
+
+- stub 0x64d020: only `_getentropy` (0x64d03f, 0x64d05e) — **no edge back** to
+  0x212aa00 / 0xccdb60 / 0x1862820.
+- neighbour 0x64d080: calls 0xdb6b540 (0x64d0d0), **0x212aa00 (0x64d19b)**,
+  0xdbbf056/0xdbbf008/0xdbbf050/0xdbbef66 (0x64d1ae..0x64d1fa).
+
+### Step 3 — reachability walk from the A path (declared bound: unbounded)
+
+Call graph built from the full disasm (772,025 prologues, 5,776,489 call/jmp
+sites; edges into `__text` only), BFS from {A 0x8eee10, wrapper 0x161ce0,
+lock_with_options stub 0xdbc0664, F0 0x8eedc0}:
+
+```
+reachable functions from A-path: 105036
+0x212aa00 (chain) reached: True
+F0 0x8eedc0 reached: True
+```
+
+The **shortest closing path** (function -> function, each edge with its site):
+
+```
+A? no: the path starts at the wrapper, reached from A at 0x8eeee6
+0x161ce0 -> 0xcce330   via 0x161e53 / 0x161e5d   (callq 0xcce330)
+0xcce330 -> 0x56f89c0  via 0xcce67a
+0x56f89c0 -> 0x56f8680 via 0x56f89c4
+0x56f8680 -> 0x56f87d0 via 0x56f86b9
+0x56f87d0 -> 0x126f4a0 via 0x56f87f9 -> 0x126fa50
+0x126f4a0 -> 0xaa07b0  via 0x126f4f9
+0xaa07b0  -> 0x12cf0   via 0xaa08bc
+0x12cf0   -> 0x1d0c0   via 0x1324d
+0x1d0c0   -> 0x64d080  via 0x1debc / 0x1df25
+0x64d080  -> 0x212aa00 via 0x64d19b              <- closing edge into the chain
+```
+
+rel32 recomputes: 0x8eeee6+5+0xff872df5=0x161ce0; 0x161e53+5+0x00b6c4d8=0xcce330;
+0x161e5d+5+0x00b6c4ce=0xcce330; 0x64d19b+5+0x01add860=0x212aa00.
+
+### Step 4 — the chain 0x212aa00 -> F0 (shortest, all rel32 recomputed)
+
+```
+0x212aa00 -> 0x1862820 via 0x212ab8c   (0x212ab8c+5+0xff737c8f=0x1862820)
+0x1862820 -> 0x1863180 via 0x1862879   (0x1862879+5+0x00000902=0x1863180)
+0x1863180 -> 0x16e3f60 via 0x1863281   (0x1863281+5+0xffe80cda=0x16e3f60)
+0x16e3f60 -> F0 0x8eedc0 via 0x16e3f90 (0x16e3f90+5+0xff20ae2b=0x8eedc0)
+F0 0x8eedc0 -> A 0x8eee10 via 0x8eedc6 / 0x8eedd1
+```
+
+### Step 5 — order in the cycle
+
+```
+F0 -> A#1 (0x8eedc6)
+A#1 acquires 0x100667a0 (trylock 0x8eee1d)         <- first acquire stays OPEN
+A#1 -> wrapper 0x161ce0 (0x8eeee6)
+wrapper -> 0xcce330 (0x161e53/0x161e5d)
+  ... -> 0x64d080 -> 0x212aa00 (0x64d19b)
+0x212aa00 -> 0x1862820 -> 0x1863180 -> 0x16e3f60 -> F0 -> A#2
+A#2 acquires 0x100667a0 (trylock 0x8eee1d) with owner==self -> abort
+```
+
+The first acquire that stays open at A#2 is **A#1's acquire inside A**
+(0x8eee1d, or the wrapper's own acquire at 0x8eeee6), whose matching unlock
+(0x8eee7b) is not reached until after the re-entry returns.
+
+### Verdict (control #93, one line)
+
+The cycle is statically closed: **A -> wrapper 0x161ce0 -> 0xcce330 -> … ->
+0x64d080 -> 0x212aa00 (closing edge 0x64d19b) -> 0x1862820 -> 0x1863180 ->
+0x16e3f60 -> F0 -> A**, so a nested re-entry is possible; the open first acquire
+at A#2 is A's own acquire inside A (0x8eee1d / wrapper 0x8eeee6), whose unlock
+0x8eee7b is only reached after the re-entry unwinds.
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x64d000 --stop-address=0x64d200 "$FRAMEWORK"
+llvm-objdump -d "$FRAMEWORK" > /tmp/cft-full-disasm-91.txt
+grep -nE "pushq\s+%rbp" /tmp/cft-full-disasm-91.txt > /tmp/prologues-91.txt
+grep -nE "(callq|jmp)\s+0x" /tmp/cft-full-disasm-91.txt > /tmp/calls-91.txt
+# build func->callees from the two files (function start = greatest prologue <= src,
+# edges into __text only), BFS from {0x8eee10,0x161ce0,0xdbc0664,0x8eedc0},
+# then BFS-with-parent to print the shortest path to 0x212aa00 / 0x8eedc0
+```
