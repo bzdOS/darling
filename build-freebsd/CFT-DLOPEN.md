@@ -6989,3 +6989,108 @@ sudo env DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... \
   DARLING_TEST_BINARY=cft-fwmacho-probe-macho \
   "$DARLING_BUILD_DIR"/dserver/mldr-real/mldr
 ```
+
+## Control #76 — instrumented stub 0x64d020 entry (int3 + mldr SIGTRAP lane): silent SIGSEGV, caller NOT captured; patch removed, control aborts at 0x8237
+
+**Date:** 2026-10-06
+**Branch:** task/stub-entry-int3
+**Base:** pr-arm64 = 1745e3ba30 (the accepted #75 tip; the ff-only merge is a no-op — HEAD already equals it)
+**Goal:** capture [rsp] at stub 0x64d020 entry live, resolve the caller, remove the patch with double proof.
+
+### Step 1 — original saved; entry-byte correction
+
+Overlay source (not a stage copy):
+`$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework`
+
+```
+sha256 (before): 45710f8bc23b4328baffbe7dcba91a0d0803ac68807fad9a436507d5e3df8ed1
+entry16 @fileoff 0x64d020: 554889e553504889fb0f57c00f110748  (saved in /tmp/stub64d020-orig.txt)
+```
+
+Correction to the dispatch text: the entry byte is NOT `callq 0xdbbf2f6` —
+it is `pushq %rbp` (0x55); the `callq 0xdbbf2f6` (bytes `e8b222570d`) sits at
+0x64d03f. Patched fileoff 0x64d020: 0x55 → 0xCC (exact-length, one byte).
+
+### Step 2 — mldr SIGTRAP lane (committed, built, installed)
+
+`sigtrap_handler` in `src/startup/mldr/freebsd_syscall_trap.c`, installed in
+`setup_macos_syscall_trap` next to the SIGILL handler. Match: byte == 0xCC AND
+`mldr_describe_addr` ends with `+0x64d020`. Per hit it prints `stub-entry:`
+(site + raw rsp + raw [rsp] + resolved caller + 8 stack words raw hex), then
+emulates the overwritten `pushq %rbp` (rsp -= 8, [rsp] = rbp, rip = site + 1)
+and resumes, so every entry is reported. Any other int3 → default re-raise
+(honest death). Built via `sh build-freebsd/build-mldr-only.sh`, installed to
+`$DARLING_BUILD_DIR/dserver/mldr-real/mldr` (`strings` shows the 3
+`stub-entry` lines).
+
+### Step 3 — diagnostic runs (patched): 0 hits, deterministic silent death 2/2
+
+Two runs, same recipe (60-2 probe chain + `DARLING_SMOKE_REFRESH=1` so the
+staged copy carries the patch — staged byte @0x64d020 verified 0xCC both
+times). Logs `/tmp/iokit-probe-76-1.log` and `/tmp/iokit-probe-76-2.log`:
+
+```
+run-1: 1292564 lines, 0 `stub-entry` lines
+run-2: 1292564 lines, 0 `stub-entry` lines   (identical count)
+last line (both): dyld: calling initializer function 0x…5e4c0 in /Frameworks/.../Google Chrome for Testing Framework
+```
+
+i.e. both runs end at the exact phase where #71/#72 abort one line later
+(`_ChromeMain` entry 0x212a4c0) — and then the guest dies with no lane output
+at all: no `genuine SIGILL`, no `reentry:`, no `FATAL` block. The mldr process
+is left zombie under the run's darlingserver; the wrapper survives until its
+timeout. Markers that the runs were valid (not an early staging death): full
+1.29M-line dyld trace, Chrome framework mapped + its initializer entered,
+staged byte 0xCC confirmed, death phase identical 2/2. The caller is NOT
+captured. Note: with the trap killing the run at the first stub entry,
+reaching the downstream abort is impossible by construction in a patched run.
+
+### Step 4 — patch removed, double proof (fresh this turn)
+
+```
+restored byte @0x64d020: 0x55
+sha256 (after): 45710f8bc23b4328baffbe7dcba91a0d0803ac68807fad9a436507d5e3df8ed1  (MATCH_ORIG)
+```
+
+Control run `/tmp/iokit-probe-76-ctrl2.log` (same recipe + REFRESH, unpatched
+file, the same new mldr): 0 `stub-entry` lines (no int3 in the image — the
+lane is silent as required) and the classic signature —
+
+```
+1292564:[darling-mldr] genuine SIGILL (ud2, not a patched trampoline) at libsystem_platform.dylib+0x8237 rip=0x6d5ce6c3237 rax=0x1
+1292565:[darling-mldr] lock word @0x6d5dea9a7a0: 0000000100000307 de0dd87c64562209 e479947adda729bf 0000000000000000 (ok=1111 rdi=0x307)
+1292566:[darling-mldr] reentry: host_tid=182520 guest_pid=30482 rsp=0x7fffffdfd670
+1292597:[darling-mldr] FATAL signal 4 (code=5) at addr=0x6d5ce6c3237
+```
+
+So the mldr change is benign (the genuine-SIGILL + reentry lane is intact
+with the new binary); the 0xCC delta correlates 2/2 with the silent death at
+init entry; the int3-plumbing failure mode is a silent guest death with zero
+lane output, mechanism unresolved (the handler prints before resuming, yet
+nothing was printed — it never reached its first flushed line, or never ran).
+
+### Verdict (control #76, one line)
+
+Ловушка на входе стаба технически встала (файл 0xCC + SIGTRAP-lane в mldr,
+сборка и установка проверены), но живьём дала 0 хитов в 2/2 прогонах: гость
+детерминированно умирает тихой смертью на фазе входа в инициализатор
+фреймворка (1292564 строки, та же последняя строка) без единой строки lane;
+вызывающий НЕ назван — ни один из 3 сайтов #74 (0x64cfa5, 0xccdb8f,
+0x95d44f5) не подтверждён и не исключён динамикой; патч снят (sha256 ==
+исходный 45710f8b…) + контрольный прогон без патча (0 stub-entry строк,
+abort на libsystem_platform+0x8237 с lock word и reentry); остаток = решение
+головы по режиму тихой смерти.
+
+### Repro
+
+```sh
+# save original + patch (overlay source, exact-length one byte)
+python3 -c "d=bytearray(open(<framework>,'rb').read()); assert d[0x64d020]==0x55; d[0x64d020]=0xcc; open(<framework>,'wb').write(bytes(d))"
+sh build-freebsd/build-mldr-only.sh   # installs mldr with sigtrap_handler
+sh /tmp/stub76-run2.sh                # 60-2 chain + DARLING_SMOKE_REFRESH=1 -> /tmp/iokit-probe-76-2.log
+grep -c 'stub-entry' /tmp/iokit-probe-76-2.log   # 0; tail: calling initializer ...5e4c0; mldr zombie
+# restore + control
+python3 -c "d=bytearray(open(<framework>,'rb').read()); assert d[0x64d020]==0xcc; d[0x64d020]=0x55; open(<framework>,'wb').write(bytes(d))"
+sha256sum <framework>   # == 45710f8bc23b4328baffbe7dcba91a0d0803ac68807fad9a436507d5e3df8ed1
+sh /tmp/stub76-run-ctrl2.sh           # -> /tmp/iokit-probe-76-ctrl2.log: 0 stub-entry, abort at libsystem_platform+0x8237
+```
