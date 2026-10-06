@@ -8028,3 +8028,138 @@ llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep -i 0xF1A3520
 llvm-objdump --macho --lazy-bind "$FRAMEWORK" | grep -c 0xF1A3520
 llvm-nm "$LSPK" | grep -i getentropy
 ```
+
+## Control #84 — _getentropy provider, interpose census, and xref of the unnamed crash frames
+
+**Date:** 2026-10-06
+**Branch:** task/a-getentropy-bind
+**Base:** pr-arm64 = 684b174790f7f5641edbc7dae6cb6fc90e33af86 (`git rev-parse` before branching)
+
+**Goal:** follow #83's lead — the framework binds `_getentropy` to image "LSysX";
+measure (1) the export type there, (2) whether any loaded image interposes
+`_getentropy`, (3) whether the unnamed crash-stack frames 0x1863280 / 0x16e3f60
+have a static road.
+
+### Measurement 1 — LSysX.dylib does NOT export _getentropy; it re-exports
+
+```
+$ LSYSX="$DARLING_OVERLAY/usr/lib/LSysX.dylib"
+$ file "$LSYSX"
+.../LSysX.dylib: Mach-O 64-bit x86_64 dynamically linked shared library, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL>
+$ llvm-nm "$LSYSX" | grep -i getentropy
+(nothing)
+$ llvm-nm "$LSYSX" | grep -E "^[0-9a-f]+"     # 12 defined symbols, all shims
+0000000000000520 T ___atomic_load
+0000000000000590 T ___atomic_store
+0000000000000610 T ____shim_noop
+0000000000000620 T _responsibility_spawnattrs_setdisclaim
+0000000000000630 T _responsibility_get_pid_responsible_for_pid
+0000000000000640 T _sandbox_extension_issue_file
+0000000000000650 T _sandbox_extension_issue_generic
+0000000000000660 T _sandbox_extension_consume
+0000000000000670 T _sandbox_extension_release
+0000000000000680 T _sandbox_check
+0000000000002010 D _dyld_stub_binder
+0000000000002018 d __dyld_private
+$ llvm-objdump --macho --dyld-info "$LSYSX" | grep -i getentropy
+(nothing)
+```
+
+`_getentropy` is **not code in LSysX** — it is not defined there at all. LSysX
+instead carries `LC_REEXPORT_DYLIB /usr/lib/libSystem.B.dylib`:
+
+```
+$ llvm-objdump --macho --all-headers "$LSYSX" | grep -A2 LC_REEXPORT_DYLIB
+          cmd LC_REEXPORT_DYLIB
+         name /usr/lib/libSystem.B.dylib
+```
+
+So the framework's bind `LSysX _getentropy` is a **re-export chain**:
+`LSysX -> libSystem.B.dylib -> libsystem_kernel.dylib`, where the symbol is real
+code:
+
+```
+$ llvm-objdump --macho --all-headers "$DARLING_OVERLAY/usr/lib/libSystem.B.dylib" | grep -A2 LC_REEXPORT_DYLIB | grep name | grep libsystem_kernel
+         name /usr/lib/system/libsystem_kernel.dylib
+$ llvm-nm "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep -i getentropy
+0000000000042e5c T _getentropy
+0000000000059b90 t _sys_getentropy
+```
+
+Since the symbol is a re-export (not LSysX code), no LSysX disassembly is needed;
+the code is libsystem_kernel's `_getentropy` @0x42e5c (T).
+
+### Measurement 2 — interpose census: 0 pairs over the checked images
+
+Every Mach-O image in the overlay (720 files, 247 of them `*.dylib`) plus the
+Chrome framework was scanned for an interpose section:
+
+```
+$ find $DARLING_OVERLAY -type f | while read f; do
+    case "$(file -b "$f")" in
+      *Mach-O*) llvm-objdump -h "$f" | grep -qi interpose && echo "$f";;
+    esac
+  done
+(nothing)
+$ llvm-objdump -h "$FRAMEWORK" | grep -i interpose
+(nothing)
+```
+
+Result: **0 images carry an `__interpose` section, hence 0 replacement/replacee
+pairs** — in particular **0 pairs with replacee = `_getentropy`** (and none with
+the provider `libsystem_kernel`). This is a measured absence, not an unchecked
+gap: the mechanism the head suspected (`__DATA,__interpose`) is not used by any
+image in the overlay, and the crash-run log (`/tmp/iokit-probe-77-1.log`) carries
+no `dyld: loading` image list and no `interpose` line either.
+
+### Measurement 3 — xref of the unnamed crash frames
+
+Same method as #83 used for 0x8eee10 (callq / jmp / leaq / 8-byte and 4-byte raw
+pointers / rebase targets):
+
+```
+$ grep -nE "(callq|jmp|leaq)\s+0x1863280" /tmp/cft-full-disasm.txt
+(nothing)
+$ grep -nE "(callq|jmp|leaq)\s+0x16e3f60" /tmp/cft-full-disasm.txt
+  1863281: callq 0x16e3f60   (inside 0x1863280)
+  186331d: callq 0x16e3f60   (inside 0x1863280)
+  41094e5: callq 0x16e3f60
+  95d0717: callq 0x16e3f60
+$ python3 - "$FRAMEWORK"   # 8B and 4B LE scan
+8B 0x1863280: NONE   4B 0x1863280: NONE
+8B 0x16e3f60: NONE   4B 0x16e3f60: NONE
+$ grep -icE "0x1863280" /tmp/cft-dyldinfo.txt ; grep -icE "0x16E3F60" /tmp/cft-dyldinfo.txt
+0
+0
+```
+
+- **0x1863280** (the frame that calls 0x16e3f60 -> F0): no callq, no jmp, no leaq,
+  no raw pointer, no rebase target — it is **unreachable**, a measured absence of
+  a static road into that crash-stack frame.
+- **0x16e3f60** (which calls F0): reachable, 4 `callq` sites — two inside the
+  unreachable 0x1863280, two reachable (0x41094e5, 0x95d0717); no data/rebase
+  reference.
+
+### Verdict (control #84, one line)
+
+(1) `_getentropy` is **not** code in LSysX — LSysX re-exports
+libSystem.B -> libsystem_kernel, where it is `T _getentropy` @0x42e5c; (2) the
+interpose census is **0 pairs over 720 overlay images + the framework** (no image
+has an `__interpose` section, so no replacee = `_getentropy`) — measured absence
+of the interposition mechanism; (3) the crash-stack frame **0x1863280 has no
+static caller** (callq/jmp/leaq/8B/4B/rebase all empty), while 0x16e3f60 is
+reachable (4 callq). The re-entry into A remains without an in-image or
+interpose mechanism on this base.
+
+### Repro
+
+```sh
+LSYSX="$DARLING_OVERLAY/usr/lib/LSysX.dylib"
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-nm "$LSYSX" | grep -i getentropy
+llvm-objdump --macho --all-headers "$LSYSX" | grep -A2 LC_REEXPORT_DYLIB
+llvm-nm "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep -i getentropy
+find $DARLING_OVERLAY -type f | while read f; do case "$(file -b "$f")" in *Mach-O*) llvm-objdump -h "$f" | grep -qi interpose && echo "$f";; esac; done
+grep -nE "(callq|jmp|leaq)\s+0x1863280" /tmp/cft-full-disasm.txt
+grep -nE "(callq|jmp|leaq)\s+0x16e3f60" /tmp/cft-full-disasm.txt
+```
