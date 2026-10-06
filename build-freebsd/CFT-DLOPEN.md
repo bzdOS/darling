@@ -7602,3 +7602,49 @@ for r in "0x1862820 0x1862e80" "0x1863180 0x1863280" "0x1863280 0x1863470" "0x16
   set -- $r; llvm-objdump -d --start-address=$1 --stop-address=$2 "$FRAMEWORK" | grep -cE '\*'
 done
 ```
+
+### Control #80 — amendment
+
+**Date:** 2026-10-06
+**Branch:** task/name-lock-import
+**Base:** pr-arm64 = d88e7b76a25402621a5c77984901bf945bcf0cc8 (`git rev-parse` before rebasing)
+**Amendment to `## Control #80`** (not a new control). The import name of
+0xdbbf2f6 and the abort-symbol nm proof are already in `## Control #80`; this
+adds only the three facts it does not carry.
+
+1. Stub-index arithmetic: the stub at 0xdbbf2f6 sits in `__TEXT,__stubs`
+   (base 0xdbbef60, 6-byte entries), so its index is
+   `(0xdbbf2f6 - 0xdbbef60) / 6 = 0x396 / 6 = 0x99 = 153`, and the indirect
+   symbol table resolves that stub to indirect index **1309** (`_getentropy`):
+
+   ```
+   $ llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep dbbf2f6
+   0x000000000dbbf2f6  1309 _getentropy
+   ```
+
+2. Third independent read of the same name: the undefined symbol is present in
+   the symbol table as `U _getentropy`:
+
+   ```
+   $ llvm-nm "$FRAMEWORK" | grep getentropy
+                    U _getentropy
+   ```
+
+3. Call sites of 0xdbbf2f6 on the A path: accessor A (0x8eee10) calls it twice
+   in its init path, at 0x8eeea3 and 0x8eeec6:
+
+   ```
+   $ llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeee0 "$FRAMEWORK"
+     8eeea3: e8 4e 04 2d 0d   callq 0xdbbf2f6   ## _getentropy (fill #1)
+     8eeec6: e8 2b 04 2d 0d   callq 0xdbbf2f6   ## _getentropy (fill #2)
+   ```
+
+### Repro (amendment)
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+python3 -c 'print(hex((0xdbbf2f6-0xdbbef60)//6))'
+llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep dbbf2f6
+llvm-nm "$FRAMEWORK" | grep getentropy
+llvm-objdump -d --start-address=0x8eee10 --stop-address=0x8eeee0 "$FRAMEWORK"
+```
