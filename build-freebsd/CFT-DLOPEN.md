@@ -7455,3 +7455,150 @@ grep -nE "callq\s+0x64d020" /tmp/cft-full-disasm.txt   # 3 callers: 0x64cfa5, 0x
 grep -nE "callq\s+0x8eee10" /tmp/cft-full-disasm.txt   # A: only F0 0x8eedc6/0x8eedd1
 grep -nE "callq\s+0x8eedc0" /tmp/cft-full-disasm.txt   # F0: only 0x16e3f60
 ```
+
+## Control #80 — indirect transition into the recursion chain (B's entry) and nm-proof of the abort function
+
+**Date:** 2026-10-06
+**Branch:** task/b-indirect-xref
+**Base:** pr-arm64 = 21b8b99f9 (`git rev-parse` before branching)
+**Closes the #79 acceptance defect:** the name `__os_unfair_lock_recursive_abort`
+for libsystem_platform.dylib+0x8237 was quoted in #79 without a measurement.
+
+### Step 1 — nm proof: +0x8237 is inside `__os_unfair_lock_recursive_abort`
+
+`llvm-nm -n` on the overlay library, window around 0x8237:
+
+```
+$ llvm-nm -n "$LSP" | awk '$1 ~ /^[0-9a-f]+$/ && $1 >= "00000000000081f0" && $1 <= "0000000000008260"'
+0000000000008220 T __os_lock_corruption_abort
+0000000000008230 T __os_unfair_lock_recursive_abort   <- covers 0x8237
+0000000000008240 T __os_unfair_lock_unowned_abort     <- next symbol above
+0000000000008250 T __os_unfair_lock_corruption_abort
+0000000000008260 T __os_once_gate_recursive_abort
+```
+
+The symbol line **above** +0x8237 is `__os_unfair_lock_recursive_abort` @0x8230; the
+line **below** is `__os_unfair_lock_unowned_abort` @0x8240. The instruction at
++0x8237 is the trap:
+
+```
+$ llvm-objdump -d --start-address=0x8230 --stop-address=0x8240 "$LSP"
+    8230: 55                pushq %rbp
+    8231: 48 89 e5          movq  %rsp, %rbp
+    8234: 89 7d fc          movl  %edi, -0x4(%rbp)
+    8237: 0f 0b             ud2
+```
+
+So the "FATAL signal 4 at libsystem_platform.dylib+0x8237" is the `ud2` of
+**`__os_unfair_lock_recursive_abort`** — measured, not quoted.
+
+### Step 2 — the stub's import (also unnamed in #79): 0xdbbf2f6 is `_getentropy`
+
+```
+$ llvm-objdump -d --start-address=0xdbbf2f6 --stop-address=0xdbbf2fc "$FRAMEWORK"
+  dbbf2f6: ff 25 24 42 5e 01    jmpq *0x15e4224(%rip)   ## 0xf1a3520
+$ llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep 0xF1A3520
+__DATA_CONST __got 0xF1A3520 ... LSysX _getentropy
+$ llvm-objdump --macho --indirect-symbols "$FRAMEWORK" | grep dbbf2f6
+0x000000000dbbf2f6  1309 _getentropy
+```
+
+rel32 recompute: 0xdbbf2f6 + 6 + 0x15e4224 = 0xf1a3520; slot bound to
+`_getentropy`. So the "token, size 8" is a `_getentropy` fill (128-bit random
+id), not a lock — the import-name gap of #79 is closed too.
+
+### Step 3 — verbatim listings with bytes
+
+Locked region of B between the stub call (0x95d44f5) and the unlock branch
+(0x95d4510) — the 22 hidden bytes 0x95d44fa..0x95d4510:
+
+```
+$ llvm-objdump -d --start-address=0x95d44fa --stop-address=0x95d4510 "$FRAMEWORK"
+ 95d44fa: c6 05 a3 22 a9 06 01   movb $0x1, 0x6a922a3(%rip)  ## 0x100667a4
+ 95d4501: 48 8d 3d a0 22 a9 06   leaq 0x6a922a0(%rip), %rdi  ## 0x100667a8
+ 95d4508: 48 89 de               movq %rbx, %rsi
+ 95d450b: e8 90 ff ff ff         callq 0x95d44a0
+```
+
+rel32 recompute: 0x95d44fa+7+0x6a922a3 = 0x100667a4 (flag byte); 0x95d4501+7+
+0x6a922a0 = 0x100667a8 (token); 0x95d450b+5+0xffffff90 = 0x95d44a0 (setter).
+Bytes: 7+7+3+5 = 22.
+
+Tail setter and B thunk 0x95d44a0..0x95d44c0:
+
+```
+$ llvm-objdump -d --start-address=0x95d44a0 --stop-address=0x95d44c0 "$FRAMEWORK"
+ 95d44a0: 55               pushq %rbp
+ 95d44a1: 48 89 e5         movq  %rsp, %rbp
+ 95d44a4: 48 89 37         movq  %rsi, (%rdi)
+ 95d44a7: 48 89 77 08      movq  %rsi, 0x8(%rdi)
+ 95d44ab: 5d               popq  %rbp
+ 95d44ac: c3               retq
+ 95d44ad: 0f 1f 00         nopl  (%rax)
+ 95d44b0: 55               pushq %rbp
+ 95d44b1: 48 89 e5         movq  %rsp, %rbp
+ 95d44b4: 5d               popq  %rbp
+ 95d44b5: e9 06 00 00 00   jmp   0x95d44c0
+ 95d44ba: 66 0f 1f 44 00 00 nopw  (%rax,%rax)
+```
+
+rel32 recompute: 0x95d44b5+5+6 = 0x95d44c0 (the thunk tail-jumps into B).
+
+### Step 4 — indirect census of the active chain functions: explicit ZERO
+
+For each function of the chain 0x1862820 -> 0x1863180 -> 0x1863280 -> 0x16e3f60
+-> 0x8eedc0, count `callq *` / `jmp *` (any `*` operand):
+
+```
+$ for r in "0x1862820 0x1862e80" "0x1863180 0x1863280" "0x1863280 0x1863470" \
+           "0x16e3f60 0x16e4240" "0x8eedc0 0x8eee10"; do
+    set -- $r
+    printf "%s..%s : " "$1" "$2"
+    llvm-objdump -d --start-address=$1 --stop-address=$2 "$FRAMEWORK" | grep -cE '\*'
+  done
+0x1862820..0x1862e80 : 0
+0x1863180..0x1863280 : 0
+0x1863280..0x1863470 : 0
+0x16e3f60..0x16e4240 : 0
+0x8eedc0..0x8eee10  : 0
+```
+
+| function | indirect call/jump | pointer source | writer |
+|---|---|---|---|
+| 0x1862820 | 0 | — | — |
+| 0x1863180 | 0 | — | — |
+| 0x1863280 | 0 | — | — |
+| 0x16e3f60 | 0 | — | — |
+| 0x8eedc0  | 0 | — | — |
+
+No indirect transition in any of the five chain functions. B's thunk 0x95d44b0
+also has **no direct `callq` caller** (`grep -nE 'callq\s+0x95d44b0'` over the
+full `__text` xref is empty; the only reference to 0x95d44c0 is the thunk's own
+`jmp` at 0x95d44b5). So B's entry is **not** a call from the chain — it is the
+dyld callback mechanism (an initializer/registration invokes B through a data
+pointer, which is not a direct call in `__text`). That moves the fix to the
+loader side.
+
+### Verdict (control #80, one line)
+
++0x8237 is `ud2` inside `__os_unfair_lock_recursive_abort` (nm-measured); the
+stub's import 0xdbbf2f6 is `_getentropy` (rel32 -> slot 0xf1a3520); the five
+active-chain functions 0x1862820/0x1863180/0x1863280/0x16e3f60/0x8eedc0 contain
+**zero** indirect transitions, so B's entry (0x95d44c0 via thunk 0x95d44b0) is
+not a call from the chain — it is dyld's callback/registration path.
+
+### Repro
+
+```sh
+FRAMEWORK="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+LSP="$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib"
+llvm-nm -n "$LSP" | awk '$1 ~ /^[0-9a-f]+$/ && $1 >= "00000000000081f0" && $1 <= "0000000000008260"'
+llvm-objdump -d --start-address=0x8230 --stop-address=0x8240 "$LSP"
+llvm-objdump -d --start-address=0xdbbf2f6 --stop-address=0xdbbf2fc "$FRAMEWORK"
+llvm-objdump --macho --dyld-info "$FRAMEWORK" | grep 0xF1A3520
+llvm-objdump -d --start-address=0x95d44fa --stop-address=0x95d4510 "$FRAMEWORK"
+llvm-objdump -d --start-address=0x95d44a0 --stop-address=0x95d44c0 "$FRAMEWORK"
+for r in "0x1862820 0x1862e80" "0x1863180 0x1863280" "0x1863280 0x1863470" "0x16e3f60 0x16e4240" "0x8eedc0 0x8eee10"; do
+  set -- $r; llvm-objdump -d --start-address=$1 --stop-address=$2 "$FRAMEWORK" | grep -cE '\*'
+done
+```
