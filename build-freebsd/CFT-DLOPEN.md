@@ -11330,3 +11330,60 @@ sh build-freebsd/narrow-build-kernel.sh          # 0 compile errors
 ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
   | grep -v -- '-c ' | tail -1 > /tmp/link.sh; sh /tmp/link.sh   # missing .o
 ```
+
+## Control #120-2 — per-arch objects build (0 errors); the link stops on missing firstpass dylibs
+
+**Date:** 2026-10-07
+**Branch:** task/link-decl-conflicts (continuation of 270cf247e)
+**Base:** pr-arm64 = 8fabbbebf8c9020fe28d591a90f5fdc5d42d0cf4
+
+**Goal:** get past the multi-arch blocker — explicit per-arch outputs, lipo on
+finished artifacts.
+
+**Step 1 — proof (first 5 minutes).** One source, two explicit commands:
+```
+$ clang -arch i386 -c bind.c ... -o /tmp/t.i386.o     # single -arch
+$ file /tmp/t.i386.o
+/tmp/t.i386.o: Mach-O i386 object, flags:<|SUBSECTIONS_VIA_SYMBOLS>
+```
+With **one** `-arch` the object lands on disk at the `-o` path. With **two**
+(`-arch i386 -arch x86_64`) clang compiles each slice to a temp dir and calls
+`lipo`; those temp objects never appear (the temp dirs are empty), which is why
+the fat `.o` was never produced. Confirms the route: explicit per-arch outputs.
+
+**Step 2 — narrow-build-kernel.sh now builds per slice.**
+- for each of the 908 object commands: strip every `-arch` and `-o`, then emit
+  `… -arch i386 -o <obj>.i386.o -c <src>` and the x86_64 twin;
+- `lipo -create` the two thin objects into the fat `<obj>.o` the link expects.
+
+Result: **0 errors**, all object commands' fat `.o` built (2673 `.o`/per-arch
+files under the kernel tree). The `-I build-host-tools` and cctools `misc`
+(lipo) are on the path.
+
+**Step 3 — the link stops on missing firstpass dylibs.** The thin `ld` for each
+slice (cctools ld64 from build-host-tools) fails before linking:
+```
+cc: error: no such file or directory: 'src/external/libc/libsystem_c_firstpass.dylib'
+cc: error: no such file or directory: 'src/external/compiler-rt/lib/builtins/libcompiler_rt_firstpass.dylib'
+cc: error: no such file or directory: 'src/external/dyld/libsystem_dyld_firstpass.dylib'
+cc: error: no such file or directory: 'src/libsimple-darling/liblibsimple_darling.a'
+```
+These are the `-dylib_file` dependencies of the link; they are not built in this
+tree. So no dylib, and the #115 nm gate is still pending. This is the
+firstpass/dependency class, not the object class.
+
+### Verdict (one line)
+
+The multi-arch blocker is solved — per-arch objects are written explicitly and
+lipo'd (0 compile errors, all fat objects built) — but the dylib link stops on
+four unbuilt firstpass dependencies (`libsystem_c`/`libcompiler_rt`/
+`libsystem_dyld` firstpass, `libsimple_darling.a`), so no dylib and no nm yet.
+
+### Repro
+
+```sh
+# single-arch proof
+clang -arch i386 -c "$SRC/src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/bind.c" \
+  -o /tmp/t.i386.o ... ; file /tmp/t.i386.o
+sh build-freebsd/narrow-build-kernel.sh     # 0 compile errors; link stops on firstpass
+```
