@@ -10899,3 +10899,69 @@ sh "$DARLING_SRC_DIR/build-freebsd/fix-unlock-export.sh"
 # after a full tree rebuild:
 sh /tmp/stub112-run.sh <diag-dir>/cft113-unlock-bind.log
 ```
+
+## Control #114 — libsystem_kernel rebuild blocked: Libinfo submodule absent, full build fails on libc
+
+**Date:** 2026-10-07
+**Branch:** task/unlock-rebuild-run
+**Base:** pr-arm64 = b6132911829b01d5473ffcd4e63e3d207fd22585
+
+**Goal:** close the #113 gate — rebuild libsystem_kernel with the hidden export
+and run the acceptance (3 criteria).
+
+**Step 1 — the Libinfo submodule (branch (a) disproved, (b) taken).**
+```
+$ grep -A2 Libinfo .gitmodules
+[submodule "src/external/Libinfo"]
+        path = src/external/Libinfo
+        url = ../darling-Libinfo.git
+
+$ git submodule update --init src/external/Libinfo
+fatal: Unable to find current revision in submodule path 'src/external/Libinfo'
+
+$ git ls-remote git@github.com:bzdOS/darling-Libinfo.git
+ERROR: Repository not found.
+```
+The submodule's git dir (.git/modules/src/external/Libinfo) is empty (no commits,
+no remote), the working tree holds only its `.git` file, and the relative URL
+resolves to `git@github.com:bzdOS/darling-Libinfo.git` — which does not exist for
+this key. **Path git tried to open:** `git@github.com:bzdOS/darling-Libinfo.git`
+(relative `../darling-Libinfo.git` from origin). **`ls $DARLING_SRC_DIR/..` top level:**
+AGENTS.md, B, CMakeCache.txt, CMakeFiles, Developer, SALVAGE-MANIFEST.md, backup,
+build, build-host-tools, diag, dyld-salvage, overlay, pristine-overlay-backup,
+salvage-0826, salvage-git, src, stage, upstream-darling (empty), … — no
+`darling-Libinfo`. A copy with subdirectories but **no CMakeLists.txt** sits at
+`$DARLING_SRC_DIR/external/Libinfo` (untracked).
+
+**Step 2 — regeneration passes with a stub, the build does not.**
+`build-freebsd/prepare-libinfo-stub.sh` writes a minimal `system_info` target;
+CMake then configures and generates. But `ninja libsystem_kernel.dylib` pulls in
+1924 steps and fails on libc before reaching libsystem_kernel:
+```
+[5/1924] Building C object .../libc-gen_legacy.dir/FreeBSD/clock.c.o
+$DARLING_SRC_DIR/Developer/.../MacOSX.sdk/usr/include/sys/_types.h:56:9:
+  error: unknown type name '__int64_t'
+... 20 errors generated.
+```
+So `llvm-nm <built> | grep unfair` was never reached — there is no rebuilt dylib
+to compare before/after, and the acceptance run was not executed.
+
+**Step 3 — acceptance:** not run (no rebuilt libsystem_kernel).
+
+### Verdict (one line)
+
+The rebuild is blocked twice over: the Libinfo submodule is absent and its remote
+is gone (a stub gets CMake to regenerate, but the full build then dies on libc's
+SDK headers), so the #113 fix stays unverified — word 0x100667a0 remains the
+frontier; the empty unlock is still the overlay's 2026-09-30
+libsystem_kernel.dylib.
+
+### Repro
+
+```sh
+grep -A2 Libinfo .gitmodules
+git submodule update --init src/external/Libinfo          # Unable to find current revision
+git ls-remote git@github.com:bzdOS/darling-Libinfo.git    # Repository not found
+sh build-freebsd/prepare-libinfo-stub.sh
+ninja src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib
+```
