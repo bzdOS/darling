@@ -11387,3 +11387,50 @@ clang -arch i386 -c "$SRC/src/external/xnu/darling/src/libsystem_kernel/emulatio
   -o /tmp/t.i386.o ... ; file /tmp/t.i386.o
 sh build-freebsd/narrow-build-kernel.sh     # 0 compile errors; link stops on firstpass
 ```
+
+## Control #121 (checkpoint) — narrow-build-target.sh: libsimple_darling.a built; dyld firstpass stops on VersionMap.h
+
+**Date:** 2026-10-07
+**Branch:** task/link-decl-conflicts (base = c34a73ebf)
+**Base:** pr-arm64 = c34a73ebf80e3f587cad7dec66d89ab79288be5a
+
+**Goal:** build the four firstpass link dependencies by the narrow route (per
+slice, no full tree build).
+
+**Generalised script** `build-freebsd/narrow-build-target.sh <ninja-target>`:
+same method as #120-2 — for each object command strip `-arch`/`-o`, emit
+`-arch i386/x86_64 -o <obj>.slice.o`, lipo into the fat `.o`; then the target's
+link/archive command (fat link → two thin links + lipo).
+
+**Two broken cctools wrappers found.** `misc/lipo` and `ar/x86_64-apple-darwin20-ar`
+(and `…-ranlib`) are POSIX **shell scripts** that return 0 but write no output.
+The working tools are `llvm-lipo` and `llvm-ar`; the script uses them. (This also
+means #120-2's kernel fat `.o` were never really produced — the cctools lipo was
+a no-op there too.)
+
+**Progress, one at a time:**
+```
+src/libsimple-darling/liblibsimple_darling.a   BUILT  (Mach-O/ar archive)
+src/external/dyld/libsystem_dyld_firstpass.dylib  STOP:
+  SRC/src/external/dyld/dyld3/APIs.cpp:57:10: fatal error: 'dyld/VersionMap.h' file not found
+  (VersionMap.h exists at SDK/usr/include/dyld/VersionMap.h; the dyld compile's
+   include path does not reach it)
+src/external/compiler-rt/lib/builtins/libcompiler_rt_firstpass.dylib  not started
+src/external/libc/libsystem_c_firstpass.dylib                        not started
+```
+Per the dispatch's rule, the new compile class (dyld include path) is recorded
+here for one full-inventory pass next, not fixed header by header.
+
+### Verdict (one line)
+
+The generalised narrow builder works and produced libsimple_darling.a (1 of 4),
+and it exposed two no-op cctools wrappers (lipo/ar → llvm-lipo/llvm-ar); the dyld
+firstpass stops on `dyld/VersionMap.h` not found (APIs.cpp:57) — a new compile
+class to inventory in one pass, compiler_rt and libsystem_c not started.
+
+### Repro
+
+```sh
+sh build-freebsd/narrow-build-target.sh src/libsimple-darling/liblibsimple_darling.a
+sh build-freebsd/narrow-build-target.sh src/external/dyld/libsystem_dyld_firstpass.dylib
+```
