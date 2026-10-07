@@ -10570,3 +10570,92 @@ grep -A60 "^ *161ce0:" /tmp/chrome-disasm.txt | head -65
 sh /tmp/stub109c-run.sh <diag-dir>/cft109-trylock-withoptions.log
 grep -E "0x2821.*rdi=0x10311609a7a0" <diag-dir>/cft109-trylock-withoptions.log
 ```
+
+## Control #110 — the second acquire is a re-entrant call, and there was no unlock
+
+**Date:** 2026-10-07
+**Branch:** task/abort-take-stack
+**Base:** pr-arm64 = 7fc522bdc2c23a085ed8b6d2e28b64faa60b566d
+
+**Goal:** in the #109 run hit#4 is the second trylock with the same return
+0x8eee22 — is that a cycle of 0x8eee10 through the back-jump 0x8eee2a, or a
+re-entrant call into 0x8eee10 from the callee? Dump the return chain at hit#4 and
+hit#90 (raw [rsp] + resolved frames, as in #77), and watch the word between hit#3
+and the abort for the 0x100000307 → 0x0 transition (was there an unlock at all).
+
+**Method:** mldr's resumable-trap report now also prints the return chain (raw
+[sp..sp+40] plus every slot resolving into an image). One run with resumable
+traps at libsystem_platform+0x2821 (`_os_unfair_lock_trylock`),
++0x2751 (`_os_unfair_lock_lock_with_options`) and +0x28c1
+(`_os_unfair_lock_unlock`), watch Google Chrome for Testing Framework+0x100667a0;
+log cft110-take-stack.log. (Not repeated: the file int3 patch #76 and lldb #75.)
+
+### Return chain at hit#4 — re-entrant, not a back-jump cycle
+
+```
+hit #4 libsystem_platform.dylib+0x2821 rdi=0x27d806e9a7a0 tid=0x2acf6 tsd=0x307 from Google Chrome for Testing Framework+0x8eee22 watch ... = 0x0000000100000307 (ok=1)
+  [rsp] 7fffffdfd860 27d7f7722e22 c9f3f718 c9f3f71800000000 7fffffdfd880 27d7f7722dd6
+  [rsp+  8] Google Chrome for Testing Framework+0x8eee22
+  [rsp+ 40] Google Chrome for Testing Framework+0x8eedd6
+  [rsp+ 72] Google Chrome for Testing Framework+0x16e3f95
+  [rsp+184] Google Chrome for Testing Framework+0x1863286
+```
+
+The chain is 0x8eee10 (return 0x8eee22) ← 0x8eedc0 (return **0x8eedd6**) ←
+0x16e3f95 ← 0x1863286: a **re-entrant call into 0x8eee10 from the callee
+0x8eedc0**, not a cycle inside 0x8eee10 — the back-jump 0x8eee2a never leaves
+0x8eee10, so a back-jump cycle would not put 0x8eedd6 in the chain.
+
+The first trylock, hit#3, differs in exactly the callee's return slot — 0x8eedcb
+(the first `callq 0x8eee10` at 0x8eedc6) vs 0x8eedd6 (the second at 0x8eedd1):
+
+```
+hit #3 libsystem_platform.dylib+0x2821 rdi=0x27d806e9a7a0 ... from Google Chrome for Testing Framework+0x8eee22 watch ... = 0x0000000000000000 (ok=1)
+  [rsp] 7fffffdfd860 27d7f7722e22 0 fffffff800000000 7fffffdfd80 27d7f7722dcb
+  [rsp+  8] Google Chrome for Testing Framework+0x8eee22
+  [rsp+ 40] Google Chrome for Testing Framework+0x8eedcb
+```
+
+### Return chain at hit#90 — the same 0x8eee10 frame
+
+```
+hit #90 libsystem_platform.dylib+0x2751 rdi=0x27d806e9a7a0 ... from Google Chrome for Testing Framework+0x161e42 watch ... = 0x0000000100000307 (ok=1)
+  [rsp] 7fffffdfd840 27d7f6f95e42 c9f3f71800000000 800000000 0 0
+  [rsp+  8] Google Chrome for Testing Framework+0x161e42
+  [rsp+ 56] Google Chrome for Testing Framework+0x8eeeeb
+  [rsp+ 88] Google Chrome for Testing Framework+0x8eedd6
+  [rsp+120] Google Chrome for Testing Framework+0x16e3f95
+```
+
+hit#90 is the same second entry: 0x161ce0 (return 0x161e42) ← 0x8eee10 (return
+**0x8eeeeb**) ← 0x8eedc0 (return 0x8eedd6). The abort's own walk agrees:
+`stack[1] libsystem_platform+0x257a`, `stack[35] +0x161e42`, `stack[41] +0x8eeeeb`,
+`stack[45] +0x8eedd6`, `stack[49] +0x16e3f95`, `stack[63] +0x1863286`.
+
+### Was there an unlock between hit#3 and hit#90 — NO
+
+The word is watched at every trapped call. It reads 0x0 at hit#3 and
+0x0000000100000307 at hit#4, hit#5 … and hit#90 — the 0x100000307 → 0x0
+transition **never happens**. And of the 92 trapped calls to
+`_os_unfair_lock_unlock` (+0x28c1) in the run, **0** target this word
+(`grep -c "0x28c1.*rdi=0x27d806e9a7a0"` → 0). So no unlock of 0x100667a0 occurs
+between the first trylock and the abort.
+
+### Verdict (one line)
+
+hit#4 is a **re-entrant call into 0x8eee10 from its callee 0x8eedc0** (the return
+0x8eedd6 sits in the chain; a back-jump cycle would not), the same entry that
+takes lock_with_options at hit#90 (return 0x8eeeeb → 0x8eedd6); and **there was
+no unlock** between hit#3 and the abort — the word goes 0x0 → 0x100000307 at the
+first trylock and is never cleared, so the second trylock fails and the
+re-acquire recurses into the abort.
+
+### Repro
+
+```sh
+# mldr with the resumable return-chain print (build-freebsd/build-mldr-only.sh)
+sh /tmp/stub110-run.sh <diag-dir>/cft110-take-stack.log
+grep -A5 "hit #4 libsystem_platform.dylib+0x2821 rdi=0x27d806e9a7a0" <diag-dir>/cft110-take-stack.log
+grep -A5 "hit #90 libsystem_platform.dylib+0x2751 rdi=0x27d806e9a7a0" <diag-dir>/cft110-take-stack.log
+grep -c "0x28c1.*rdi=0x27d806e9a7a0" <diag-dir>/cft110-take-stack.log   # 0
+```
