@@ -11483,3 +11483,49 @@ readlink -f "$SRC/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/
 sh build-freebsd/narrow-build-target.sh src/external/dyld/libsystem_dyld_firstpass.dylib
 # objects done; link: Illegal instruction (core dumped)
 ```
+
+## Control #123 (checkpoint) — the linker class: cctools ld64 traps (ud2), ld64.lld segfaults
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 3ecc5aa7fce94c263ef33a4b400eb9fac2acfe94
+
+**Goal:** diagnose the linker crash, then link the firstpass slices via ld64.lld.
+
+**1) SIGILL diagnosis (one line).** The core
+(`$DARLING_BUILD_DIR/x86_64-apple-darwin.core`) under lldb:
+```
+rip = 0x354014  x86_64-apple-darwin20-ld`mach_o::relocatable::Atom<x86_64>::fixupsEnd() const + 52
+0x354012 <+50>: popq %rbp
+0x354013 <+51>: retq
+0x354014 <+52>: ud2                 <-- trap
+```
+So it is not a bad instruction: cctools ld64 hits its own `ud2` — an
+`__builtin_trap()`/unreachable at the tail of `fixupsEnd()` (after a
+`cmpq`/`jne`), i.e. ld64 itself rejects a fixup on these objects. A cctools
+defect on this input, not a flag error.
+
+**2) ld64.lld route (attempted).** Linking the same thin i386 with
+`-fuse-ld=/usr/local/bin/ld64.lld`:
+```
+-Wl,-platform_version,macosx,10.12,11.0  -> ld64.lld: error: malformed platform: macosx
+-Wl,-platform_version,macOS,10.12,11.0   -> Segmentation fault (core dumped)
+                                            in /usr/local/llvm19/lib/libLLVM.so.19.1
+```
+`ld64.lld` wants a different platform spelling and then segfaults in LLVM on
+this input. No dyld dylib produced; slices 3-4 not started.
+
+### Verdict (one line)
+
+The linker class is two dead ends on this input: cctools ld64 traps in
+`Atom<x86_64>::fixupsEnd()` (ud2), and ld64.lld either rejects the platform
+spelling or segfaults in libLLVM — so the firstpass link is still blocked, dyld
+not built, slices 3-4 not reached.
+
+### Repro
+
+```sh
+lldb "$SRC/build-host-tools/ld64/x86_64-apple-darwin20-ld" -c "$DARLING_BUILD_DIR/x86_64-apple-darwin.core" \
+  -o "disassemble -s 0x354006 -e 0x35401a" -o quit -b
+sh build-freebsd/narrow-build-target.sh src/external/dyld/libsystem_dyld_firstpass.dylib
+```
