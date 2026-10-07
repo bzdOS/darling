@@ -11105,3 +11105,55 @@ find $DARLING_STAGE -path '*i386/_types.h'
 sh build-freebsd/restore-sdk-types.sh
 ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib | grep 'file_handle.c.o' | tail -1 > /tmp/c.sh; sh /tmp/c.sh
 ```
+
+## Control #117 — the shim now carries the full type set; the only remainder is the #113 visibility mismatch
+
+**Date:** 2026-10-07
+**Branch:** task/shim-sdk-types
+**Base:** pr-arm64 = ab4054616ab2bd82ee95519a39379448cf209f61
+
+**Goal:** finish the type shim so file_handle.c.o compiles (exit 0). The shim
+deliberately blocks Darwin's i386/_types.h, so it must supply the whole type set
+the SDK headers take from it — not one header per control.
+
+**Which copy goes into the build.** The command force-includes
+`.../build-host-tools/freebsd_mig_compat.h`; `build-host-tools` is a symlink to
+`$DARLING_SRC_DIR/build-host-tools`, and `build-host-tools/freebsd_mig_compat.h`
+is tracked in this tree (no stage copy). So the in-tree file is the one to edit,
+and it was committed here.
+
+**What was added** (all in that shim):
+- base integer typedefs `__int8_t … __uint64_t` (blocked i386/_types.h would have
+  provided them);
+- `__darwin_ptrdiff_t`, `__darwin_wchar_t`, `__darwin_wint_t`;
+- `user_addr_t` removed: the shim's `unsigned long` collided with the SDK's
+  i386/types.h:97 `typedef u_int64_t user_addr_t` (u_int64_t = unsigned long long
+  on the Darwin ABI) — left in one place, the SDK.
+
+**Errors before/after** (object command for file_handle.c.o):
+```
+before: 20 errors, all `unknown type name '__int64_t'/'__int32_t'/…` in sys/_types.h
+after:   2 errors, both `visibility does not match previous declaration`
+         file_handle.c:36:27 and file_handle.c:37:27
+```
+Every type-family error is gone; the remainder is a different class — the #113
+`visibility("hidden")` on the two weak `os_unfair_lock_unlock/lock` definitions
+meeting an earlier default-visibility declaration. Per this dispatch the
+visibility is **not** fixed, only recorded. exit is still 1, the object is not
+produced, so the #113 acceptance remains pending.
+
+### Verdict (one line)
+
+The shim now provides the full blocked-header type set (base `__intN_t` +
+`__darwin_ptrdiff_t/_wchar_t/_wint_t`, `user_addr_t` left to the SDK), taking the
+object from 20 type errors to **0 type errors and 2 visibility errors**
+(file_handle.c:36/37, the #113 edit) — the stop on a new, non-type class.
+
+### Repro
+
+```sh
+find "$DARLING_SRC_DIR" -name freebsd_mig_compat.h          # one, in-tree
+ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
+  | grep 'file_handle.c.o' | grep -- -c | tail -1 > /tmp/c.sh
+sh /tmp/c.sh            # 2 visibility errors at file_handle.c:36/37, exit 1
+```
