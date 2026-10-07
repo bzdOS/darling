@@ -11914,3 +11914,51 @@ printf 'extern int puts(const char*); int f(void){return puts("x");}' | \
 /usr/local/llvm19/bin/ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib \
   -flat_namespace -undefined suppress -o /tmp/t.dylib /tmp/t.o   # exit 0
 ```
+
+## Control #131 — all inputs are Mach-O; explicit -flavor ld64 changes nothing
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = a3e8f907bd50a70ef537fb9e9d0876fc14252734
+
+**Step 1 — inventory of the inputs.** `build.ninja:28011`'s command takes the
+dyld firstpass objects plus `-dylib_file` entries. Every input is Mach-O:
+```
+$ file -b  (each of the 9 firstpass -dylib_file targets, in dyld-only)
+  Mach-O 64-bit x86_64 dynamically linked shared library   (x9)
+$ file  system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o
+  Mach-O 64-bit x86_64 object
+$ llvm-lipo -info …dyld_stub_binder.S.o.x86_64.o
+  Non-fat file: … architecture: x86_64
+$ grep -c $'\x7f\x45\x4c\x46' …dyld_stub_binder.S.o.x86_64.o   -> 0
+```
+No ELF magic (`7f 45 4c 46`) in the binder object, nor any input: they are all
+Mach-O. There is no ELF input to feed lld's ELF path.
+
+**Step 2 — same driver, explicit flavor.** 
+```
+$ readlink -f /usr/local/llvm19/bin/ld64.lld   -> /usr/local/llvm19/bin/lld
+$ cmp  /usr/local/llvm19/bin/ld64.lld /usr/local/llvm19/bin/lld   -> identical
+$ lld -flavor ld64 -arch x86_64 -platform_version macos 11.0 11.0 -dylib \
+      -flat_namespace -undefined suppress -o /tmp/f131.dylib <binder.o>  -> SIGSEGV (139)
+$ ld64.lld        (same args)                                          -> SIGSEGV (139)
+```
+`ld64.lld` is a symlink to the same `lld` binary, and the explicit `-flavor
+ld64` reproduces the segfault exactly — the flavor is not the difference.
+
+### Verdict (one line)
+
+Every input of the crashing command is Mach-O (no `7f 45 4c 46` anywhere), and
+`ld64.lld` is the same binary as `lld` with `-flavor ld64` reproducing the crash
+identically — so the ELF-looking backtrace frames do **not** come from an ELF
+input; they are shared/ICF-mislabeled lld code, and the ELF path is a red
+herring.
+
+### Repro
+
+```sh
+file "$DARLING_BUILD_DIR/dyld-only/src/external/libc/libsystem_c_firstpass.dylib"   # Mach-O
+grep -c $'\x7f\x45\x4c\x46' src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o   # 0
+readlink -f /usr/local/llvm19/bin/ld64.lld; cmp /usr/local/llvm19/bin/ld64.lld /usr/local/llvm19/bin/lld
+lld -flavor ld64 -arch x86_64 -platform_version macos 11.0 11.0 -dylib -flat_namespace -undefined suppress -o /tmp/x <binder.o>  # SIGSEGV
+```
