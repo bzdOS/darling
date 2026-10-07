@@ -1240,6 +1240,8 @@ mldr_plant_traps(uintptr_t base, size_t size, const char *name)
                                     t->emulate = 2;      /* xchgl %eax,(%rcx) */
                                 } else if (at[0] == 0x89 && at[1] == 0xc3) {
                                     t->emulate = 4;      /* movl %eax,%ebx */
+                                } else if (at[0] == 0xe8) {
+                                    t->emulate = 5;      /* callq rel32 */
                                 } else if (at[0] == 0x48 && at[1] == 0x89
                                            && at[2] == 0xe5) {
                                     t->emulate = 3;      /* movq %rsp,%rbp */
@@ -1429,6 +1431,43 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
 
     fprintf(stderr, "  called from %s\n",
             mldr_describe_addr(sp[0], buf, sizeof(buf)));
+
+    /* Control #112: dump the bytes at the trap site and, for a lazy stub's
+     * `jmp *disp(%rip)`, resolve the lazy pointer to its real target. The trap
+     * itself overwrote the first two bytes (ud2), so take them from orig[]. */
+    {
+        uint8_t code[16];
+        int ok = 1;
+
+        code[0] = trap->orig[0];
+        code[1] = trap->orig[1];
+        for (int i = 2; i < 16; i++) {
+            uint64_t w = 0;
+            if (!mldr_dump_read_guarded((uintptr_t)mc->mc_rip + (uintptr_t)i, &w)) {
+                ok = 0;
+                break;
+            }
+            code[i] = (uint8_t)w;
+        }
+        if (ok) {
+            fprintf(stderr, "  code @rip:");
+            for (int i = 0; i < 16; i++)
+                fprintf(stderr, " %02x", code[i]);
+            fprintf(stderr, "\n");
+            if (code[0] == 0xff && code[1] == 0x25) {
+                int32_t d = 0;
+                uintptr_t ptr;
+                uint64_t tgt = 0;
+
+                memcpy(&d, code + 2, 4);
+                ptr = (uintptr_t)mc->mc_rip + 6 + (intptr_t)d;
+                if (mldr_dump_read_guarded(ptr, &tgt))
+                    fprintf(stderr, "  stub jmp *0x%llx -> 0x%llx %s\n",
+                            (unsigned long long)ptr, (unsigned long long)tgt,
+                            mldr_describe_addr(tgt, buf, sizeof(buf)));
+            }
+        }
+    }
 
     fprintf(stderr, "  stack slots resolving into known images:\n");
     for (int i = 0; i < 48; i++) {
@@ -3171,6 +3210,28 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                 mc->mc_rbx = (uint64_t)(uint32_t)mc->mc_rax;
                 mc->mc_rip = t->addr + 2;
                 return;
+            } else if (t->resume && t->emulate == 5) {
+                /* callq rel32 (e8): push the return address and jump to the
+                 * target (a stub or a function), so the call itself is counted
+                 * and the callee still runs. */
+                int32_t disp = 0;
+                uintptr_t tgt;
+                uintptr_t nsp;
+                uint64_t probe = 0;
+
+                memcpy(&disp, (const void *)(t->addr + 1), 4);
+                tgt = t->addr + 5 + (intptr_t)disp;
+                nsp = (uintptr_t)mc->mc_rsp - 8;
+                mldr_report_trap(t, mc);
+                if (mldr_dump_read_guarded(nsp, &probe)) {
+                    *(volatile uint64_t *)nsp = (uint64_t)(t->addr + 5);
+                    mc->mc_rsp = nsp;
+                    mc->mc_rip = tgt;
+                    return;
+                }
+                fprintf(stderr,
+                    "[darling-mldr] resume: stack below rsp unreadable,"
+                    " dying honestly\n");
             } else if (t->resume && t->emulate == 2) {
                 /* xchgl %eax, (%rcx) (0x87 0x01): atomic 32-bit exchange. */
                 uint64_t oldw = 0;
