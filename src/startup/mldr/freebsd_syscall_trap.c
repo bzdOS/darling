@@ -1083,6 +1083,14 @@ struct mldr_trap {
     uintptr_t addr;
     uintptr_t image_base;
     char      label[96];
+    /* Control #103: a resumable trap saves the two bytes it replaced and
+     * emulates the overwritten instruction instead of dying, so one site can
+     * report every hit (lock/unlock counts). emulate: 1 = pushq %rbp,
+     * 2 = xchgl %eax,(%rcx), 0 = die after reporting (the #97-#102 behaviour). */
+    uint8_t   orig[4];
+    int       resume;
+    int       emulate;
+    long      hits;
 };
 
 static struct mldr_image _mldr_images[MLDR_MAX_IMAGES];
@@ -1150,75 +1158,117 @@ mldr_describe_addr(uintptr_t addr, char *out, size_t outsz)
 static void
 mldr_plant_traps(uintptr_t base, size_t size, const char *name)
 {
-    const char *spec = getenv("MLDR_TRAP_AT");
+    /* Control #103: MLDR_TRAP_AT plants fatal one-shot traps (the #97-#102
+     * behaviour); MLDR_TRAP_RESUME_AT plants resumable ones — the overwritten
+     * instruction is emulated and execution continues, so the site reports
+     * every hit and the run reaches abort instead of dying at the first lock. */
+    const char *envs[2];
+    int resume_flags[2];
 
-    if (spec == NULL)
-        return;
+    envs[0] = getenv("MLDR_TRAP_AT");
+    resume_flags[0] = 0;
+    envs[1] = getenv("MLDR_TRAP_RESUME_AT");
+    resume_flags[1] = 1;
 
-    while (*spec != '\0') {
-        const char *end = strchr(spec, ',');
-        size_t entry_len = (end != NULL) ? (size_t)(end - spec) : strlen(spec);
+    for (int k = 0; k < 2; k++) {
+        const char *spec = envs[k];
 
-        /* Split on the LAST '+', not the first: library names contain '+' of
-         * their own — libc++abi.dylib being exactly the one this gets pointed
-         * at most often, where splitting on the first '+' yields the image
-         * name "libc" and silently matches nothing. */
-        const char *plus = NULL;
-        for (size_t i = entry_len; i > 0; i--) {
-            if (spec[i - 1] == '+') {
-                plus = &spec[i - 1];
-                break;
+        if (spec == NULL)
+            continue;
+
+        while (*spec != '\0') {
+            const char *end = strchr(spec, ',');
+            size_t entry_len = (end != NULL) ? (size_t)(end - spec) : strlen(spec);
+
+            /* Split on the LAST '+', not the first: library names contain '+' of
+             * their own — libc++abi.dylib being exactly the one this gets pointed
+             * at most often, where splitting on the first '+' yields the image
+             * name "libc" and silently matches nothing. */
+            const char *plus = NULL;
+            for (size_t i = entry_len; i > 0; i--) {
+                if (spec[i - 1] == '+') {
+                    plus = &spec[i - 1];
+                    break;
+                }
             }
-        }
 
-        if (plus != NULL) {
-            size_t name_len = (size_t)(plus - spec);
+            if (plus != NULL) {
+                size_t name_len = (size_t)(plus - spec);
 
-            if (strlen(name) == name_len
-                && strncmp(spec, name, name_len) == 0) {
-                unsigned long off = strtoul(plus + 1, NULL, 0);
+                if (strlen(name) == name_len
+                    && strncmp(spec, name, name_len) == 0) {
+                    unsigned long off = strtoul(plus + 1, NULL, 0);
 
-                if (off >= size) {
-                    fprintf(stderr,
-                        "[darling-mldr] MLDR_TRAP_AT: offset 0x%lx is past the"
-                        " end of %s's 0x%zx-byte executable mapping — ignored\n",
-                        off, name, size);
-                } else if (_mldr_trap_count >= MLDR_MAX_TRAPS) {
-                    fprintf(stderr,
-                        "[darling-mldr] MLDR_TRAP_AT: no room for %s+0x%lx"
-                        " (max %d traps)\n", name, off, MLDR_MAX_TRAPS);
-                } else {
-                    uint8_t *at = (uint8_t *)(base + off);
-                    uintptr_t page = (uintptr_t)at
-                        & ~((uintptr_t)MLDR_PATCH_PAGE_SIZE - 1);
-
-                    if (mprotect((void *)page, MLDR_PATCH_PAGE_SIZE * 2,
-                                 PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
+                    if (off >= size) {
                         fprintf(stderr,
-                            "[darling-mldr] MLDR_TRAP_AT: mprotect for %s+0x%lx"
-                            " failed: %s\n", name, off, strerror(errno));
+                            "[darling-mldr] MLDR_TRAP_AT: offset 0x%lx is past the"
+                            " end of %s's 0x%zx-byte executable mapping — ignored\n",
+                            off, name, size);
+                    } else if (_mldr_trap_count >= MLDR_MAX_TRAPS) {
+                        fprintf(stderr,
+                            "[darling-mldr] MLDR_TRAP_AT: no room for %s+0x%lx"
+                            " (max %d traps)\n", name, off, MLDR_MAX_TRAPS);
                     } else {
-                        at[0] = 0x0f;
-                        at[1] = 0x0b;   /* ud2 */
-                        mprotect((void *)page, MLDR_PATCH_PAGE_SIZE * 2,
-                                 PROT_READ | PROT_EXEC);
+                        uint8_t *at = (uint8_t *)(base + off);
+                        uintptr_t page = (uintptr_t)at
+                            & ~((uintptr_t)MLDR_PATCH_PAGE_SIZE - 1);
 
-                        struct mldr_trap *t = &_mldr_traps[_mldr_trap_count++];
-                        t->addr = (uintptr_t)at;
-                        t->image_base = base;
-                        snprintf(t->label, sizeof(t->label), "%s+0x%lx",
-                                 name, off);
-                        fprintf(stderr,
-                            "[darling-mldr] MLDR_TRAP_AT: armed %s at %p\n",
-                            t->label, (void *)at);
+                        if (mprotect((void *)page, MLDR_PATCH_PAGE_SIZE * 2,
+                                     PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
+                            fprintf(stderr,
+                                "[darling-mldr] MLDR_TRAP_AT: mprotect for %s+0x%lx"
+                                " failed: %s\n", name, off, strerror(errno));
+                        } else {
+                            struct mldr_trap *t = &_mldr_traps[_mldr_trap_count++];
+
+                            t->orig[0] = at[0];
+                            t->orig[1] = at[1];
+                            t->orig[2] = at[2];
+                            t->orig[3] = at[3];
+                            t->resume = resume_flags[k];
+                            t->emulate = 0;
+                            t->hits = 0;
+                            if (t->resume) {
+                                /* Emulation is chosen by the ORIGINAL bytes.
+                                 * A 3-byte movq %rsp,%rbp (48 89 e5) is used
+                                 * instead of the 1-byte pushq %rbp: a 2-byte
+                                 * ud2 would clobber the byte after a 1-byte
+                                 * instruction, and int3 does not trap in this
+                                 * guest. The 3-byte form leaves the next
+                                 * instruction intact and re-traps every call. */
+                                if (at[0] == 0x87 && at[1] == 0x01) {
+                                    t->emulate = 2;      /* xchgl %eax,(%rcx) */
+                                } else if (at[0] == 0x48 && at[1] == 0x89
+                                           && at[2] == 0xe5) {
+                                    t->emulate = 3;      /* movq %rsp,%rbp */
+                                } else {
+                                    t->resume = 0;       /* cannot emulate: die */
+                                }
+                            }
+
+                            at[0] = 0x0f;
+                            at[1] = 0x0b;   /* ud2 */
+                            mprotect((void *)page, MLDR_PATCH_PAGE_SIZE * 2,
+                                     PROT_READ | PROT_EXEC);
+
+                            t->addr = (uintptr_t)at;
+                            t->image_base = base;
+                            snprintf(t->label, sizeof(t->label), "%s+0x%lx",
+                                     name, off);
+                            fprintf(stderr,
+                                "[darling-mldr] MLDR_TRAP_AT: armed %s at %p"
+                                " (resume=%d emulate=%d orig=%02x%02x)\n",
+                                t->label, (void *)at, t->resume, t->emulate,
+                                t->orig[0], t->orig[1]);
+                        }
                     }
                 }
             }
-        }
 
-        if (end == NULL)
-            break;
-        spec = end + 1;
+            if (end == NULL)
+                break;
+            spec = end + 1;
+        }
     }
 }
 
@@ -1236,17 +1286,110 @@ mldr_plant_traps(uintptr_t base, size_t size, const char *name)
  * output:   none.
  * sideEffects: writes the report to stderr.
  */
+/*
+ * purpose:  Render the lock-word watch line for the report. MLDR_TRAP_WATCH_OFF
+ *           is an offset into the trapped image; MLDR_TRAP_WATCH is
+ *           "<image>+<offset>" and resolves through the image registry, so a
+ *           word in a DIFFERENT image than the trap (the Chrome framework lock,
+ *           trapped in libsystem_platform) is read at the right address.
+ * input:    out/outsz — caller's buffer; image_base — the trapped image's base.
+ * output:   out, always NUL-terminated (empty if no watch is configured).
+ */
 static void
-mldr_report_trap(const struct mldr_trap *trap, const mcontext_t *mc)
+mldr_watch_string(char *out, size_t outsz, uintptr_t image_base)
+{
+    const char *wimg = getenv("MLDR_TRAP_WATCH");
+    const char *woff = getenv("MLDR_TRAP_WATCH_OFF");
+
+    out[0] = '\0';
+    if (wimg != NULL) {
+        const char *plus = strrchr(wimg, '+');
+
+        if (plus != NULL) {
+            size_t nlen = (size_t)(plus - wimg);
+            unsigned long o = strtoul(plus + 1, NULL, 0);
+
+            for (int j = 0; j < _mldr_image_count; j++) {
+                if (strlen(_mldr_images[j].name) == nlen
+                    && strncmp(_mldr_images[j].name, wimg, nlen) == 0) {
+                    uintptr_t wa = _mldr_images[j].base + (uintptr_t)o;
+                    uint64_t wv = 0;
+                    int ok = mldr_dump_read_guarded(wa, &wv);
+
+                    snprintf(out, outsz,
+                        "watch %.*s+0x%lx @0x%llx = 0x%016llx (ok=%d)",
+                        (int)nlen, wimg, o,
+                        (unsigned long long)wa, (unsigned long long)wv, ok);
+                    return;
+                }
+            }
+            snprintf(out, outsz, "watch %s: image not mapped", wimg);
+        }
+    } else if (woff != NULL) {
+        unsigned long o = strtoul(woff, NULL, 0);
+        uintptr_t wa = image_base + (uintptr_t)o;
+        uint64_t wv = 0;
+        int ok = mldr_dump_read_guarded(wa, &wv);
+
+        snprintf(out, outsz, "watch +0x%lx @0x%llx = 0x%016llx (ok=%d)",
+                 o, (unsigned long long)wa, (unsigned long long)wv, ok);
+    }
+}
+
+static void
+mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
 {
     char buf[160];
+    char watch[256];
+    long host_tid = 0;
+    long tsd_tid = -1;
 
-    fprintf(stderr, "\n[darling-mldr] === MLDR_TRAP_AT hit: %s ===\n",
-            trap->label);
+    trap->hits++;
+    freebsd_raw_syscall(SYS_thr_self, (long)&host_tid, 0, 0, 0, 0, 0);
+    mldr_watch_string(watch, sizeof(watch), trap->image_base);
+
+    /* Control #107: the id the lock itself uses is TSD slot 3 (%gs:0x18, see
+     * _os_unfair_lock_lock). Read it through the guest GS base from the signal
+     * context, so the lock's owner can be matched in the lock's own id space,
+     * not the host thr_self space. */
+    {
+        uint64_t v = 0;
+
+        if (mc->mc_gsbase != 0
+            && mldr_dump_read_guarded((uintptr_t)mc->mc_gsbase + 0x18, &v))
+            tsd_tid = (long)(uint32_t)v;
+    }
+
+    /* Control #103: a resumable site is hit many times, so it prints one line
+     * per hit (rdi is the lock word, tid says which thread) instead of the full
+     * stack walk; the count of these lines per rdi is the lock/unlock table. */
+    if (trap->resume) {
+        const uintptr_t *sp = (const uintptr_t *)(uintptr_t)mc->mc_rsp;
+        /* emulate==3 traps the movq AFTER pushq %rbp, so [rsp] is the saved
+         * rbp and the caller's return address is one slot up. */
+        int retslot = (trap->emulate == 3) ? 1 : 0;
+
+        fprintf(stderr,
+            "[darling-mldr] hit #%ld %s rdi=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
+            trap->hits, trap->label, (unsigned long long)mc->mc_rdi,
+            (unsigned long)host_tid, (unsigned long)tsd_tid,
+            mldr_describe_addr(sp[retslot], buf, sizeof(buf)), watch);
+        fflush(stderr);
+        return;
+    }
+
+    fprintf(stderr, "\n[darling-mldr] === MLDR_TRAP_AT hit #%ld: %s ===\n",
+            trap->hits, trap->label);
     fprintf(stderr, "  rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx rax=0x%llx\n",
             (unsigned long long)mc->mc_rdi, (unsigned long long)mc->mc_rsi,
             (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx,
             (unsigned long long)mc->mc_rax);
+
+    /* Control #103/#107: host thr_self names the thread; the TSD id is the one
+     * the lock uses (the abort's rdi is exactly this TSD id, #104). */
+    fprintf(stderr, "  guest tid = 0x%lx\n", (unsigned long)host_tid);
+    fprintf(stderr, "  guest TSD tid = 0x%lx (%%gs:0x18)\n",
+            (unsigned long)tsd_tid);
 
     /* __cxa_throw(void *exc, std::type_info *tinfo, void (*dest)(void*)) —
      * tinfo->__type_name is the second pointer of the type_info object. */
@@ -1278,23 +1421,8 @@ mldr_report_trap(const struct mldr_trap *trap, const mcontext_t *mc)
             }
         }
     }
-    /* Control #97: optional lock-word watch. MLDR_TRAP_WATCH_OFF is an offset
-     * into the trapped image; print 8 bytes of guest memory at
-     * trap->image_base + offset, so the lock word can be read at each trap
-     * point without a debugger. */
-    {
-        const char *woff = getenv("MLDR_TRAP_WATCH_OFF");
-
-        if (woff != NULL) {
-            unsigned long o = strtoul(woff, NULL, 0);
-            uintptr_t wa = trap->image_base + (uintptr_t)o;
-            uint64_t wv = 0;
-            int ok = mldr_dump_read_guarded(wa, &wv);
-
-            fprintf(stderr, "  watch +0x%lx @0x%llx = 0x%016llx (ok=%d)\n",
-                    o, (unsigned long long)wa, (unsigned long long)wv, ok);
-        }
-    }
+    if (watch[0] != '\0')
+        fprintf(stderr, "  %s\n", watch);
     fflush(stderr);
 }
 
@@ -2998,12 +3126,43 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
     /*
      * A diagnostic trap planted by MLDR_TRAP_AT is also a ud2, so it has to be
      * recognised before the raw-syscall path below tries to read a syscall
-     * number out of rax. Report and die: the instruction the trap overwrote is
-     * gone, so there is nothing to resume to.
+     * number out of rax. A fatal trap (MLDR_TRAP_AT) reports and dies: the
+     * instruction it overwrote is gone, so there is nothing to resume to. A
+     * resumable trap (MLDR_TRAP_RESUME_AT, Control #103) emulates the
+     * overwritten instruction and continues, so the site reports every hit.
      */
     for (int i = 0; i < _mldr_trap_count; i++) {
         if ((uintptr_t)mc->mc_rip == _mldr_traps[i].addr) {
-            mldr_report_trap(&_mldr_traps[i], mc);
+            struct mldr_trap *t = &_mldr_traps[i];
+
+            if (t->resume && t->emulate == 3) {
+                /* movq %rsp,%rbp (48 89 e5): rbp = rsp; continue past. Used
+                 * instead of pushq %rbp (1 byte) so the 2-byte ud2 does not
+                 * clobber the instruction after the trap. */
+                mldr_report_trap(t, mc);
+                mc->mc_rbp = mc->mc_rsp;
+                mc->mc_rip = t->addr + 3;
+                return;
+            } else if (t->resume && t->emulate == 2) {
+                /* xchgl %eax, (%rcx) (0x87 0x01): atomic 32-bit exchange. */
+                uint64_t oldw = 0;
+                int ok;
+
+                mldr_report_trap(t, mc);
+                ok = mldr_dump_read_guarded((uintptr_t)mc->mc_rcx, &oldw);
+                if (ok) {
+                    *(volatile uint32_t *)(uintptr_t)mc->mc_rcx
+                        = (uint32_t)mc->mc_rax;
+                    mc->mc_rax = (uint64_t)(uint32_t)oldw;
+                    mc->mc_rip = t->addr + 2;
+                    return;
+                }
+                fprintf(stderr,
+                    "[darling-mldr] resume: lock word unreadable,"
+                    " dying honestly\n");
+            } else {
+                mldr_report_trap(t, mc);
+            }
 
             struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
             if (mldr_trap_log_enabled && mldr_trap_log_handlers)
@@ -3143,6 +3302,7 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
 
     (void)info;
     mldr_describe_addr(site, descr, sizeof(descr));
+
     if (at[0] == 0xcc && strstr(descr, "+0x64d020") != NULL) {
         uint64_t ret = 0;
         int ret_ok = mldr_dump_read_guarded((uintptr_t)mc->mc_rsp, &ret);
