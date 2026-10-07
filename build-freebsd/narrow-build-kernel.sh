@@ -15,5 +15,14 @@ cd "$BD"
 ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
   | grep "xnu/darling/src/libsystem_kernel" \
   | grep -- "-c " > /tmp/kernel-object-cmds.sh
+# Control #120: put build-host-tools on the include path (minimal IOKit/IOReturn.h)
+SRC="${DARLING_SRC_DIR:?set DARLING_SRC_DIR}"
+# multi-arch clang (-arch i386 -arch x86_64) needs `lipo`; the cctools build
+# provides it but it is not on PATH by default.
+CCTOOLS_MISC="${DARLING_BUILD_DIR}/src/external/cctools-port/cctools/misc"
+[ -x "${CCTOOLS_MISC}/lipo" ] && PATH="${CCTOOLS_MISC}:${PATH}"
+export PATH
+sed -i.bak "s# -c # -I${SRC}/build-host-tools -c #" /tmp/kernel-object-cmds.sh
+rm -f /tmp/kernel-object-cmds.sh.bak
 echo "object commands: $(wc -l < /tmp/kernel-object-cmds.sh)"
 sh /tmp/kernel-object-cmds.sh

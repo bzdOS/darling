@@ -11267,3 +11267,66 @@ ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel
   | grep -E 'file_handle\.c\.o|workq_kernreturn\.c\.o' | grep -- -c | tail -1 > /tmp/c.sh; sh /tmp/c.sh
 sh build-freebsd/narrow-build-kernel.sh     # stops on the non-type conflicts above
 ```
+
+## Control #120 — the non-type compile conflicts are closed; the link stops on missing per-arch objects
+
+**Date:** 2026-10-07
+**Branch:** task/link-decl-conflicts
+**Base:** pr-arm64 = 8fabbbebf8c9020fe28d591a90f5fdc5d42d0cf4
+
+**Goal:** close the non-type link conflicts of libsystem_kernel in one pass.
+
+**Step 1 — inventory (narrow-build-kernel.sh, full log).**
+```
+conflicting types:
+  memcpy/strlen/strncpy   SDK string.h:72/86/89 (size_t) vs wrappers
+                          bind.c:11 / connect.c:12 / statfs.c:19-21 / readlink.c:9
+                          and dserver-rpc-defs.h:35 (__SIZE_TYPE__)
+  proc_regionfilename     xnu libproc.h:100 (Apple: uint64_t/void*/uint32_t) vs
+                          the shim freebsd_mig_compat.h:141
+  abort_with_payload      SDK sys/reason.h:183 vs the shim
+missing header:           IOKit/IOReturn.h (err_iokit.sub:31)
+```
+Root of the size_t conflict: the shim fixed `__darwin_size_t` as
+`unsigned long`/`unsigned int`, while i386/_types.h (blocked) defines it as
+`__SIZE_TYPE__`; for i386 clang's `__SIZE_TYPE__` is `long unsigned int`, so the
+shim's `unsigned int` diverges. Same for `__darwin_ptrdiff_t`/`__darwin_wchar_t`.
+
+**Step 2 — fix** (`build-freebsd/fix-link-decls.sh`, explicit sites):
+- shim: `__darwin_ptrdiff_t` → `__PTRDIFF_TYPE__`, `__darwin_size_t` →
+  `__SIZE_TYPE__`, `__darwin_wchar_t` → `__WCHAR_TYPE__`;
+- shim: removed the `proc_regionfilename`/`abort_with_payload` declarations (the
+  SDK declares them; the shim's copies clashed);
+- `build-host-tools/IOKit/IOReturn.h` — minimal, only the constants
+  err_iokit.sub uses (35 identifiers, generated from the file); empty
+  usb/USB.h, firewire/IOFireWireLib.h;
+- `narrow-build-kernel.sh`: `-I build-host-tools` on the object commands, and
+  the cctools `misc/` (with `lipo`) on PATH (multi-arch clang needs it).
+
+**Step 3 — result.** All compile classes are gone: `narrow-build-kernel.sh`
+prints **0 errors** (was 17). The link, however, does not produce the dylib:
+```
+cc: error: no such file or directory: '.../libsyscall.dir/.../*.o'   (many)
+cc: error: no such file or directory: 'src/libsimple-darling/liblibsimple_darling.a'
+```
+The per-arch objects are not written: multi-arch clang compiles each arch to
+`<tmp>/file_handle-XXXXXX/file_handle-{i386,x86_64}.o` and `lipo -create`s them,
+but those per-arch files are absent (the cc1 output never appears), so lipo has
+nothing to merge and no `.o` is produced. This is the link/environment class,
+not a compile class.
+
+### Verdict (one line)
+
+Every compile class is closed (0 errors: the shim's size/ptr types and the two
+declarations aligned, IOKit/IOReturn.h supplied), but the dylib is not produced —
+multi-arch clang's per-arch objects never reach disk so `lipo` cannot create any
+`.o` and the link fails on missing objects — the #115 nm gate is still pending.
+
+### Repro
+
+```sh
+sh build-freebsd/fix-link-decls.sh
+sh build-freebsd/narrow-build-kernel.sh          # 0 compile errors
+ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
+  | grep -v -- '-c ' | tail -1 > /tmp/link.sh; sh /tmp/link.sh   # missing .o
+```
