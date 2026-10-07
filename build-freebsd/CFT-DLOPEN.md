@@ -10659,3 +10659,80 @@ grep -A5 "hit #4 libsystem_platform.dylib+0x2821 rdi=0x27d806e9a7a0" <diag-dir>/
 grep -A5 "hit #90 libsystem_platform.dylib+0x2751 rdi=0x27d806e9a7a0" <diag-dir>/cft110-take-stack.log
 grep -c "0x28c1.*rdi=0x27d806e9a7a0" <diag-dir>/cft110-take-stack.log   # 0
 ```
+
+## Control #111 — the second call is unconditional; the difference is the missing release
+
+**Date:** 2026-10-07
+**Branch:** task/abort-retry-cond
+**Base:** pr-arm64 = df8af10d79535a3aa6e0533775aeda3372d11c31
+
+**Goal:** 0x8eedc0 has two adjacent `callq 0x8eee10` (0x8eedc6/0x8eedd1, returns
+0x8eedcb/0x8eedd6, 6 bytes between), both carrying the same rdi (the word
+0x100667a0). The first call takes the lock and does not release; on macOS the
+second call does not run — why. (a) the 6 bytes 0x8eedcb–0x8eedd1; (b) the rax of
+the first call at 0x8eedcb; (c) which exit of 0x8eee10 (0x8eee10–0x8eeef4) skips
+release; (d) a one-line verdict.
+
+**Method:** static (/tmp/chrome-disasm.txt); one run with resumable traps at
+Google Chrome for Testing Framework+0x8eedcb (`movl %eax,%ebx`), libsystem_platform
++0x2821 (trylock) and +0x2751 (lock_with_options), watch 0x100667a0; log
+cft111-retry-cond.log. mldr gained emulate=4 (`movl %eax,%ebx`) and prints rax.
+
+### (a) the 6 bytes 0x8eedcb–0x8eedd1 — argument prep, no branch
+
+```
+  8eedc6: e8 45 00 00 00    callq 0x8eee10        ; first call, return 0x8eedcb
+  8eedcb: 89 c3             movl  %eax, %ebx      ; save result 1
+  8eedcd: 48 c1 e3 20       shlq  $0x20, %rbx     ; into the high half
+  8eedd1: e8 3a 00 00 00    callq 0x8eee10        ; second call, return 0x8eedd6
+```
+
+The 6 bytes are `89 c3` (`movl %eax,%ebx`) + `48 c1 e3 20` (`shlq $0x20,%rbx`) —
+unconditional argument preparation, **no conditional branch**. Both callq are
+unconditional; the second always executes. 0x8eedc0 itself is
+0x8eedc0–0x8eee0d (epilogue 0x8eee07–0x8eee0d): it combines the two calls' 32-bit
+results (high from the first, low from the second) with `_vm_page_size`.
+
+### (b) rax of the first call at 0x8eedcb
+
+```
+hit #1 Google Chrome for Testing Framework+0x8eedcb rdi=0x36c443e9a7a0 rax=0x9e572498 tid=0x18f05 tsd=0x307 from 0x0 <unknown> watch ... @0x36c443e9a7a0 = 0x0000000100000307 (ok=1)
+```
+
+rax = **0x9e572498** — the value the first 0x8eee10 returned (a 32-bit hash-like
+result, not a bool); and the watched word is already **0x0000000100000307**, i.e.
+still owned. The first call returned its value without clearing the word.
+
+### (c) the release in 0x8eee10 and what the run shows
+
+Statically every exit of 0x8eee10 (0x8eee10–0x8eeef4) reaches the release at
+0x8eee7b: trylock-success → 0x8eee2a → 0x8eee33 or 0x8eee89 (init) → both
+`jmp`/fall into 0x8eee3a → `callq _os_unfair_lock_unlock` (0x8eee7b); trylock-
+failure → 0x8eeedf → 0x161ce0 → `jmp 0x8eee2a` → same release. **There is no exit
+that skips release in the disassembly.**
+
+The run disagrees: of all trapped `_os_unfair_lock_unlock` (+0x28c1) calls, **0**
+target this word, and the word stays 0x0000000100000307 from the first trylock
+through the abort (#110) — the 0x100000307 → 0x0 transition never occurs. So under
+Darling the release at 0x8eee7b is **not executed** for this word even though the
+static control flow reaches it.
+
+### (d) Verdict (one line)
+
+The second `callq 0x8eee10` is **unconditional** (the 6 bytes are `movl`+`shlq`,
+no branch) and always runs; what differs is the release — under Darling the first
+0x8eee10 returns its value (rax=0x9e572498) while the word is still owned, i.e.
+the `_os_unfair_lock_unlock` at 0x8eee7b does not happen (0 trapped unlock calls
+on the word), so the second call's trylock fails and the re-acquire aborts, while
+on macOS that release does happen and the word is free for the second call. The
+place is the release call at 0x8eee7b (stub 0xdbbeffc): statically reached, but
+not observed executing for 0x100667a0.
+
+### Repro
+
+```sh
+grep -A10 "^ *8eedc0:" /tmp/chrome-disasm.txt | head -12
+sh /tmp/stub111-run.sh <diag-dir>/cft111-retry-cond.log
+grep -E "0x8eedcb.*rdi=0x36c443e9a7a0" <diag-dir>/cft111-retry-cond.log
+grep -cE "(0x2821|0x2751|0x28c1).*rdi=0x36c443e9a7a0" <diag-dir>/cft111-retry-cond.log
+```
