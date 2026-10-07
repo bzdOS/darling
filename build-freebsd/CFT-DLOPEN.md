@@ -11529,3 +11529,31 @@ lldb "$SRC/build-host-tools/ld64/x86_64-apple-darwin20-ld" -c "$DARLING_BUILD_DI
   -o "disassemble -s 0x354006 -e 0x35401a" -o quit -b
 sh build-freebsd/narrow-build-target.sh src/external/dyld/libsystem_dyld_firstpass.dylib
 ```
+
+### #123 addendum — the firstpass dylibs already exist (dyld-only), and ld64.lld's real flag form
+
+A scan found the four firstpass dependencies already built, thin x86_64, under
+`$DARLING_BUILD_DIR/dyld-only/`:
+```
+dyld-only/src/external/libc/libsystem_c_firstpass.dylib              Mach-O 64-bit x86_64
+dyld-only/src/external/compiler-rt/lib/builtins/libcompiler_rt_firstpass.dylib  Mach-O 64-bit x86_64
+(also libsystem_kernel, libplatform, libsystem_pthread, libsystem_blocks,
+ libsystem_malloc, libdispatch_shared, liblaunch, libsystem_sandbox firstpass)
+```
+The dyld-only build is **single-arch x86_64** and links with the **same**
+`ld64.lld` (its `ld64/src/x86_64-apple-darwin20-ld` is a symlink to
+`/usr/local/bin/ld64.lld`), using
+`-Wl,-platform_version,macos,11.0,11.0` (platform spelling `macos`, not
+`macosx`/`macOS`). So ld64.lld is the working linker here, and the firstpass
+dependencies already exist — the narrow route is not needed for them.
+
+Reproducing the thin x86_64 link of the dyld firstpass with ld64.lld and
+`-platform_version,macos,11.0,11.0` still **segfaults** in
+`/usr/local/llvm19/lib/libLLVM.so.19.1` — so the remaining difference is the
+input objects: dyld-only's are thin, ours are fat `.o` (lipo'd). Next step:
+link from the thin `<obj>.x86_64.o` rather than the fat `<obj>.o`.
+
+```sh
+file "$DARLING_BUILD_DIR/dyld-only/src/external/libc/libsystem_c_firstpass.dylib"   # thin x86_64
+grep -oE 'Wl,-platform_version[^ ]+' "$DARLING_BUILD_DIR/dyld-only/build.ninja" | sort -u
+```
