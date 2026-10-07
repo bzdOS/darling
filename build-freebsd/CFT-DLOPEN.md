@@ -11434,3 +11434,52 @@ class to inventory in one pass, compiler_rt and libsystem_c not started.
 sh build-freebsd/narrow-build-target.sh src/libsimple-darling/liblibsimple_darling.a
 sh build-freebsd/narrow-build-target.sh src/external/dyld/libsystem_dyld_firstpass.dylib
 ```
+
+## Control #122 (checkpoint) — dyld objects build; the linker itself crashes (SIGILL)
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = d8e3e21d4fa258a55dd99ccb4405f7fb2be2f9b1
+
+**Goal:** slice 2 (dyld firstpass) — full inventory of the missing-header class
+one pass, fix by class; then slices 3-4.
+
+**Inventory (missing-header class, one cause).**
+```
+SRC/src/external/dyld/dyld3/APIs.cpp:57:10: fatal error: 'dyld/VersionMap.h' file not found
+```
+Cause: the SDK's `usr/include/dyld/VersionMap.h` is a **symlink whose target does
+not exist** — `.../src/external/AvailabilityVersions/gen/usr/local/include/dyld/
+VersionMap.h` (that `gen/` tree is not generated here). It is not an include-path
+miss: the SDK include dir is already on the command line. The dyld-only build
+tree has a real copy.
+
+**Fix (class, in narrow-build-target.sh — dyld sources untouched):** append the
+dyld-only SDK include dir LAST (lowest priority) so only genuinely missing
+headers resolve from it:
+```
+-I$BD/dyld-only/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
+```
+After it the dyld objects compile: "objects done" (VersionMap.h resolved).
+
+**New class — the linker crashes.** The link (`-fuse-ld=…/build-host-tools/ld64/
+x86_64-apple-darwin20-ld`) dies with `Illegal instruction (core dumped)` on both
+the fat and the thin i386 link. `ld64.lld` (the dyld-only symlink) instead
+requires `-platform_version`/`-arch`, i.e. a different command shape. So no dyld
+dylib; slices 3-4 not started.
+
+### Verdict (one line)
+
+The missing-header class for dyld is one broken SDK symlink
+(`dyld/VersionMap.h` → ungenerated AvailabilityVersions/gen), fixed by an
+include-path addition in the script, and the dyld objects now build — but the
+linker crashes (build-host-tools ld64 SIGILL; ld64.lld wants other flags), so no
+dyld dylib and slices 3-4 are not reached.
+
+### Repro
+
+```sh
+readlink -f "$SRC/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/dyld/VersionMap.h"
+sh build-freebsd/narrow-build-target.sh src/external/dyld/libsystem_dyld_firstpass.dylib
+# objects done; link: Illegal instruction (core dumped)
+```

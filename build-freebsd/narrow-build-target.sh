@@ -21,7 +21,14 @@ for c in "${SRC}/build-host-tools/ld64/x86_64-apple-darwin20-ld" \
 done
 
 ninja -t commands "$TARGET" | grep -- " -c " > /tmp/nbt-cmds.sh
-sed -i.bak "s# -c # -I${SRC}/build-host-tools -c #" /tmp/nbt-cmds.sh; rm -f /tmp/nbt-cmds.sh.bak
+# Control #122: the SDK's usr/include/dyld/VersionMap.h is a symlink whose target
+# (AvailabilityVersions/gen/...) is not generated in this tree; the dyld-only
+# build tree has a real copy. Add its SDK include dir LAST (lowest priority) so
+# only genuinely missing headers (dyld/VersionMap.h) resolve from there.
+DYLD_SDK="${BD}/dyld-only/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"
+EXTRA="-I${SRC}/build-host-tools"
+[ -d "$DYLD_SDK/dyld" ] && EXTRA="${EXTRA} -I${DYLD_SDK}"
+sed -i.bak "s# -c # ${EXTRA} -c #" /tmp/nbt-cmds.sh; rm -f /tmp/nbt-cmds.sh.bak
 echo "[$TARGET] object commands: $(wc -l < /tmp/nbt-cmds.sh)"
 
 : > /tmp/nbt-perarch.sh; : > /tmp/nbt-lipo.sh
