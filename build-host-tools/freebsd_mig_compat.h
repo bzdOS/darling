@@ -44,6 +44,43 @@ typedef int                 __darwin_wchar_t;
 typedef int                 __darwin_wint_t;
 #endif
 
+/* Control #119: the rest of the __darwin_* set that i386/_types.h would provide
+   (inventory of sys/_types/_*.h), so no SDK header has to pull it from the
+   blocked header. */
+#ifndef __darwin_ct_rune_t
+typedef int                 __darwin_ct_rune_t;
+#endif
+
+#ifndef __mbstate_t
+typedef union {
+    char        __mbstate8[128];
+    long long   _mbstateL;
+} __mbstate_t;
+#endif
+#ifndef __darwin_mbstate_t
+typedef __mbstate_t         __darwin_mbstate_t;
+#endif
+
+#ifndef __darwin_va_list
+typedef __builtin_va_list   __darwin_va_list;
+#endif
+
+#ifndef __darwin_rune_t
+typedef __darwin_wchar_t    __darwin_rune_t;
+#endif
+
+#ifndef __darwin_clock_t
+typedef unsigned long       __darwin_clock_t;
+#endif
+
+#ifndef __darwin_socklen_t
+typedef __uint32_t          __darwin_socklen_t;
+#endif
+
+#ifndef __darwin_time_t
+typedef long                __darwin_time_t;
+#endif
+
 /* Darwin-specific types that mach headers need */
 #ifndef __darwin_natural_t
 typedef unsigned int        __darwin_natural_t;
