@@ -9937,3 +9937,115 @@ timeout 90 llvm-objdump --macho --disassemble-all \
 timeout 90 llvm-objdump --macho --disassemble-all \
   "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -B8 -A8 "257a:"
 ```
+
+## Control #105 — history of the lock word before the abort, and three Chrome addresses
+
+**Date:** 2026-10-07
+**Branch:** task/abort-lock-history
+**Base:** pr-arm64 = 34652a0396346221b262cea3a4877495ed205dec
+
+**Goal:** from the #103 run log and the images (no guest run): (1) the lock-entry
+trap (+0x23b1) nearest before the fatal +0x8237 and its rdi; (2) the full history
+of that word in the log; (3) a verdict — (A) true recursion, the same thread took
+the word twice with no unlock between, or (B) owner confusion, the word carries a
+foreign/stale owner; (4) names for Chrome Framework +0x8eedd6, +0x8eeeeb, +0x8eee7b.
+
+**Method:** grep the #103 log (cft103-abort-owner-3.log) for the `hit #` lines;
+llvm-nm and `timeout 90 llvm-objdump --macho --disassemble-all` on the framework
+image, each command under timeout.
+
+### Result (1) — the nearest lock entry before the abort
+
+```
+line 518: hit #2 libsystem_platform.dylib+0x23b1 rdi=0x32a11b0ff0c0 tid=0x18ae5 from libsystem_c.dylib+0xd7100 watch ... 0x100667a0 @0x32a12b89a7a0 = 0x0 (ok=0)
+line 614: === MLDR_TRAP_AT hit #1: libsystem_platform.dylib+0x8237 ===
+```
+
+The nearest `_os_unfair_lock_lock` entry (+0x23b1) before the fatal trap is
+**hit #2**, rdi = **0x32a11b0ff0c0**, tid = 0x18ae5, caller libsystem_c.dylib+0xd7100.
+It is **not** the abort's word: the abort frame watches 0x100667a0
+(@0x32a12b89a7a0, value 0x0000000100000307), and 0x100667a0 has **0** hits at
++0x23b1 — the word the abort is about was never taken through
+`_os_unfair_lock_lock` in this run.
+
+### Result (2) — history of 0x32a11b0ff0c0 (and of 0x100667a0)
+
+| line | hit | trap | tid | caller |
+|---|---|---|---|---|
+| 515 | #1 | lock 0x23b1 | 0x18ae5 | libsystem_c.dylib+0xd6f2c |
+| 516 | #46 | unlock 0x28c1 | 0x18ae5 | libsystem_c.dylib+0xd70df |
+| 517 | #46 | xchgl 0x290b | 0x18ae5 | 0x30701659f2a |
+| 518 | #2 | lock 0x23b1 | 0x18ae5 | libsystem_c.dylib+0xd7100 |
+| 519 | #47 | unlock 0x28c1 | 0x18ae5 | libsystem_c.dylib+0xd7175 |
+| 520 | #47 | xchgl 0x290b | 0x18ae5 | 0x30701000307 |
+
+Order: lock(#1) → unlock(#46) → lock(#2) → unlock(#47) — no second lock before an
+unlock. History of 0x100667a0 (@0x32a12b89a7a0): **no hits at all** (0 lock,
+0 unlock, 0 xchgl).
+
+### Result (3) — verdict
+
+**(B) owner confusion, not (A) recursion.** The word the abort is about,
+0x100667a0, has no lock/unlock entry in the log — there is no pair of hits on
+one rdi without an unlock between, so (A) cannot be shown by any two hit #s. Its
+owner 0x307 is not matched by any trapped call on that word. The word from (1),
+0x32a11b0ff0c0, does have history and it is not recursive either (lock, unlock,
+lock, unlock). **Limitation:** the log's tid is the host `thr_self` (0x18ae5),
+while the owner in the word (0x307) is the TSD id used by the lock itself (#104);
+the two are different id spaces, so owner and thread cannot be matched from the
+log alone. The discrimination here rests on the absence of any trapped access to
+0x100667a0, not on id equality.
+
+### Result (4) — Chrome Framework +0x8eedd6 / +0x8eeeeb / +0x8eee7b
+
+The framework image is **stripped**: llvm-nm lists only 3 defined symbols
+(`_ChromeAppModeStart_v8` 0x2840, `_ChromeWebAppShortcutCopierMain` 0x2a00,
+`_ChromeMain` 0x3fe0) and ~2700 undefined imports — no local symbols, so the
+three addresses have **no symbol name**; the nearest defined symbol is
+`_ChromeMain`. Verbatim context:
+
+```
+# +0x8eee7b
+  8eee77: 48 c1 eb 20          shrq  $0x20, %rbx
+  8eee7b: e8 7c 01 2d 0d       callq 0xdbbeffc ## symbol stub for: _os_unfair_lock_unlock
+  8eee80: 89 d8                movl  %ebx, %eax
+  8eee82: 48 83 c4 08          addq  $0x8, %rsp
+  8eee86: 5b                   popq  %rbx
+  8eee87: 5d                   popq  %rbp
+# +0x8eeeeb
+  8eeedf: 48 8d 3d ba 78 77 0f leaq  0xf7778ba(%rip), %rdi
+  8eeee6: e8 f5 2d 87 ff       callq 0x161ce0
+  8eeeeb: e9 3a ff ff ff       jmp   0x8eee2a
+# +0x8eedd6
+  8eedc6: e8 45 00 00 00       callq 0x8eee10
+  8eedcb: 89 c3                movl  %eax, %ebx
+  8eedcd: 48 c1 e3 20          shlq  $0x20, %rbx
+  8eedd1: e8 3a 00 00 00       callq 0x8eee10
+  8eedd6: 48 8b 0d 3b 43 8b 0e movq  0xe8b433b(%rip), %rcx ## _vm_page_size
+```
+
+So: +0x8eee7b is the `callq _os_unfair_lock_unlock` site (the #99 A#1 return
+path, next to the function epilogue); +0x8eeeeb is the `jmp` after a
+`callq 0x161ce0` (the generic lock-acquire wrapper); +0x8eedd6 follows two
+`callq 0x8eee10` and reads `_vm_page_size` (a page-sized operation).
+
+### Verdict (one line)
+
+(1) nearest lock entry before the abort is hit #2, rdi = 0x32a11b0ff0c0 — not
+the abort's word; (2) 0x32a11b0ff0c0: lock(#1)→unlock(#46)→lock(#2)→unlock(#47);
+0x100667a0: no hits at all; (3) **(B) owner confusion** — no trapped access to
+the abort's word exists, so (A) recursion cannot be shown, with the id-space
+limitation noted; (4) the framework is stripped — the three addresses have no
+symbol names, only context (+0x8eee7b = callq unlock, +0x8eeeeb = after callq
+0x161ce0, +0x8eedd6 = after callq 0x8eee10, reads _vm_page_size).
+
+### Repro
+
+```sh
+grep -nE "hit #" <diag-dir>/cft103-abort-owner-3.log | grep "0x23b1"
+grep -nE "rdi=0x32a11b0ff0c0" <diag-dir>/cft103-abort-owner-3.log
+grep -c "rdi=0x32a12b89a7a0" <diag-dir>/cft103-abort-owner-3.log   # 0
+FW="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+llvm-nm "$FW" | grep -E " [Tt] "                                    # 3 exports, no locals
+timeout 90 llvm-objdump --macho --disassemble-all "$FW" | grep -B6 -A4 "8eee7b:"
+```
