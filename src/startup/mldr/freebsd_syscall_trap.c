@@ -1238,6 +1238,8 @@ mldr_plant_traps(uintptr_t base, size_t size, const char *name)
                                  * instruction intact and re-traps every call. */
                                 if (at[0] == 0x87 && at[1] == 0x01) {
                                     t->emulate = 2;      /* xchgl %eax,(%rcx) */
+                                } else if (at[0] == 0x89 && at[1] == 0xc3) {
+                                    t->emulate = 4;      /* movl %eax,%ebx */
                                 } else if (at[0] == 0x48 && at[1] == 0x89
                                            && at[2] == 0xe5) {
                                     t->emulate = 3;      /* movq %rsp,%rbp */
@@ -1370,10 +1372,30 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
         int retslot = (trap->emulate == 3) ? 1 : 0;
 
         fprintf(stderr,
-            "[darling-mldr] hit #%ld %s rdi=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
+            "[darling-mldr] hit #%ld %s rdi=0x%llx rax=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
             trap->hits, trap->label, (unsigned long long)mc->mc_rdi,
+            (unsigned long long)mc->mc_rax,
             (unsigned long)host_tid, (unsigned long)tsd_tid,
             mldr_describe_addr(sp[retslot], buf, sizeof(buf)), watch);
+        /* Control #110: the return chain, as in #77 — raw stack words plus every
+         * slot resolving into a known image, so a back-jump cycle inside one
+         * function can be told from a re-entrant call by its frames. */
+        fprintf(stderr, "  [rsp]");
+        for (int i = 0; i < 6; i++)
+            fprintf(stderr, " %llx", (unsigned long long)sp[i]);
+        fprintf(stderr, "\n");
+        for (int i = 0; i < 24; i++) {
+            uintptr_t slot = sp[i];
+
+            for (int j = 0; j < _mldr_image_count; j++) {
+                if (slot >= _mldr_images[j].base
+                    && slot < _mldr_images[j].base + _mldr_images[j].size) {
+                    fprintf(stderr, "  [rsp+%3d] %s\n", i * 8,
+                            mldr_describe_addr(slot, buf, sizeof(buf)));
+                    break;
+                }
+            }
+        }
         fflush(stderr);
         return;
     }
@@ -3142,6 +3164,12 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                 mldr_report_trap(t, mc);
                 mc->mc_rbp = mc->mc_rsp;
                 mc->mc_rip = t->addr + 3;
+                return;
+            } else if (t->resume && t->emulate == 4) {
+                /* movl %eax,%ebx (89 c3): ebx = eax (32-bit, zero-extended). */
+                mldr_report_trap(t, mc);
+                mc->mc_rbx = (uint64_t)(uint32_t)mc->mc_rax;
+                mc->mc_rip = t->addr + 2;
                 return;
             } else if (t->resume && t->emulate == 2) {
                 /* xchgl %eax, (%rcx) (0x87 0x01): atomic 32-bit exchange. */
