@@ -9719,3 +9719,49 @@ llvm-nm -n "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -i 
 timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" \
   | sed -n '/^_os_unfair_lock_unlock:/,/^_os_unfair_lock_lock_no_tsd:/p'
 ```
+
+## Control #102 — watch+tid on lock word 0x100667a0: xchgl executes on a different address
+
+**Date:** 2026-10-07
+**Branch:** task/lock-word-watch
+**Base:** pr-arm64 = 09403a59e6806288ec4cded8fccde99a8518921f
+
+**Goal:** in the hung run, does xchgl @0x290b (body of _os_unfair_lock_unlock, #101)
+execute with rdi == 0x100667a0, and with which tid; if not — where does the path
+from stub 0xdbbeffc to 0x290b break. Three alternatives: (a) xchgl executes but
+on a different address (rdi ≠ 0x100667a0); (b) 0x290b is never reached; (c) the
+word is re-acquired by another thread before observation.
+
+**Method:** event instrumentation — MLDR_TRAP_AT armed on three offsets
+(libsystem_platform.dylib+0x290b, libsystem_platform.dylib+0x293a, Google Chrome
+for Testing Framework+0x8eee80) with MLDR_TRAP_WATCH_OFF=0x100667a0; the trap
+handler prints rdi/rsi/rdx/rcx/rax, guest tid, return address, and the watched
+word. Run via /tmp/stub102-run.sh, log cft102-watch-tid.log in the diag directory.
+
+### Verbatim log (trap hit)
+
+```
+[darling-mldr] === MLDR_TRAP_AT hit: libsystem_platform.dylib+0x290b ===
+  rdi=0x2a2ad06b2344 rsi=0x2a2ad02cfea0 rdx=0x307 rcx=0x2a2ad06b2344 rax=0x0
+  guest tid = 0x307
+  called from libsystem_pthread.dylib (data)+0x344
+  watch +0x100667a0 @0x2a2ae07217a0 = 0x0000000000000000 (ok=0)
+```
+
+### Verdict (one line)
+
+Alternative (a) holds: xchgl @0x290b **does execute** (trap hits) but with
+**rdi = 0x2a2ad06b2344 ≠ 0x100667a0** — the unlock body runs on a different lock
+word; simultaneously the watched word 0x100667a0 reads **0x0000000000000000**
+(ok=0), not 0x307 — so the contradiction of #99/#101 dissolves: the xchgl that
+would have cleared 0x100667a0 never targets it. The call comes from
+libsystem_pthread.dylib (data)+0x344, not from Chrome Framework+0x8eee7b —
+the stub 0xdbbeffc is not on this path.
+
+### Repro
+
+```sh
+sh /tmp/stub102-run.sh <diag-dir>/cft102-watch-tid.log
+grep -E "MLDR_TRAP_AT hit|rdi=|watch \+|guest tid|called from" \
+  <diag-dir>/cft102-watch-tid.log
+```
