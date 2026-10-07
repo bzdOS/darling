@@ -10736,3 +10736,85 @@ sh /tmp/stub111-run.sh <diag-dir>/cft111-retry-cond.log
 grep -E "0x8eedcb.*rdi=0x36c443e9a7a0" <diag-dir>/cft111-retry-cond.log
 grep -cE "(0x2821|0x2751|0x28c1).*rdi=0x36c443e9a7a0" <diag-dir>/cft111-retry-cond.log
 ```
+
+## Control #112 — the release goes to libsystem_kernel's empty _os_unfair_lock_unlock
+
+**Date:** 2026-10-07
+**Branch:** task/abort-release-trace
+**Base:** pr-arm64 = 489ba77b9662392076682ecf48bd568f6cc9c24e
+
+**Goal:** the #111 contradiction — release 0x8eee7b is statically reachable from
+every exit of 0x8eee10, yet the run shows 0 unlock hits on the word and the word
+is not cleared. Decide one of (A) not reached, (B) reached but went elsewhere,
+(C) reached and did not clear.
+
+**Method:** resumable traps at Chrome+0x8eee7b (`callq`, emulate=5: push the
+return and jump to the target), libsystem_platform+0x28c1 (unlock entry) and
++0x2821 (trylock), watch 0x100667a0 (log cft112-release-trace.log); plus a fatal
+trap at the stub Chrome+0xdbbeffc with a code/lazy-pointer dump (log
+cft112-stub.log). mldr gained emulate=5 (`callq rel32`) and the trap-site code
+dump.
+
+### (a) hits at 0x8eee7b
+
+```
+hit #1 Google Chrome for Testing Framework+0x8eee7b rdi=0x21985e29a7a0 rax=0x7ce169088b3280b6 tid=0x2a4cb tsd=0x307 from 0x7ce169088b3280b6 <unknown> watch ... @0x21985e29a7a0 = 0x0000000100000307 (ok=1)
+```
+1 hit on the word (2 total). The release call site **is reached** — (A) is out.
+
+### (b) the actual target of the callq
+
+```
+[darling-mldr] === MLDR_TRAP_AT hit #1: Google Chrome for Testing Framework+0xdbbeffc ===
+  rdi=0xe01068da4d8 rsi=0x100000 rdx=0x307 rcx=0x0 rax=0x1
+  guest TSD tid = 0x307 (%gs:0x18)
+  called from Google Chrome for Testing Framework+0x16e41d2
+  code @rip: ff 25 fe 40 5e 01 ...
+  stub jmp *0xe0105bd7100 -> 0xe00f63baf70 libsystem_kernel.dylib+0x4af70
+```
+
+The stub 0xdbbeffc (`symbol stub for: _os_unfair_lock_unlock`) jumps through its
+lazy pointer to **libsystem_kernel.dylib+0x4af70**, and `llvm-nm` names that
+**`_os_unfair_lock_unlock`** — but the *kernel* copy, not the platform one the
+#103/#107 traps watch:
+
+```
+_os_unfair_lock_unlock:        ## libsystem_kernel.dylib+0x4af70
+   4af70: 55                pushq %rbp
+   4af71: 48 89 e5          movq  %rsp, %rbp
+   4af74: 48 89 7d f8       movq  %rdi, -0x8(%rbp)
+   4af78: 5d                popq  %rbp
+   4af79: c3                retq
+```
+
+It is an **empty stub** — it stores rdi and returns; it never does the `xchgl`
+that clears the word. The real implementation is libsystem_platform's
+0x28c0/0x290b, which #107's traps cover and which this call never reaches.
+
+### (c) the word after the release path
+
+The word 0x100667a0 reads **0x0000000100000307** at the release call site (hit#1)
+and stays so; of the trapped libsystem_platform unlock calls, **0** target the
+word. It is never cleared.
+
+### (d) Verdict (one line)
+
+**(B)/(C) — the release is reached but goes to the wrong copy:**
+`callq 0x8eee7b` → stub 0xdbbeffc → lazy pointer → **libsystem_kernel's
+`_os_unfair_lock_unlock` (0x4af70), an empty stub** that does not clear the word,
+while the platform implementation (0x28c0, `xchgl` 0x290b) is never called — so
+the word stays 0x100000307 and the second trylock recurses into the abort. **Do
+not fix mldr's binder** (it resolved the symbol by name correctly): the defect is
+that the Chrome stub is bound to the empty kernel copy — a shim/binding issue,
+not the trap machinery.
+
+### Repro
+
+```sh
+sh /tmp/stub112-run.sh <diag-dir>/cft112-release-trace.log
+grep -E "0x8eee7b" <diag-dir>/cft112-release-trace.log | head
+sh /tmp/stub112b-run.sh <diag-dir>/cft112-stub.log
+grep -E "stub jmp|code @rip" <diag-dir>/cft112-stub.log
+timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" \
+  | sed -n '/^_os_unfair_lock_unlock:/,/^_os_unfair_lock_lock:/p'
+```
