@@ -9849,3 +9849,91 @@ grep -E "hit #|MLDR_TRAP_AT hit #1: libsystem_platform.dylib\+0x8237" \
 grep -c "rdi=0x32a12b89a7a0" <diag-dir>/cft103-abort-owner-3.log   # 0
 ```
 (requires an mldr built with the resumable-trap patch — build-freebsd/build-mldr-only.sh)
+
+## Control #104 — names for +0x8237 and +0x257a, and the abort condition
+
+**Date:** 2026-10-07
+**Branch:** task/abort-func-names
+**Base:** pr-arm64 = 06b888d29d09cd876dd6a17e8a4f1c4ce7b22c1e
+
+**Goal:** name the functions behind two addresses in libsystem_platform.dylib
+(the image of the #103 run) and state the abort condition. (1) +0x8237 is the
+#103 fatal trap, hit with rdi=0x307 (the owner argument): name the symbol, the
+code path into it, and the compare/branch that decides the abort. (2) the
+function containing +0x257a, the frame on the #103 abort stack between the lock
+entry (+0x23b1) and unlock (+0x28c0): name it and its role in the lock path.
+No guest run — image only.
+
+**Method:** symbol table and full disassembly with grep for the addresses
+(each command under timeout):
+```sh
+llvm-nm -n "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -i unfair
+timeout 90 llvm-objdump --macho --disassemble-all \
+  "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -B10 -A6 "8237:"
+timeout 90 llvm-objdump --macho --disassemble-all \
+  "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -B8 -A8 "257a:"
+```
+
+### Result (1) — +0x8237 is __os_unfair_lock_recursive_abort
+
+```
+__os_unfair_lock_recursive_abort:
+    8230: 55                   pushq %rbp
+    8231: 48 89 e5             movq  %rsp, %rbp
+    8234: 89 7d fc             movl  %edi, -0x4(%rbp)
+    8237: 0f 0b                ud2
+```
+
+The only caller of it in the image is __os_unfair_lock_lock_slow at 0x2575:
+
+```
+    2568: 48 83 f8 00          cmpq  $0x0, %rax
+    256c: 0f 84 08 00 00 00    je    0x257a
+    2572: 8b 7d f0             movl  -0x10(%rbp), %edi
+    2575: e8 b6 5c 00 00 00    callq __os_unfair_lock_recursive_abort
+    257a: 8b 45 e8             movl  -0x18(%rbp), %eax
+```
+
+Path: `_os_unfair_lock_lock` (0x23b0) fails its `cmpxchgl` (0x2405) and calls
+`__os_unfair_lock_lock_slow` (0x246b) with esi=0, edx=tid; in the slow path the
+word is loaded (0x24db), `orl $1` (0x2515), compared against the tid at
+`cmpl -0x10(%rbp), %ecx` (0x2520), and when they are equal and the
+0x1000000 option is clear the flag at -0x34(%rbp) is 1, so `je 0x257a` (0x256c)
+is not taken and 0x2575 calls the abort.
+
+**Condition (words):** the abort is a *recursive* lock — the lock word's owner
+(old with bit 0 set, `old|1`) equals the calling thread's id; a thread that
+already owns the lock takes it again. rdi at the abort is that tid (0x307 in
+#103), saved by `movl %edi,-0x4(%rbp)` before the ud2. (The TSD id 0x307 is not
+the host `thr_self` 0x18ae5 that #103 also printed — the two are different id
+spaces; the condition uses the TSD id.)
+
+### Result (2) — +0x257a is inside __os_unfair_lock_lock_slow
+
+`__os_unfair_lock_lock_slow` spans 0x2480–0x2750 (nm: `t`, local). +0x257a is
+the return address after the `callq __os_unfair_lock_recursive_abort` at 0x2575,
+i.e. the #103 abort stack frame `[rsp+8] libsystem_platform.dylib+0x257a` is
+this slow path: it is the frame that called the abort. Its role: the contended
+path of `_os_unfair_lock_lock`, entered when the fast `cmpxchgl` fails — it
+decides recursion (abort here) versus the wait queue (the `lock`/`ulock`
+sequence at 0x25b1 onward).
+
+### Verdict (one line)
+
+(1) +0x8237 = `__os_unfair_lock_recursive_abort` (0x8230), reached only from
+`__os_unfair_lock_lock_slow` @0x2575; the deciding branch is
+`cmpl -0x10(%rbp),%ecx` (0x2520, `%ecx` = old|1, `-0x10` = the thread's tid) plus
+`je 0x257a` (0x256c): abort when the word's owner equals the calling thread's id
+(recursive lock). (2) +0x257a = `__os_unfair_lock_lock_slow` (0x2480–0x2750),
+the contended slow path of `_os_unfair_lock_lock`, and the abort stack frame is
+exactly its return address after the abort call.
+
+### Repro
+
+```sh
+llvm-nm -n "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -i unfair
+timeout 90 llvm-objdump --macho --disassemble-all \
+  "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -B10 -A6 "8237:"
+timeout 90 llvm-objdump --macho --disassemble-all \
+  "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -B8 -A8 "257a:"
+```
