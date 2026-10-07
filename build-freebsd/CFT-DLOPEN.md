@@ -11044,3 +11044,64 @@ sh build-freebsd/narrow-build-kernel.sh
 llvm-nm -gU "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep -i unfair
 ls -l "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib"
 ```
+
+## Control #116 — SDK base typedefs: i386/_types.h restored and the shim typedefs added; stop on 3 new typedefs
+
+**Date:** 2026-10-07
+**Branch:** task/sdk-types-restore
+**Base:** pr-arm64 = 590642e89ce0725d17cf34f66a7b2440e3ffb970
+
+**Goal:** make the file_handle.c.o object command exit 0 without editing .c
+sources, without invented flags, without libc.
+
+**Step 1 — salvage inventory.** Only one `*.stash` exists
+(`SDK/usr/include/sys/_types/_int64_t.h.stash` = `/* stashed original */`). The
+missing file is not stashed: `machine/_types.h -> xnu/bsd/machine/_types.h`
+includes `i386/_types.h`, and `xnu/bsd/machine/i386/` did not exist. A good copy
+was found at `$DARLING_STAGE/sdkflat/usr/include/i386/_types.h` (defines
+`__int64_t` etc.) and restored to `xnu/bsd/machine/i386/_types.h` by
+`build-freebsd/restore-sdk-types.sh`. Alone it did **not** fix the object.
+
+**Root.** `build-host-tools/freebsd_mig_compat.h` (force-included by the
+toolchain) deliberately defines `_BSD_I386__TYPES_H_` — the comment says "Block
+Darwin's i386/_types.h which redefines __int64_t as long long" — and defines the
+`__darwin_*` types, but **not** the base `__intN_t` typedefs; the FreeBSD
+`sys/_types.h` it expects is shadowed by the Darwin SDK one. The toolchain
+(`build-host-tools/freebsd-nostdinc-toolchain.cmake:52`) sets the same define
+globally. So the SDK's `sys/_types.h` uses `__int64_t` with nothing defining it.
+
+**Step 3 — progress then the stop condition.** Adding the base typedefs to the
+force-included shim drops the object command from **20 errors to 7**:
+```
+i386/types.h:97: typedef redefinition ('u_int64_t' aka 'unsigned long long' vs 'unsigned long')
+sys/_types/_ptrdiff_t.h:32: unknown type name '__darwin_ptrdiff_t'
+sys/_types/_wchar_t.h:34:   unknown type name '__darwin_wchar_t'
+sys/_types/_wint_t.h:32:    unknown type name '__darwin_wint_t'
+file_handle.c:36:27: visibility does not match previous declaration
+```
+That is **3 new missing SDK typedefs** (`__darwin_ptrdiff_t`, `__darwin_wchar_t`,
+`__darwin_wint_t`) plus an `i386/types.h` redefinition — the stop condition (>3
+new incompatible SDK headers after _types.h). This is SDK repair, a separate
+decision. The object still does not compile (exit 1); the link and the #113
+acceptance were not reached.
+
+(The `visibility does not match previous declaration` at file_handle.c:36/37 is
+the #113 `visibility("hidden")` edit meeting an earlier default-visibility
+declaration — noted, not touched here.)
+
+### Verdict (one line)
+
+The missing file was `machine/i386/_types.h` (restored from the stage copy) plus
+the shim's absent base typedefs; with both, the object command goes 20 → 7 errors
+and stops on 3 new SDK typedefs (`__darwin_ptrdiff_t`, `__darwin_wchar_t`,
+`__darwin_wint_t`) — SDK repair, not this step, so no exit 0 and the #113
+acceptance is still pending.
+
+### Repro
+
+```sh
+find "$DARLING_SRC_DIR" -name '*.stash'
+find $DARLING_STAGE -path '*i386/_types.h'
+sh build-freebsd/restore-sdk-types.sh
+ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib | grep 'file_handle.c.o' | tail -1 > /tmp/c.sh; sh /tmp/c.sh
+```
