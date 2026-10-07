@@ -10049,3 +10049,195 @@ FW="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Ve
 llvm-nm "$FW" | grep -E " [Tt] "                                    # 3 exports, no locals
 timeout 90 llvm-objdump --macho --disassemble-all "$FW" | grep -B6 -A4 "8eee7b:"
 ```
+
+## Control #106 — the abort chain's init code: 0x212a8c0 → 0x212aa00 → 0xccdb60 → 0x64d020
+
+**Date:** 2026-10-07
+**Branch:** task/abort-chain-static
+**Base:** pr-arm64 = ae2e6c3533f6674676a2752b0310126e7feed13f
+
+**Goal:** symbolise the rest of the abort call chain from the Chrome Framework
+image (nm is dead — stripped, 3 exports, #105). For 0xccdb60/0xccdb8f (the live
+caller of the init stub 0x64d020, #77): prologue, epilogue, bounds, the body
+around the callq to 0x64d020, and what it does by its calls. Same for the
+cascade frames +0x212ab3f and +0x212a9d2. And the nearest callers of 0xccdb60
+and 0x64d020.
+
+**Method:** full disassembly once, then grep it (each disassembly command under
+timeout):
+```sh
+FW="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+timeout 600 llvm-objdump --macho --disassemble-all "$FW" > /tmp/chrome-disasm.txt
+grep -nE "callq[[:space:]]+0xccdb60([[:space:]]|$)" /tmp/chrome-disasm.txt
+grep -nE "callq[[:space:]]+0x64d020([[:space:]]|$)" /tmp/chrome-disasm.txt
+```
+
+### (1) 0xccdb60 — a constructor, bounds 0xccdb60–0xccdbf6
+
+```
+  ccdb60: 55                pushq %rbp
+  ccdb61: 48 89 e5          movq  %rsp, %rbp
+  ccdb64: 41 57             pushq %r15
+  ccdb66: 41 56             pushq %r14
+  ccdb68: 53                pushq %rbx
+  ccdb69: 50                pushq %rax
+  ccdb6a: 49 89 f6          movq  %rsi, %r14
+  ccdb6d: 48 89 fb          movq  %rdi, %rbx
+  ccdb70: 48 89 37          movq  %rsi, (%rdi)
+  ccdb73: 48 89 57 08       movq  %rdx, 0x8(%rdi)
+  ccdb77: 45 31 ff          xorl  %r15d, %r15d
+  ccdb7a: b8 00 00 00 00    movl  $0x0, %eax
+  ccdb7f: 48 85 d2          testq %rdx, %rdx
+  ccdb82: 75 73             jne   0xccdbf7
+  ccdb84: 89 43 10          movl  %eax, 0x10(%rbx)
+  ccdb87: 44 89 7b 20       movl  %r15d, 0x20(%rbx)
+  ccdb8b: 48 8d 7b 28       leaq  0x28(%rbx), %rdi
+  ccdb8f: e8 8c f4 97 ff    callq 0x64d020
+  ccdb94: 44 89 7b 40       movl  %r15d, 0x40(%rbx)
+  ...  (fields zeroed; movw $0x6e,0x44(%rbx); movq $0xf0000,0x90(%rbx))
+  ccdbec: 48 83 c4 08       addq  $0x8, %rsp
+  ccdbf0: 5b                popq  %rbx
+  ccdbf1: 41 5e             popq  %r14
+  ccdbf3: 41 5f             popq  %r15
+  ccdbf5: 5d                popq  %rbp
+  ccdbf6: c3                retq
+  ccdbf7: 8b 82 10 05 00 00 movl  0x510(%rdx), %eax
+  ccdbfd: eb 85             jmp   0xccdb84
+  ccdbff: cc                int3
+  ccdc00: 0f 0b             ud2
+```
+
+What it does: a constructor — `rdi` is the object (`rbx`), it stores `rsi`/`rdx`
+into (+0)/(+8), copies `rdx->0x510` when `rdx != 0`, zeroes a run of fields
+(0x40, 0x38, 0x3c, 0x44=0x6e, 0x48, 0x50–0x7c, 0x80/0x85, 0x90=0xf0000,
+0x98/0xa8), and fills +0x28 with 16 random bytes via 0x64d020. Two `ud2`s assert
+`rsi != 0` (0xccdbe3) and `rdx == 0` at +8 (0xccdbea).
+
+### (2) 0x64d020 — the callee: 16 random bytes via _getentropy, bounds 0x64d020–0x64d075
+
+```
+  64d020: 55                pushq %rbp
+  64d021: 48 89 e5          movq  %rsp, %rbp
+  64d024: 53                pushq %rbx
+  64d025: 50                pushq %rax
+  64d026: 48 89 fb          movq  %rdi, %rbx
+  64d029: 0f 57 c0          xorps %xmm0, %xmm0
+  64d02c: 0f 11 07          movups %xmm0, (%rdi)
+  64d02f: 48 8d 7d f0       leaq  -0x10(%rbp), %rdi
+  64d033: 48 c7 07 00 00 00 00  movq $0x0, (%rdi)
+  64d03a: be 08 00 00 00    movl  $0x8, %esi
+  64d03f: e8 b2 22 57 0d    callq 0xdbbf2f6 ## symbol stub for: _getentropy
+  64d044: 85 c0             testl %eax, %eax
+  64d046: 75 2e             jne   0x64d076
+  64d048: 48 8d 7d f0       leaq  -0x10(%rbp), %rdi
+  64d04c: 48 8b 07          movq  (%rdi), %rax
+  64d04f: 48 89 03          movq  %rax, (%rbx)
+  64d052: 48 c7 07 00 00 00 00  movq $0x0, (%rdi)
+  64d059: be 08 00 00 00    movl  $0x8, %esi
+  64d05e: e8 93 22 57 0d    callq 0xdbbf2f6 ## symbol stub for: _getentropy
+  64d063: 85 c0             testl %eax, %eax
+  64d065: 75 12             jne   0x64d079
+  64d067: 48 8b 45 f0       movq  -0x10(%rbp), %rax
+  64d06b: 48 89 43 08       movq  %rax, 0x8(%rbx)
+  64d06f: 48 83 c4 08       addq  $0x8, %rsp
+  64d073: 5b                popq  %rbx
+  64d074: 5d                popq  %rbp
+  64d075: c3                retq
+```
+
+It fills the 16-byte object at `rdi` with two 8-byte `_getentropy` draws; a
+failed `_getentropy` hits `ud2` (0x64d076 / 0x64d079).
+
+### (3) +0x212ab3f — inside 0x212aa00, bounds 0x212aa00–0x212abae
+
+```
+ 212aa00: 55                pushq %rbp
+ 212aa01: 48 89 e5          movq  %rsp, %rbp
+ ... (prologue; bzero 0x14f9 and 0x2032; builds the object at %rbx)
+ 212ab35: 48 89 de          movq  %rbx, %rsi
+ 212ab38: 31 d2             xorl  %edx, %edx
+ 212ab3a: e8 21 30 ba fe    callq 0xccdb60
+ 212ab3f: 48 8d bb 78 37 00 00  leaq 0x3778(%rbx), %rdi
+ 212ab46: 48 89 de          movq  %rbx, %rsi
+ 212ab49: 31 d2             xorl  %edx, %edx
+ 212ab4b: e8 10 30 ba fe    callq 0xccdb60
+ 212ab50: 48 8d 05 89 36 ba fe  leaq -0x145c977(%rip), %rax
+ 212ab57: 48 89 83 30 38 00 00  movq %rax, 0x3830(%rbx)
+ 212ab6f: 4c 8d bd 08 ff ff ff  leaq -0xf8(%rbp), %r15
+ 212ab76: ba d5 00 00 00    movl  $0xd5, %edx
+ 212ab7b: 4c 89 ff          movq  %r15, %rdi
+ 212ab7e: 4c 89 f6          movq  %r14, %rsi
+ 212ab81: e8 34 44 a9 0b    callq 0xdbbefba ## symbol stub for: _memcpy
+ 212ab86: 48 89 df          movq  %rbx, %rdi
+ 212ab89: 4c 89 fe          movq  %r15, %rsi
+ 212ab8c: e8 8f 7c 73 ff    callq 0x1862820
+ 212abae: c3                retq
+```
+
+0x212aa00 is a constructor: it zeroes the object (`___bzero` 0x14f9 and 0x2032),
+builds two sub-objects by calling 0xccdb60 twice (targets +0x36c0 and +0x3778 of
+`%rbx`), stores a vtable-like pointer at +0x3830, `_memcpy`s 0xd5 bytes onto the
+stack and tail-calls 0x1862820. +0x212ab3f is the instruction right after the
+first `callq 0xccdb60`.
+
+### (4) +0x212a9d2 — inside 0x212a8c0, bounds 0x212a8c0–0x212a9f9
+
+```
+ 212a8c0: 55                pushq %rbp
+ 212a8c1: 48 89 e5          movq  %rsp, %rbp
+ 212a8c4: 53                pushq %rbx
+ 212a8c5: 48 81 ec e8 00 00 00  subq $0xe8, %rsp
+ ... (checks a global; one-shot cmpxchgb lock 0x212a8f6; fills a struct)
+ 212a9c3: 48 8d 1d b6 be f3 0d  leaq 0xdf3beb6(%rip), %rbx
+ 212a9ca: 48 89 df          movq  %rbx, %rdi
+ 212a9cd: e8 2e 00 00 00    callq 0x212aa00
+ 212a9d2: 48 89 1d 67 be f3 0d  movq %rbx, 0xdf3be67(%rip)
+ 212a9d9: c6 05 20 f7 f3 0d 00  movb $0x0, 0xdf3f720(%rip)
+ 212a9f0: 48 81 c4 e8 00 00 00  addq $0xe8, %rsp
+ 212a9f7: 5b                popq  %rbx
+ 212a9f8: 5d                popq  %rbp
+ 212a9f9: c3                retq
+```
+
+0x212a8c0 is a one-time initializer: it tests a global, takes a one-shot
+`lock cmpxchgb` spinlock, builds a struct, calls 0x212aa00 with the static object
+(`rbx`) and stores the result into the global at 0x212a9d2. +0x212a9d2 is the
+instruction right after `callq 0x212aa00`.
+
+### (5) Nearest callers
+
+`callq 0xccdb60`:
+```
+  ccdb20: e8 3b 00 00 00    callq 0xccdb60     (in the twin of 0x212aa00, epilogue retq 0xccdb59)
+  ccdb31: e8 2a 00 00 00    callq 0xccdb60
+ 212ab3a: e8 21 30 ba fe    callq 0xccdb60     (in 0x212aa00)
+ 212ab4b: e8 10 30 ba fe    callq 0xccdb60     (in 0x212aa00)
+```
+`callq 0x64d020`:
+```
+  64cfa5: e8 76 00 00 00    callq 0x64d020     (twin constructor, 0x64cf78 ff.)
+  ccdb8f: e8 8c f4 97 ff    callq 0x64d020     (in 0xccdb60)
+ 95d44f5: e8 26 8b 07 f7    callq 0x64d020     (init fn after _os_unfair_lock_trylock/0x161ce0)
+```
+Nearest: 0xccdb60 is called by 0xccdb20/0xccdb31 (its twin) and by 0x212ab3a/
+0x212ab4b (in 0x212aa00); 0x64d020 is called by 0x64cfa5 (twin) and by 0xccdb8f
+(in 0xccdb60). All rel32 targets recomputed and consistent (e.g.
+0x212ab3a+5-0x145cfdf = 0xccdb60; 0xccdb8f+5-0x680b74 = 0x64d020).
+
+### Verdict (one line)
+
+The init code on the abort chain is a one-time initializer 0x212a8c0 that builds
+a static object through the constructor 0x212aa00, which constructs two
+sub-objects with 0xccdb60, whose +0x28 field is filled with 16 random bytes by
+0x64d020 → `_getentropy` — i.e. a lazily-initialised global whose 128-bit id
+comes from the kernel CSPRNG, not any lock or user input.
+
+### Repro
+
+```sh
+FW="$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework"
+timeout 600 llvm-objdump --macho --disassemble-all "$FW" > /tmp/chrome-disasm.txt
+grep -nE "callq[[:space:]]+0xccdb60([[:space:]]|$)" /tmp/chrome-disasm.txt
+grep -nE "callq[[:space:]]+0x64d020([[:space:]]|$)" /tmp/chrome-disasm.txt
+grep -A30 "^ *ccdb60:" /tmp/chrome-disasm.txt | head -40
+```
