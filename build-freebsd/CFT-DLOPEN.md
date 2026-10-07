@@ -11804,3 +11804,59 @@ for ld in /usr/local/bin/ld64.lld /usr/local/llvm20/bin/ld64.lld /usr/local/llvm
   # link with -flat_namespace -undefined,suppress -> Segmentation fault
 done
 ```
+
+## Control #129 — dyld-only's own firstpass command also segfaults; crash backtrace
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = d360c9bba5bfec0a404c3e7a425e46e1d3dd5553
+
+**Step 1 — grep quote.** In `$DARLING_BUILD_DIR/dyld-only/build.ninja`:
+```
+28011:build src/external/dyld/libsystem_dyld_firstpass.dylib: CXX_SHARED_LIBRARY_LINKER__system_dyld_firstpass_ src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyldAPIsInLibSystem.cpp.o src/exter
+```
+So dyld-only does have a link target for the dyld firstpass, containing
+`system_dyld_obj.dir/...` objects, with
+`LINK_FLAGS = ... -arch x86_64 -fuse-ld=$BD/dyld-only/src/external/cctools-port/cctools/ld64/src/x86_64-apple-darwin20-ld`.
+
+**Outcome B — it segfaults too.** `ninja -t commands
+src/external/dyld/libsystem_dyld_firstpass.dylib` in dyld-only gives the full
+clang++ link; run **as is**, it dies with the same SIGSEGV and produces no dylib
+(the file does not exist — dyld-only never linked this firstpass either).
+
+**Step 2 — backtrace of the minimal input** (1 object +
+`-flat_namespace -undefined suppress`, lldb on the real `/usr/local/llvm19/bin/lld`
+via core):
+```
+* thread #1, name = 'lld', stop reason = signal SIGSEGV
+  * frame #0: 0x000000000062963d ld64.lld`___lldb_unnamed_symbol7336 + 141
+    frame #1: 0x00000000005fe5e9 ld64.lld`___lldb_unnamed_symbol7079 + 889
+    frame #2: 0x000000000064db45 ld64.lld`lld::elf::InputFile::shouldExtractForCommon(llvm::StringRef) const + 533
+    frame #3: 0x0000000829f8262d libLLVM.so.19.1`___lldb_unnamed_symbol51760 + 45
+    frame #4: 0x0000000829f8250d libLLVM.so.19.1`___lldb_unnamed_symbol51752 + 29
+    frame #5: 0x0000000829f80c05 libLLVM.so.19.1`___lldb_unnamed_symbol51736 + 693
+    frame #6: 0x0000000829f80dc0 libLLVM.so.19.1`___lldb_unnamed_symbol51737 + 48
+    frame #7: 0x0000000822b57e41 libthr.so.3`thread_start at thr_create.c:299:16
+```
+Top-5 named functions: `___lldb_unnamed_symbol7336`, `…7079`,
+`lld::elf::InputFile::shouldExtractForCommon`, `libLLVM …51760`, `…51752`. The
+crash sits in lld's **ELF** input path even on a Mach-O-only command.
+
+### Verdict (one line)
+
+There is no working command: dyld-only's own firstpass link target exists but
+segfaults identically when run as is (no dylib produced), and the minimal-input
+backtrace lands in `lld::elf::InputFile::shouldExtractForCommon` — lld is on its
+ELF path on a Mach-O-only command, which is the next thread to pull.
+
+### Repro
+
+```sh
+cd "$DARLING_BUILD_DIR/dyld-only"
+ninja -t commands src/external/dyld/libsystem_dyld_firstpass.dylib | tail -1 > /tmp/dl.sh; sh /tmp/dl.sh   # SIGSEGV
+ulimit -c unlimited
+/usr/local/llvm19/bin/ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib \
+  -flat_namespace -undefined suppress -o /tmp/t129.dylib \
+  src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o   # SIGSEGV
+lldb /usr/local/llvm19/bin/lld -c lld.core -o bt -o quit -b
+```
