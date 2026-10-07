@@ -9765,3 +9765,87 @@ sh /tmp/stub102-run.sh <diag-dir>/cft102-watch-tid.log
 grep -E "MLDR_TRAP_AT hit|rdi=|watch \+|guest tid|called from" \
   <diag-dir>/cft102-watch-tid.log
 ```
+
+## Control #103 — abort-frame and lock/unlock census: 0x100667a0 is never a lock argument
+
+**Date:** 2026-10-07
+**Branch:** task/abort-lock-owner
+**Base:** pr-arm64 = 29e05d6589b7f435286924d3ea3946c5b2829cac
+
+**Goal:** #102 closed the unlock line for 0x100667a0 (rdi was another word). Open:
+(1) does 0x100667a0 appear at all in a full run as an `_os_unfair_lock_lock` or
+`_os_unfair_lock_unlock` argument (#99's "word stays 0x307" may belong to another
+phase); (2) at the abort frame libsystem_platform.dylib+0x8237, what is rdi, its
+value/owner, the tid, and the return address.
+
+**Method:** one run to abort, event instrumentation: a fatal trap at
+libsystem_platform.dylib+0x8237 (`__os_unfair_lock_recursive_abort`'s ud2) and
+resumable traps at +0x23b1 (`_os_unfair_lock_lock`, movq %rsp,%rbp), +0x28c1
+(`_os_unfair_lock_unlock`, movq %rsp,%rbp) and +0x290b (xchgl %eax,(%rcx) inside
+unlock). A resumable trap reports every hit (hit #N, rdi, guest tid, caller,
+watch) and emulates the overwritten instruction: it is planted as a 2-byte ud2
+on the 3-byte movq (never on the 1-byte pushq, which the ud2 would clobber), so
+the site re-traps on every call. Watch is `Google Chrome for Testing
+Framework+0x100667a0`, resolved through the image registry so it reads the right
+word from a libsystem_platform trap. Run via /tmp/stub103-run.sh, log
+cft103-abort-owner-3.log in the diag directory.
+
+### Table — lock address → hits (from the log's `hit #` lines)
+
+| trap | address in rdi | hits |
+|---|---|---|
+| lock 0x23b1 | 0x32a11b0ff0c0 | 2 |
+| unlock 0x28c1 | 0x32a11b1038e4 | 50 |
+| unlock 0x28c1 | 0x32a11b4b2344 | 22 |
+| unlock 0x28c1 | 0x32a11b0ff0c0 | 2 |
+| unlock 0x28c1 | 0x32a11b103970 | 2 |
+| unlock 0x28c1 | 0x32a11b657fd8 | 2 |
+| unlock 0x28c1 | 0x32a11b658018 | 2 |
+| unlock 0x28c1 | 11 further words | 1 each |
+| xchgl 0x290b | same 21 words as unlock 0x28c1 | 91 total |
+| **word 0x100667a0** (@0x32a12b89a7a0) | — | **0** |
+
+### Verbatim log lines (hit samples, then the abort frame)
+
+```
+[darling-mldr] hit #2 libsystem_platform.dylib+0x23b1 rdi=0x32a11b0ff0c0 tid=0x18ae5 from libsystem_pthread.dylib+0x15bbf watch Google Chrome for Testing Framework+0x100667a0 @0x32a12b89a7a0 = 0x0000000000000000 (ok=1)
+[darling-mldr] hit #90 libsystem_platform.dylib+0x28c1 rdi=0x32a11b1038e4 tid=0x18ae5 from libsystem_c.dylib+0x67600 watch Google Chrome for Testing Framework+0x100667a0 @0x32a12b89a7a0 = 0x0000000000000000 (ok=0)
+[darling-mldr] hit #91 libsystem_platform.dylib+0x28c1 rdi=0x32a12b69dd48 tid=0x18ae5 from libsystem_pthread.dylib+0x119fb watch Google Chrome for Testing Framework+0x100667a0 @0x32a12b89a7a0 = 0x0000000000000000 (ok=1)
+
+[darling-mldr] === MLDR_TRAP_AT hit #1: libsystem_platform.dylib+0x8237 ===
+  rdi=0x307 rsi=0x50000 rdx=0x307 rcx=0x307 rax=0x1
+  guest tid = 0x18ae5
+  called from 0x7fffffdfd790 <unknown>
+  stack slots resolving into known images:
+    [rsp+  8] libsystem_platform.dylib+0x257a
+    [rsp+ 48] Google Chrome for Testing Framework (data)+0x119d40
+    [rsp+168] libsystem_platform.dylib+0x2814
+    [rsp+280] Google Chrome for Testing Framework+0x161e42
+    [rsp+328] Google Chrome for Testing Framework+0x8eeeeb
+    [rsp+360] Google Chrome for Testing Framework+0x8eedd6
+  watch Google Chrome for Testing Framework+0x100667a0 @0x32a12b89a7a0 = 0x0000000100000307 (ok=1)
+```
+
+### Verdict (one line)
+
+(1) 0x100667a0 is **never** a lock or unlock argument in this run (0 of 93
+trapped calls) — #99's "the unlock executes but the word stays 0x307" does not
+reproduce here: the word 0x100667a0 = 0x0000000100000307 is set by something
+other than `_os_unfair_lock_lock`/`_os_unfair_lock_unlock` (their 93 calls
+target 21 other words), so the #99 observation is an artifact of another phase
+or another primitive. (2) At the abort frame +0x8237, **rdi = 0x307 is not a
+pointer** (it is the abort's owner argument, so *rdi is unreadable); the live
+lock word is the watch, 0x0000000100000307, guest tid = 0x18ae5, return address
+0x7fffffdfd790 (unresolved), and the stack runs lock slow path
+(libsystem_platform+0x257a) up into Chrome at +0x8eeeeb/+0x8eedd6 — the frontier
+is the lock's owner at abort, not the word 0x100667a0.
+
+### Repro
+
+```sh
+sh /tmp/stub103-run.sh <diag-dir>/cft103-abort-owner-3.log
+grep -E "hit #|MLDR_TRAP_AT hit #1: libsystem_platform.dylib\+0x8237" \
+  <diag-dir>/cft103-abort-owner-3.log | tail -5
+grep -c "rdi=0x32a12b89a7a0" <diag-dir>/cft103-abort-owner-3.log   # 0
+```
+(requires an mldr built with the resumable-trap patch — build-freebsd/build-mldr-only.sh)
