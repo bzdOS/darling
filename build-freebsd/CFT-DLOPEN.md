@@ -12066,3 +12066,52 @@ llvm-objdump -d --start-address=0x6964a0 --stop-address=0x6964c0 /usr/local/llvm
 lldb /usr/local/llvm21/bin/lld -c "$DARLING_BUILD_DIR/lld.core" \
   -o 'frame select 0' -o 'register read rdi rcx rax rbx rsi' -o quit -b
 ```
+
+## Control #134 — field +0x10 owner is stripped; the culprit section is __text
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = c27959db9cc7d6762bf3545940e2f44590442bac
+
+**Step 1 — the +0x10 field and the vtable slot.**
+```
+memory read -f x -s 8 -c 8  0x3897f82f6930   (this, a ConcatInputSection)
+  +0x00: 0x000000000076e7f0   (vtable for lld::macho::ConcatInputSection + 16)
+  +0x08: 0x0000000800000000
+  +0x10: 0x0000000000000000   <-- the NULL that rcx holds
+  +0x18: 0x00003897f82f09d8
+  +0x20: 0x0000000000000008   ... rest zero
+memory read -f x -s 8 -c 10 0x76e7f0         (vtable)
+  +0x00: 0x6659d0  +0x08: 0x665a40  +0x10: 0x664e10  +0x18: 0x664e20
+  +0x20: 0x665ac0  <-- *0x20(%rax), the call target in getVA (0x6964b1)
+```
+`0x665ac0` is `___lldb_unnamed_symbol7928` (range 0x665ab0–0x665d50) — **stripped**;
+its body is a trivial getter (`movzbl 0x61(%rdi), %eax; retq`). The binary has no
+symbol naming the owner of field +0x10, so the owner cannot be named from this
+core.
+
+**Step 2 — culprit section.** The object has two sections (`__text`, `__data`).
+`llvm-objcopy --remove-section` and relink (per #127):
+```
+remove __TEXT,__text  -> link succeeds, NO segfault
+remove __DATA,__data  -> refused (symbols referenced by __text relocations)
+```
+So the culprit is the **`__text`** section: its presence is what triggers the
+SIGSEGV; `__data` alone cannot be removed, so it cannot be exonerated this way.
+
+### Verdict (one line)
+
+The vtable slot that `getVA` calls (`*0x20(%rax)` = 0x665ac0) is a stripped
+trivial getter (`___lldb_unnamed_symbol7928`) and does not name the owner of the
+NULL field +0x10, and the culprit section is `__text` (removing it removes the
+segfault; `__data` cannot be removed alone) — the section answer is positive, the
+owner-name answer is blocked by the stripped binary.
+
+### Repro
+
+```sh
+lldb /usr/local/llvm21/bin/lld -c "$DARLING_BUILD_DIR/lld.core" \
+  -o 'memory read -f x -s 8 -c 8 0x3897f82f6930' \
+  -o 'memory read -f x -s 8 -c 10 0x76e7f0' -o 'image lookup -va 0x665ac0' -o quit -b
+llvm-objcopy --remove-section __TEXT,__text /tmp/o.o   # relink -> no segfault
+```
