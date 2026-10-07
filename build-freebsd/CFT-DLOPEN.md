@@ -12179,3 +12179,63 @@ sed -n '91,93p' /usr/src/contrib/llvm-project/lld/MachO/InputSection.cpp
 sed -n '45,64p' /usr/src/contrib/llvm-project/lld/MachO/InputSection.cpp
 sed -n '76,96p' /usr/src/contrib/llvm-project/lld/MachO/InputSection.h
 ```
+
+## Control #136 — call-site of the crashing getVA, and the coalescing condition
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 34d383e249e1231e9e70b503feb960dea8d4e97c
+
+**Step 1 — the call-site.** objdump around the call (PC #1 = 0x668c09):
+```
+668bf8: 8b bf 90 00 00 00    movl  0x90(%rdi), %edi
+668bfe: 4c 8b 68 38          movq  0x38(%rax), %r13
+668c02: 31 f6                xorl  %esi, %esi
+668c04: e8 97 d8 02 00       callq 0x6964a0 <lld::macho::InputSection::getVA(unsigned long) const>
+```
+This matches `lld/MachO/Arch/X86_64.cpp:159` in `X86_64::writeStubHelperHeader`:
+```
+155  void X86_64::writeStubHelperHeader(uint8_t *buf) const {
+156    memcpy(buf, stubHelperHeader, sizeof(stubHelperHeader));
+157    SymbolDiagnostic d = {nullptr, "stub helper header"};
+158    writeRipRelative(d, buf, in.stubHelper->addr, 7,
+159                     in.imageLoaderCache->getVA());          <-- call-site
+160    writeRipRelative(d, buf, in.stubHelper->addr, 0xf, ...);
+```
+So `this` passed to `getVA` is **`in.imageLoaderCache`** (a synthetic
+`ConcatInputSection*` — `SyntheticSections.h:860`, created at `Writer.cpp:1381`).
+(The objdump symbol on 0x668c09 says `createX86_64TargetInfo`, but that is the
+ICF/mislabel class of #132/#135: the code at that address is the
+`writeStubHelperHeader` body.)
+
+**Step 2 — the coalescing condition.** `isCoalescedWeak()` is
+`wasCoalesced && symbols.empty()` (`InputSection.h:116`), and `wasCoalesced` is
+set in `SymbolTable::addDefined` (`lld/MachO/SymbolTable.cpp:96`):
+```
+118  if (auto concatIsec = dyn_cast_or_null<ConcatInputSection>(isec)) {
+119    concatIsec->wasCoalesced = true;        // weak definition already present
+...
+134    concatIsec->wasCoalesced = true;        // defined is weak, this one prevails
+```
+i.e. when a weak definition (or an already-coalesced one) meets another, the
+losing `ConcatInputSection` gets `wasCoalesced = true`; if all its symbols were
+transplanted away (`symbols.empty()`), `isCoalescedWeak()` is true, so
+`addInputSection` (`InputSection.cpp:47`) returns before `isec->parent = osec`
+and `parent` stays NULL.
+
+### Verdict (one line)
+
+The crashing `getVA` is called at `lld/MachO/Arch/X86_64.cpp:159`
+(`in.imageLoaderCache->getVA()`) inside `X86_64::writeStubHelperHeader` (matching
+the objdump at 0x668bf8–0x668c04), and the coalescing that leaves `parent` NULL is
+set in `SymbolTable::addDefined` (`SymbolTable.cpp:118`/`:134`, weak-definition
+coalescing → `wasCoalesced = true` → `isCoalescedWeak()` → `addInputSection`
+early return).
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x668bf0 --stop-address=0x668c20 /usr/local/llvm21/bin/lld
+sed -n '155,161p' /usr/src/contrib/llvm-project/lld/MachO/Arch/X86_64.cpp
+sed -n '105,140p' /usr/src/contrib/llvm-project/lld/MachO/SymbolTable.cpp
+```
