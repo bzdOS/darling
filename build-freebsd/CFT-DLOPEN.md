@@ -10818,3 +10818,84 @@ grep -E "stub jmp|code @rip" <diag-dir>/cft112-stub.log
 timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" \
   | sed -n '/^_os_unfair_lock_unlock:/,/^_os_unfair_lock_lock:/p'
 ```
+
+## Control #113 — the empty unlock is a weak export of libsystem_kernel; fix applied, rebuild blocked
+
+**Date:** 2026-10-07
+**Branch:** task/unlock-bind-platform
+**Base:** pr-arm64 = 2ad9887454a09ceb0732fc6ca9410e105e45482f
+
+**Goal:** #112 showed the Chrome stub 0xdbbeffc binds to an empty
+`_os_unfair_lock_unlock` in libsystem_kernel (0x4af70) instead of
+libsystem_platform's real one (0x28c0/0x290b). Find where the empty copy is born
+and fix the export/bind (not mldr, not the traps).
+
+**Method:** `llvm-nm` the built libsystem_kernel; grep the Darling tree for
+`os_unfair_lock`.
+
+### (a) where the empty copy is born — the tree, not a generator
+
+```
+$ llvm-nm "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep unfair
+000000000004af80 T _os_unfair_lock_lock
+000000000004af70 T _os_unfair_lock_unlock
+
+$ grep -rn "os_unfair_lock_unlock" src/external/xnu/darling/src/libsystem_kernel
+.../linux_premigration/ext/file_handle.c:32:  void __attribute__((weak)) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
+.../xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.c:87: void __attribute__((weak)) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
+```
+
+Two files under xnu's libsystem_kernel emulation define
+`_os_unfair_lock_unlock`/`_os_unfair_lock_lock` as **weak empty stubs** (for
+intra-dylib use by `g_savedRefLock` / `workq_parked_lock`). As exported weak
+symbols they enter libsystem_kernel's export trie, and the Chrome stub's lazy
+pointer binds to that empty copy rather than to libsystem_platform's real
+implementation. This is branch **(a)** (the tree), not (b) (a stub generator).
+
+### (b) the fix
+
+Mark both definitions hidden, so they stay for intra-dylib linking but are not
+exported — the stub then binds to libsystem_platform:
+
+```c
+void __attribute__((weak, visibility("hidden"))) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
+void __attribute__((weak, visibility("hidden"))) os_unfair_lock_lock(os_unfair_lock_t lock) {}
+```
+
+Applied to both files; `build-freebsd/fix-unlock-export.sh` applies it
+idempotently. The files are in the **src/external/xnu submodule**, so the change
+cannot be committed from the parent tree — hence the script.
+
+### (c) rebuild — blocked in this environment
+
+```
+$ ninja src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib
+CMake Error at src/CMakeLists.txt:202 (add_subdirectory):
+  The source directory $DARLING_SRC_DIR/src/external/Libinfo does not contain
+  a CMakeLists.txt file.
+```
+
+ninja regenerates build.ninja and CMake fails: the tree is missing submodules
+(Libinfo and siblings). libsystem_kernel cannot be relinked here, so the
+acceptance run (`sh /tmp/stub112-run.sh …`) was **not** executed and the fix is
+**not yet verified** — the empty copy is still in the overlay's
+libsystem_kernel.dylib (dated 2026-09-30).
+
+### Verdict (one line)
+
+**(a) confirmed:** the empty `_os_unfair_lock_unlock` is the exported weak stub
+in xnu's libsystem_kernel emulation (file_handle.c, workq_kernreturn.c); the fix
+is to mark both hidden (applied via `build-freebsd/fix-unlock-export.sh`), but
+the rebuild is blocked because the tree lacks the Libinfo submodule that CMake
+regeneration needs — the run is pending that rebuild, word 0x100667a0 stays the
+frontier.
+
+### Repro
+
+```sh
+llvm-nm "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep unfair
+grep -rn "os_unfair_lock_unlock" "$DARLING_SRC_DIR/src/external/xnu/darling/src/libsystem_kernel"
+sh "$DARLING_SRC_DIR/build-freebsd/fix-unlock-export.sh"
+# after a full tree rebuild:
+sh /tmp/stub112-run.sh <diag-dir>/cft113-unlock-bind.log
+```
