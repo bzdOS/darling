@@ -11962,3 +11962,54 @@ grep -c $'\x7f\x45\x4c\x46' src/external/dyld/CMakeFiles/system_dyld_obj.dir/src
 readlink -f /usr/local/llvm19/bin/ld64.lld; cmp /usr/local/llvm19/bin/ld64.lld /usr/local/llvm19/bin/lld
 lld -flavor ld64 -arch x86_64 -platform_version macos 11.0 11.0 -dylib -flat_namespace -undefined suppress -o /tmp/x <binder.o>  # SIGSEGV
 ```
+
+## Control #132 — the elf::* frame names are a mislabel; the real code is lld::macho
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 2bf352f45544d3960db338a67b9d4da61b08d09e
+
+**Goal:** decide whether the `lld::elf::*` frames are real ELF functions or a
+strip/ICF mislabel, by disassembling the frames' addresses on the llvm21 binary
+(which has a symbol table).
+
+**PCs of the crash** (`lldb /usr/local/llvm21/bin/lld -c lld.core`, minimal
+input from #130):
+```
+#0 0x6964ad   #1 0x668c09   #2 0x6c6ed5
+```
+
+**Disassembly (llvm-objdump -d, the authoritative symbol at that address):**
+```
+#1  0x668c09 is inside  lld::macho::createX86_64TargetInfo()  [0x668810]
+    668c04: e8 97 d8 02 00   callq 0x6964a0 <lld::macho::InputSection::getVA(unsigned long) const>
+    668c09: 48 c7 45 88 00 00 00 00  movq $0x0, -0x78(%rbp)
+
+#2  0x6c6ed5 is inside  lld::macho::StubHelperSection::writeTo(unsigned char*)  [0x6c6eb0]
+    6c6ec5: 48 8d 05 9c ee 0b 00  leaq 0xbee9c(%rip), %rax   # lld::macho::target
+    6c6ed2: ff 50 28              callq *0x28(%rax)
+    6c6ed5: 48 8d 05 a4 ed 0b 00  leaq 0xbeda4(%rip), %rax   # lld::macho::in
+```
+
+`lldb`'s `image lookup -va 0x668c09` reports
+`lld::elf::writeARMCmseImportLib<…>` and `0x6c6ed5` reports
+`lld::elf::InputSection::copyRelocations<…>`, but the disassembly at those exact
+addresses is `lld::macho::createX86_64TargetInfo` and
+`lld::macho::StubHelperSection::writeTo` — real Mach-O code, with calls to
+`lld::macho::InputSection::getVA` and `lld::macho::target`/`lld::macho::in`.
+
+### Verdict (one line)
+
+The `lld::elf::*` frame names are a **mislabel** (the debugger's symbolization
+disagrees with the disassembly at the same PC): the real code at PC #1/#2 is
+`lld::macho::createX86_64TargetInfo` and `lld::macho::StubHelperSection::writeTo`
+— Mach-O lld code — so the "ELF path" is a symbolization artifact, not an ELF
+code path.
+
+### Repro
+
+```sh
+lldb /usr/local/llvm21/bin/lld -c "$DARLING_BUILD_DIR/lld.core" -o bt -o 'image lookup -va 0x668c09' -o quit -b
+llvm-objdump -d --start-address=0x668bf0 --stop-address=0x668c30 /usr/local/llvm21/bin/lld
+llvm-objdump -d --start-address=0x6c6eb0 --stop-address=0x6c6ee0 /usr/local/llvm21/bin/lld
+```
