@@ -10965,3 +10965,82 @@ git ls-remote git@github.com:bzdOS/darling-Libinfo.git    # Repository not found
 sh build-freebsd/prepare-libinfo-stub.sh
 ninja src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib
 ```
+
+## Control #115 — narrow libsystem_kernel build hits the SDK header root: __int64_t is undefined
+
+**Date:** 2026-10-07
+**Branch:** task/kernel-dylib-narrow
+**Base:** pr-arm64 = 825152664f00ddf9df57bce8cc5b9573953179e2
+
+**Goal:** rebuild libsystem_kernel.dylib without a full tree build — run only its
+object commands from ninja, then the link command by hand, and check that the
+hidden fix removed the export.
+
+**Method:** `ninja -t commands` for the libsystem_kernel target, filtered to its
+own objects; `build-freebsd/narrow-build-kernel.sh` runs exactly those.
+
+### Step 1 — the object commands themselves fail (stop condition)
+
+970 commands name `xnu/darling/src/libsystem_kernel`; the object command for
+`file_handle.c.o` (the file #113 patched) was run verbatim and fails immediately:
+
+```
+In file included from .../file_handle.c:1:
+In file included from .../SDK/usr/include/darling/emulation/linux_premigration/ext/file_handle.h:4:
+In file included from .../SDK/usr/include/stdint.h:52:
+.../SDK/usr/include/sys/_types.h:56:9: error: unknown type name '__int64_t'
+   56 | typedef __int64_t       __darwin_blkcnt_t;      /* total blocks */
+```
+
+This is the stop condition "the object commands themselves fail on SDK
+sys/_types.h (__int64_t)" — a **different root** from the Libinfo submodule. Step
+2 (the link) was not reached.
+
+### The root — mismatched SDK headers
+
+`sys/_types.h` uses `__int64_t` but nothing defines it:
+
+```
+sys/_types.h:32  #include <sys/cdefs.h>
+sys/_types.h:33  #include <machine/_types.h>
+sys/_types.h:56  typedef __int64_t __darwin_blkcnt_t;
+machine/_types.h -> xnu/bsd/machine/_types.h -> "i386/_types.h"
+   (xnu/bsd/machine/i386/_types.h: No such file)
+xnu/bsd/sys/_types/_int64_t.h:  typedef long long int64_t;   ## int64_t, NOT __int64_t
+```
+
+`sys/_types/_int64_t.h` (a symlink into xnu) defines `int64_t`, not the
+`__int64_t` the SDK's `sys/_types.h` wants, and `machine/i386/_types.h` is
+missing — the salvaged SDK headers are internally inconsistent. (A sibling
+`_int64_t.h.stash` holding `/* stashed original */` marks the salvage.) The
+overlay's libsystem_kernel was built 2026-09-30, before this state.
+
+### Step 2 / acceptance — not reached
+
+```
+$ llvm-nm -gU "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep -i unfair
+000000000004af80 T _os_unfair_lock_lock
+000000000004af70 T _os_unfair_lock_unlock
+$ ls -l "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib"
+-rwxrwxr-x 1 freebsd fleet 1881504 Sep 30 06:11 .../libsystem_kernel.dylib
+```
+
+Contrast (the 2026-09-30 overlay) shows both symbols still exported; the rebuilt
+dylib does not exist, so `llvm-nm -gU <rebuilt>` was not run.
+
+### Verdict (one line)
+
+The narrow build stops on the object commands: the salvaged SDK headers use
+`__int64_t` while the only `_int64_t.h` defines `int64_t` (and `machine/i386/
+_types.h` is missing), so no libsystem_kernel object compiles here — a different
+root from Libinfo, and the #113 export fix stays unverified; the overlay's
+2026-09-30 dylib (both symbols exported) is untouched.
+
+### Repro
+
+```sh
+ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib | grep xnu/darling/src/libsystem_kernel | grep -- -c | head
+sh build-freebsd/narrow-build-kernel.sh
+llvm-nm -gU "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib" | grep -i unfair
+ls -l "$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib"
+```
