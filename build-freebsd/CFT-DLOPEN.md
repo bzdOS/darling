@@ -12115,3 +12115,67 @@ lldb /usr/local/llvm21/bin/lld -c "$DARLING_BUILD_DIR/lld.core" \
   -o 'memory read -f x -s 8 -c 10 0x76e7f0' -o 'image lookup -va 0x665ac0' -o quit -b
 llvm-objcopy --remove-section __TEXT,__text /tmp/o.o   # relink -> no segfault
 ```
+
+## Control #135 — field +0x10 is InputSection::parent; the NULL comes from addInputSection's early return
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 090f6faaf2574a6d01611f81d9efdd252fdd7d1b
+
+**Step 1 — local sources.** `/usr/src/contrib/llvm-project/lld/MachO/` is present
+on the box (no network needed).
+
+**Step 2 — the field, by layout + numeric match with the #134 core.**
+`InputSection` members in declaration order (`lld/MachO/InputSection.h`):
+```
+  virtual ~InputSection();  virtual uint64_t getSize(); ...   -> vptr at +0x00
+  Kind sectionKind;                                           -> +0x08
+  bool isFinal = false;                                       -> +0x09
+  bool keepUnique : 1; bool hasAltEntry : 1;                  -> +0x0a
+  uint32_t align = 1;                                         -> +0x0c
+  OutputSection *parent = nullptr;                            -> +0x10
+  ArrayRef<uint8_t> data; std::vector<Reloc> relocs; ...
+```
+so `parent` (OutputSection*) sits at **+0x10** — exactly the field the #134 core
+shows as NULL (`rcx = *(this+0x10) = 0`). And `getVA` is:
+```
+lld/MachO/InputSection.cpp:91
+  uint64_t InputSection::getVA(uint64_t off) const {
+    return parent->addr + getOffset(off);
+  }
+```
+`parent->addr` is the `movq 0x38(%rcx)` at PC 0x6964ad: `rcx = parent = NULL`, so
+the fault is `parent->addr` on a null `parent`. (The `callq *0x20(%rax)` in getVA
+is the virtual `getOffset`.)
+
+**Step 3 — the path that leaves parent NULL.**
+```
+lld/MachO/InputSection.cpp:45
+  void lld::macho::addInputSection(InputSection *inputSection) {
+    if (auto *isec = dyn_cast<ConcatInputSection>(inputSection)) {
+      if (isec->isCoalescedWeak())
+        return;                       // <-- returns before setting parent
+      ...
+      auto *osec = ConcatOutputSection::getOrCreateForInput(isec);
+      isec->parent = osec;            // the normal path (also Driver.cpp:647)
+```
+When `isec->isCoalescedWeak()` is true (`wasCoalesced && symbols.empty()`) the
+function returns **before** `isec->parent = osec` (InputSection.cpp:47-48), so
+`parent` stays nullptr and `getVA` dereferences it.
+
+### Verdict (one line)
+
+Field +0x10 is `InputSection::parent` (OutputSection*) — matched numerically
+(`parent` at +0x10 in the layout, NULL in the core, `parent->addr` = the +0x38
+deref at 0x6964ad) — and it is left NULL because
+`lld::macho::addInputSection` returns early on `isec->isCoalescedWeak()`
+(InputSection.cpp:47) before `isec->parent = osec`; the crash is a null `parent`
+in `InputSection::getVA` (InputSection.cpp:91).
+
+### Repro
+
+```sh
+sed -n '91,93p' /usr/src/contrib/llvm-project/lld/MachO/InputSection.cpp
+sed -n '45,64p' /usr/src/contrib/llvm-project/lld/MachO/InputSection.cpp
+sed -n '76,96p' /usr/src/contrib/llvm-project/lld/MachO/InputSection.h
+```
