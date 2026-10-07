@@ -16,6 +16,34 @@
 #define _BSD_I386__TYPES_H_
 #endif
 
+/* Control #117: because i386/_types.h is blocked above, this shim must supply
+   the FULL set of types the SDK headers take from it — the base integer
+   typedefs and the __darwin_* derived ones. */
+typedef signed char        __int8_t;
+typedef unsigned char      __uint8_t;
+typedef short              __int16_t;
+typedef unsigned short     __uint16_t;
+typedef int                __int32_t;
+typedef unsigned int       __uint32_t;
+typedef long long          __int64_t;
+typedef unsigned long long __uint64_t;
+
+#ifndef __darwin_ptrdiff_t
+#ifdef __LP64__
+typedef long                __darwin_ptrdiff_t;
+#else
+typedef int                 __darwin_ptrdiff_t;
+#endif
+#endif
+
+#ifndef __darwin_wchar_t
+typedef int                 __darwin_wchar_t;
+#endif
+
+#ifndef __darwin_wint_t
+typedef int                 __darwin_wint_t;
+#endif
+
 /* Darwin-specific types that mach headers need */
 #ifndef __darwin_natural_t
 typedef unsigned int        __darwin_natural_t;
@@ -62,10 +90,12 @@ typedef unsigned int        __darwin_size_t;
 typedef struct fsid { long val[2]; } fsid_t;
 #endif
 
-/* user_addr_t — used by mach/shared_region.h, not in flat SDK */
+/* user_addr_t — Control #117: left to the SDK's i386/types.h, which defines it
+   as u_int64_t (unsigned long long on the Darwin ABI). Defining it here as
+   `unsigned long` collided with that (i386/types.h:97 typedef redefinition).
+   The _USER_ADDR_T guard is kept so FreeBSD headers stay blocked. */
 #ifndef _USER_ADDR_T
 #define _USER_ADDR_T
-typedef unsigned long user_addr_t;
 #endif
 
 /* proc_regionfilename and abort_with_payload — Darwin syscalls not in flat SDK */
