@@ -11557,3 +11557,51 @@ link from the thin `<obj>.x86_64.o` rather than the fat `<obj>.o`.
 file "$DARLING_BUILD_DIR/dyld-only/src/external/libc/libsystem_c_firstpass.dylib"   # thin x86_64
 grep -oE 'Wl,-platform_version[^ ]+' "$DARLING_BUILD_DIR/dyld-only/build.ninja" | sort -u
 ```
+
+## Control #124 — thin x86_64 dyld link: ld64.lld still segfaults, now inside the ELF path
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 84a0e02035367f24a950e130fe558a8c3a70baf7
+
+**Goal:** link libsystem_dyld_firstpass as a thin x86_64 dylib from the per-slice
+objects, using ld64.lld with `-Wl,-platform_version,macos,11.0,11.0`.
+
+**Step.** From the dyld firstpass link command: replace every fat `<obj>.o` with
+the existing thin `<obj>.o.x86_64.o`, `-fuse-ld=/usr/local/bin/ld64.lld`, strip
+all `-arch` and add a single `-arch x86_64 -Wl,-platform_version,macos,11.0,11.0`
+(other link flags unchanged). It **still segfaults**:
+```
+c++: error: unable to execute command: Segmentation fault (core dumped)
+```
+Thin objects, one arch, platform `macos` — none of it changed the outcome.
+
+**First frame of the new core** (`lld.core`, lldb on the real binary
+`/usr/local/llvm19/bin/lld`):
+```
+* thread #1, name = 'lld', stop reason = signal SIGSEGV
+  * frame #0: 0x000000000062963d ld64.lld`___lldb_unnamed_symbol7336 + 141
+    frame #1: 0x00000000005fe5e9 ld64.lld`___lldb_unnamed_symbol7079 + 889
+    frame #2: 0x000000000064db45 ld64.lld`lld::elf::InputFile::shouldExtractForCommon(...) const + 533
+    frame #3: libLLVM.so.19.1`...
+```
+The crash is in **lld's ELF path** (`lld::elf::InputFile::shouldExtractForCommon`)
+— ld64.lld is treating one of the inputs as an ELF file. That points at a
+non-Mach-O input on the command line (a host/native library or object), not at
+the objects we just made.
+
+**argv diff vs dyld-only.** No working dyld-only link command for
+libsystem_dyld_firstpass was found in its build.ninja (dyld-only built the other
+firstpass dylibs, not this one), so there is no direct argv to diff against yet.
+
+### Verdict (one line)
+
+The thin x86_64 dyld link with ld64.lld still segfaults, now demonstrably inside
+lld's ELF path (`shouldExtractForCommon`) — one input is being read as ELF, which
+is the next thing to pin down; dyld still not built.
+
+### Repro
+
+```sh
+lldb /usr/local/llvm19/bin/lld -c "$DARLING_BUILD_DIR/lld.core" -o bt -o quit -b
+```
