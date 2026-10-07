@@ -11760,3 +11760,47 @@ llvm-objcopy --remove-section __TEXT,__text /tmp/o.o   # from $O
 # swap it into the link command, run -> no segfault
 llvm-objcopy --remove-section __DATA,__data /tmp/o.o   # refused (relocation)
 ```
+
+## Control #128 — no working link command for the 1-object input; outcome matrix
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 93205136f8c72315e4471cde744e2f95b96f8d95
+
+**Goal:** on the minimal input (#126: the single object
+`dyld_stub_binder.S.o.x86_64.o`) find a link command that builds a valid dylib
+without segfault.
+
+**Outcome matrix** (input = that one object, `-arch x86_64
+-Wl,-platform_version,macos,11.0,11.0`):
+
+| command | outcome |
+|---|---|
+| `-fuse-ld=ld64.lld` + `-flat_namespace` + `-undefined,suppress` | SIGSEGV |
+| `-fuse-ld=ld64.lld` + `-flat_namespace` + `-undefined,dynamic_lookup` | SIGSEGV |
+| `-fuse-ld=ld64.lld` + `-undefined,dynamic_lookup` (no flat) | SIGSEGV |
+| `-fuse-ld=ld64.lld` + `-undefined,suppress` (no flat) | no segfault, but no dylib (undefined `dyld_stub_binder` symbols) |
+| cctools `build-host-tools/ld64/x86_64-apple-darwin20-ld` + flat + suppress | SIGILL |
+| `-fuse-ld=/usr/local/llvm20/bin/ld64.lld` + flat + suppress | SIGSEGV |
+| `-fuse-ld=/usr/local/llvm21/bin/ld64.lld` + flat + suppress | SIGSEGV |
+
+No variant produced `/tmp/*.dylib`; `file`/`llvm-nm` have nothing to show. The
+cctools ld64 traps on this input too (same class as #123, now on one object).
+The other LLVM llds (20, 21) behave like 19.
+
+### Verdict (one line)
+
+No link command tried builds a valid dylib from the minimal 1-object input: every
+variant with `-flat_namespace` (and dynamic_lookup without flat) segfaults on all
+three lld versions, cctools ld64 traps (SIGILL), and the only non-crashing variant
+(`-undefined,suppress`, no flat) yields no dylib because the object's symbols
+stay undefined — an honest all-fail matrix, no working command found.
+
+### Repro
+
+```sh
+# input: src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o
+for ld in /usr/local/bin/ld64.lld /usr/local/llvm20/bin/ld64.lld /usr/local/llvm21/bin/ld64.lld; do
+  # link with -flat_namespace -undefined,suppress -> Segmentation fault
+done
+```
