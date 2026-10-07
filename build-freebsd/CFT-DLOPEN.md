@@ -11605,3 +11605,55 @@ is the next thing to pin down; dyld still not built.
 ```sh
 lldb /usr/local/llvm19/bin/lld -c "$DARLING_BUILD_DIR/lld.core" -o bt -o quit -b
 ```
+
+## Control #125 — bisection: the dyld-link segfault needs -flat_namespace + -undefined,suppress
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = abbed5c68e54edea4841a7e0b616485bb82ba736
+
+**Goal:** bisect the thin dyld link inputs to the minimal crashing set.
+
+**1) The driver.** `ld64.lld` (a wrapper → `/usr/local/llvm19/bin/lld`) is the
+Mach-O driver and needs both flags:
+```
+$ ld64.lld -v                     -> error: must specify -arch
+$ ld64.lld -v -arch x86_64        -> error: must specify -platform_version
+$ ld64.lld --version              -> LLD 19.1.7
+$ ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib -o x   -> ok
+```
+So the ELF-looking frame was not a wrong driver — same driver, correct form.
+
+**2) Our thin objects alone do not crash.** Linking only the 28
+`<obj>.o.x86_64.o` with the right driver form gives ordinary
+`undefined symbol` errors, no segfault.
+
+**3) Bisection (through the clang driver, where `-Wl,` is valid).** Dropping the
+144 `-Wl,-dylib_file` args changes nothing (still segfault); `-dylib_file` alone
+is a no-op in ld64.lld ("not yet implemented"). The segfault needs **both**
+`-Wl,-flat_namespace` **and** `-Wl,-undefined,suppress`:
+```
+objs + flat_namespace + undefined,suppress  -> SIGSEGV
+objs + undefined,suppress  (no flat)        -> no segfault
+objs + flat_namespace      (no undefined)   -> no segfault
+objs alone                                  -> no segfault (undefined symbols)
+```
+
+**Minimal crashing set:** the 28 thin dyld objects + `-Wl,-flat_namespace` +
+`-Wl,-undefined,suppress` (removing either flag removes the crash). The
+`shouldExtractForCommon` frame is treated as a hypothesis (ICF may mislabel).
+
+### Verdict (one line)
+
+The segfault is not in our objects, not in `-dylib_file` (a no-op here), and not
+a wrong driver — it needs the pair `-flat_namespace` + `-undefined,suppress`
+together with the dyld objects; that pair is the minimal crashing set, and
+dropping either flag links (or fails on symbols) without crashing.
+
+### Repro
+
+```sh
+OBJS=$(grep -oE '[^ ]+\.o ' /tmp/l124.sh | sed 's/ $//;s/$/.x86_64.o/' | tr '\n' ' ')
+ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib -o x $OBJS   # no segfault
+# through clang with -Wl,-flat_namespace -Wl,-undefined,suppress -> SIGSEGV
+```
