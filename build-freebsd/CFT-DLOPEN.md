@@ -11157,3 +11157,57 @@ ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel
   | grep 'file_handle.c.o' | grep -- -c | tail -1 > /tmp/c.sh
 sh /tmp/c.sh            # 2 visibility errors at file_handle.c:36/37, exit 1
 ```
+
+## Control #118 — the visibility class is cleared for file_handle.c; workq_kernreturn.c stops on two more types
+
+**Date:** 2026-10-07
+**Branch:** task/visibility-decl
+**Base:** pr-arm64 = 3aa13120b843a8c7131ba1f2450ccf181d8b418d
+
+**Goal:** clear the visibility class so both object commands (file_handle.c.o,
+workq_kernreturn.c.o) exit 0.
+
+**Step 1 — where the previous declaration is.** The clang note points at the SDK:
+```
+file_handle.c:36:27: error: visibility does not match previous declaration
+  .../SDK/usr/include/os/lock.h:141:1: note: previous attribute is here   ## unlock
+file_handle.c:37:27: error: visibility does not match previous declaration
+  .../SDK/usr/include/os/lock.h:103:1: note: previous attribute is here   ## lock
+```
+`os/lock.h` resolves to `$DARLING_SRC_DIR/src/external/libplatform/include/os/lock.h`
+(libplatform submodule, reached through the SDK symlink). Those declarations carry
+`OS_EXPORT` = `extern __attribute__((__visibility__("default")))`, which clashes
+with the #113 `visibility("hidden")` on the definition.
+
+**Step 2 — the minimal align (declaration, not definition).** `build-freebsd/
+fix-lock-decl-visibility.sh` swaps `OS_EXPORT` for
+`extern __attribute__((__visibility__("hidden")))` on exactly those two
+declarations (os/lock.h:103, :141). The hidden stays on the definition (#113);
+removing it would let the empty copy win the bind again (#112). libplatform's own
+lock.c defines them `OS_ATOMIC_EXPORT` and is built separately — not touched.
+
+**Step 3 — result per object command.**
+```
+file_handle.c.o:       exit 0, 0 errors   (was 2 visibility errors)
+workq_kernreturn.c.o:  exit 1, 2 errors — a NEW class, types:
+  SDK/usr/include/sys/_types/_clock_t.h:31: unknown type name '__darwin_clock_t'
+  SDK/usr/include/sys/_types/_time_t.h:31:  unknown type name '__darwin_time_t'
+```
+workq_kernreturn.c has 0 visibility errors (the declaration fix reached it too);
+it stops on two more SDK typedefs the #117 shim does not yet provide. Per this
+dispatch the shim is not touched, so this is the stop on a new class.
+
+### Verdict (one line)
+
+The visibility class is cleared — the two declarations in os/lock.h are hidden
+like the #113 definitions, so file_handle.c.o now compiles (exit 0, 0 errors) —
+and workq_kernreturn.c.o stops on a new, type class (`__darwin_clock_t`,
+`__darwin_time_t`), which is shim work, not visibility.
+
+### Repro
+
+```sh
+sh build-freebsd/fix-lock-decl-visibility.sh
+ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
+  | grep -E 'file_handle\.c\.o|workq_kernreturn\.c\.o' | grep -- -c | tail -1 > /tmp/c.sh; sh /tmp/c.sh
+```
