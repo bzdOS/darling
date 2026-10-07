@@ -10316,3 +10316,131 @@ grep -A4 "MLDR_TRAP_AT hit #1: libsystem_platform.dylib+0x8237" <diag-dir>/cft10
 grep -E "0x23b1" <diag-dir>/cft107-abort-tsd.log
 grep -oE "tsd=0x[0-9a-f]+" <diag-dir>/cft107-abort-tsd.log | sort | uniq -c   # 184 tsd=0x307
 ```
+
+## Control #108 — the word's owners and both arms of the recursion; the first writer is lock_with_options
+
+**Date:** 2026-10-07
+**Branch:** task/abort-lock-owner
+**Base:** pr-arm64 = e0af29e2f5614ef83d3c2a6fec90f4fe18990496
+
+**Goal:** static (no run). (a) xref the word 0x100667a0 — rip-relative lea/mov with
+that target, their owning functions and bounds; (b) disassemble the abort-stack
+frames +0x161e42, +0x8eeeeb, +0x8eedd6 — the re-acquire chain; (c) which
+primitive wrote the word first (+0x23b1/+0x28c1/+0x290b excluded — #107, zero hits
+on this word).
+
+**Method:** scan the one full disassembly /tmp/chrome-disasm.txt (#106) with a
+script that recomputes every rip-relative target (target = addr + insn_len + disp);
+disassemble libsystem_platform for the callee.
+```sh
+python3 /tmp/xref-scan.py 0x100667a0 /tmp/chrome-disasm.txt
+timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" \
+  | sed -n '/^_os_unfair_lock_lock_with_options:/,/^_os_unfair_lock_trylock:/p'
+```
+
+### (a) xref of 0x100667a0 — 12 sites, two owning functions
+
+| site | insn | target | owner function (bounds) |
+|---|---|---|---|
+| 0x8eee16 | leaq 0xf777983(%rip),%rdi | 0x100667a0 | 0x8eee10 (0x8eee10–0x8eee88) |
+| 0x8eee3a | leaq 0xf77795f(%rip),%rdi | 0x100667a0 | 0x8eee10 |
+| 0x8eee41 | movq 0xf777960(%rip),%rcx | 0x100667a8 | 0x8eee10 |
+| 0x8eee48 | movq %rax,0xf777959(%rip) | 0x100667a8 | 0x8eee10 |
+| 0x8eee8c | movups %xmm0,0xf777915(%rip) | 0x100667a8 | 0x8eee10 |
+| 0x8eeeb3 | movq %rax,0xf7778ee(%rip) | 0x100667a8 | 0x8eee10 |
+| 0x8eeedf | leaq 0xf7778ba(%rip),%rdi | 0x100667a0 | 0x8eee10 |
+| 0x95d44c9 | leaq 0x6a922d0(%rip),%rdi | 0x100667a0 | 0x95d44c0 (0x95d44c0–~0x95d4b0x) |
+| 0x95d44d9 | leaq 0x6a922c0(%rip),%rdi | 0x100667a0 | 0x95d44c0 |
+| 0x95d44ee | leaq 0x6a922b3(%rip),%rdi | 0x100667a8 | 0x95d44c0 |
+| 0x95d4501 | leaq 0x6a922a0(%rip),%rdi | 0x100667a8 | 0x95d44c0 |
+| 0x95d4510 | leaq 0x6a92289(%rip),%rdi | 0x100667a0 | 0x95d44c0 |
+
+Two functions own the word: 0x8eee10 (7 sites) and 0x95d44c0 (5 sites). Sample
+(0x8eee10, whose +0x8eee7b calls unlock and +0x8eeeeb is on the abort stack):
+
+```
+  8eee10: 55                pushq %rbp
+  8eee11: 48 89 e5          movq  %rsp, %rbp
+  8eee14: 53                pushq %rbx
+  8eee15: 50                pushq %rax
+  8eee16: 48 8d 3d 83 79 77 0f  leaq 0xf777983(%rip), %rdi   ## -> 0x100667a0
+  8eee1d: e8 e0 01 2d 0d    callq 0xdbbf002 ## symbol stub for: _os_unfair_lock_trylock
+  ...
+  8eee88: c3                retq
+```
+
+### (b) the abort-stack frames — the re-acquire chain
+
+```
+# +0x161e42 (in 0x161ce0, the generic acquire wrapper, #68)
+  161e27: 48 89 df          movq  %rbx, %rdi
+  161e2a: 48 83 3d 5e 3b 04 0f 00  cmpq $0x0, 0xf043b5e(%rip) ## _os_unfair_lock_lock_with_options
+  161e32: 0f 84 03 01 00 00 je    0x161f3b
+  161e38: be 00 00 05 00    movl  $0x50000, %esi
+  161e3d: e8 22 e8 a5 0d    callq 0xdbc0664 ## symbol stub for: _os_unfair_lock_lock_with_options
+  161e42: 45 84 ff          testb %r15b, %r15b
+  161e45: 75 16             jne   0x161e5d
+  161e47: 5b                popq  %rbx
+  ...
+  161e4f: c3                retq
+
+# +0x8eeeeb (in 0x8eee10)
+  8eeedf: 48 8d 3d ba 78 77 0f  leaq  0xf7778ba(%rip), %rdi    ## -> 0x100667a0
+  8eeee6: e8 f5 2d 87 ff    callq 0x161ce0
+  8eeeeb: e9 3a ff ff ff    jmp   0x8eee2a
+
+# +0x8eedd6 (in 0x8eedc0)
+  8eedc0: 55                pushq %rbp
+  8eedc1: 48 89 e5          movq  %rsp, %rbp
+  8eedc4: 53                pushq %rbx
+  8eedc5: 50                pushq %rax
+  8eedc6: e8 45 00 00 00    callq 0x8eee10
+  8eedcb: 89 c3             movl  %eax, %ebx
+  8eedcd: 48 c1 e3 20       shlq  $0x20, %rbx
+  8eedd1: e8 3a 00 00 00    callq 0x8eee10
+  8eedd6: 48 8b 0d 3b 43 8b 0e  movq 0xe8b433b(%rip), %rcx ## _vm_page_size
+```
+
+The chain is 0x8eedc0 → (callq 0x8eee10) → 0x8eee10 → (callq 0x161ce0) →
+0x161ce0 → (callq _os_unfair_lock_lock_with_options) → libsystem_platform.
+
+### (c) the first writer
+
+`_os_unfair_lock_lock_with_options` (0x2750) takes the word the same way
+(`%gs:0x18` tid, `cmpxchgl`) and on failure calls the slow path:
+
+```
+_os_unfair_lock_lock_with_options:
+    2750: 55                pushq %rbp
+    ...
+    2773: 65 8b 04 c5 00 00 00 00  movl %gs:(,%rax,8), %eax   ## tid
+    ...
+    27a8: 0f b1 11          cmpxchgl %edx, (%rcx)
+    ...
+    280f: e8 6c fc ff ff    callq __os_unfair_lock_lock_slow
+```
+
+So the re-acquire goes through `_os_unfair_lock_lock_with_options` (0x280f →
+`__os_unfair_lock_lock_slow` 0x2575 → `__os_unfair_lock_recursive_abort`), not
+through `_os_unfair_lock_lock`; that is why #107 saw zero hits on 0x100667a0 at
++0x23b1 (the entry of `_os_unfair_lock_lock`) — the entry used is the
+_with_options one.
+
+### Verdict (one line)
+
+The word 0x100667a0 is owned by 0x8eee10 and 0x95d44c0; the abort stack shows the
+re-acquire running 0x8eedc0 → 0x8eee10 → 0x161ce0 → `_os_unfair_lock_lock_with_options`
+→ `__os_unfair_lock_lock_slow` → `__os_unfair_lock_recursive_abort`, so the
+primitive that wrote the word first is **`_os_unfair_lock_lock_with_options`**
+(via the generic wrapper 0x161ce0), and +0x23b1/+0x28c1/+0x290b are excluded
+because that is a different entry (#107).
+
+### Repro
+
+```sh
+python3 /tmp/xref-scan.py 0x100667a0 /tmp/chrome-disasm.txt          # 12 sites
+grep -B8 -A4 "161e42:" /tmp/chrome-disasm.txt | head
+grep -B4 -A3 "8eeeeb:" /tmp/chrome-disasm.txt | head
+timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" \
+  | sed -n '/^_os_unfair_lock_lock_with_options:/,/^_os_unfair_lock_trylock:/p' | grep callq
+```
