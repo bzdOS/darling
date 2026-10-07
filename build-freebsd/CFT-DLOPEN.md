@@ -11702,3 +11702,61 @@ sh /tmp/l126min.sh    # -> Segmentation fault (core dumped)
 sed 's/ -Wl,-flat_namespace / /; s/ -Wl,-undefined,suppress / /' /tmp/l126min.sh > /tmp/x.sh
 sh /tmp/x.sh          # -> no segfault
 ```
+
+## Control #127 — the trigger is the __text section of dyld_stub_binder.S.o
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = 071ac770b0c61ba0b468be5543b1d5a15b563a8d
+
+**Goal:** bisect the *content* of the trigger object (from #126:
+`dyld_stub_binder.S.o.x86_64.o` + the flag pair) to the minimal feature whose
+removal removes the segfault.
+
+**1) Inventory (`llvm-objdump`).**
+```
+Sections:  __text 0x198 TEXT   __data 0x14 DATA
+Symbols:   dyld_stub_binder (g F __text), _stack_not_16_byte_aligned_error (l F),
+           _inited/_hasXSave/_features_lo32/_features_hi32/_bufferSize32 (l O __data),
+           __Z21_dyld_fast_stub_entryPvl (UND)
+Relocs (__text, 16): SIGNED to _features_hi32/_lo32, _hasXSave, _inited,
+           _bufferSize32; BRANCH to __Z21_dyld_fast_stub_entryPvl and
+           _stack_not_16_byte_aligned_error
+```
+
+**2) Content bisection (`llvm-objcopy`).** `--remove-section` needs the
+`__SEG,__sect` form:
+```
+remove __TEXT,__text  -> object keeps only __data; link: NO segfault
+remove __DATA,__data  -> refused: _features_hi32 is referenced by a relocation
+                         in __TEXT,__text; link: SIGSEGV
+```
+
+**3) Control — flags with no inputs.**
+```
+ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib \
+  -flat_namespace -undefined suppress -o nin.dylib   -> ok, 4112-byte dylib
+```
+So the flag pair alone does not crash; the object's `__text` is required.
+
+**Minimal feature:** the **`__text` section** of
+`dyld_stub_binder.S.o.x86_64.o` (its removal removes the segfault; `__data`
+cannot be removed alone because the `__text` relocations reference it). Not a
+single reloc/symbol — the whole code section.
+
+### Verdict (one line)
+
+The trigger is the `__text` section of `dyld_stub_binder.S.o.x86_64.o`: removing
+it (leaving `__data`) links without crashing, while `__data` alone cannot be
+removed (its symbols are relocation targets of `__text`) and the flag pair with
+no inputs does not crash — so the minimal feature is the code section, not a
+single reloc or symbol.
+
+### Repro
+
+```sh
+O=src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o
+llvm-objcopy --remove-section __TEXT,__text /tmp/o.o   # from $O
+# swap it into the link command, run -> no segfault
+llvm-objcopy --remove-section __DATA,__data /tmp/o.o   # refused (relocation)
+```
