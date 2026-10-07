@@ -10444,3 +10444,129 @@ grep -B4 -A3 "8eeeeb:" /tmp/chrome-disasm.txt | head
 timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" \
   | sed -n '/^_os_unfair_lock_lock_with_options:/,/^_os_unfair_lock_trylock:/p' | grep callq
 ```
+
+## Control #109 — the holder at the re-acquire: a trylock from 0x8eee10, then lock_with_options
+
+**Date:** 2026-10-07
+**Branch:** task/abort-close-cycle
+**Base:** pr-arm64 = 4a890794e30293e68a147eccdf77bcbf8bddfaa4
+
+**Goal:** close the recursion — who holds the word 0x100667a0 at the re-acquire
+from 0x8eedc0. Static first, run as fallback. (a) target of the callq at
+0xccdb8f; (b) the body of 0x95d44c0 from its 5 sites; (c) the body of 0x161ce0
+around 0x161e38–0x161e5d. Plus the true bounds of 0x8eee10 (after the retq at
+0x8eee88) and, if static does not close it, a run.
+
+**Method:** /tmp/chrome-disasm.txt (#106) and libsystem_platform disassembly;
+fallback run with resumable traps at libsystem_platform+0x2821
+(`_os_unfair_lock_trylock`, movq) and +0x2751 (`_os_unfair_lock_lock_with_options`,
+movq), watch Google Chrome for Testing Framework+0x100667a0.
+
+### (a) the callq at 0xccdb8f and who calls the init stub 0x64d020
+
+`0xccdb8f: callq 0x64d020` — the target is the init stub 0x64d020 (#106), **not**
+0x161ce0/0x8eee10/0x95d44c0. Callers of 0x64d020:
+
+```
+  64cfa5: e8 76 00 00 00    callq 0x64d020    (twin constructor)
+  ccdb8f: e8 8c f4 97 ff    callq 0x64d020    (in 0xccdb60)
+ 95d44f5: e8 26 8b 07 f7    callq 0x64d020    (in 0x95d44c0 — the #108 owner of the word)
+```
+
+So the #106 init chain and the #108 owner meet at 0x95d44c0, which calls the
+init stub 0x64d020 directly.
+
+### (b) 0x95d44c0, bounds 0x95d44c0–0x95d451d
+
+```
+ 95d44c0: 55                pushq %rbp
+ 95d44c1: 48 89 e5          movq  %rsp, %rbp
+ 95d44c4: 53                pushq %rbx
+ 95d44c5: 50                pushq %rax
+ 95d44d0: e8 2d ab 5e 04    callq 0xdbbf002 ## symbol stub for: _os_unfair_lock_trylock
+ 95d44e0: e8 fb d7 b8 f6    callq 0x161ce0
+ 95d44f5: e8 26 8b 07 f7    callq 0x64d020
+ 95d450b: e8 90 ff ff ff    callq 0x95d44a0
+ 95d451d: e9 da aa 5e 04    jmp   0xdbbeffc ## symbol stub for: _os_unfair_lock_unlock
+```
+
+Order: trylock → (on failure) 0x161ce0 → 0x64d020 (init) → 0x95d44a0 → tail-call
+`_os_unfair_lock_unlock`. The unlock does reach the return (it is the tail call),
+so this function takes and releases the lock; the epilogue is the `jmp unlock`,
+not a `retq` (bounds end at 0x95d451d).
+
+### (c) 0x161ce0 around 0x161e38–0x161e5d, bounds 0x161ce0–0x161f49
+
+```
+ 161e27: 48 89 df          movq  %rbx, %rdi
+ 161e2a: 48 83 3d 5e 3b 04 0f 00  cmpq $0x0, 0xf043b5e(%rip) ## _os_unfair_lock_lock_with_options
+ 161e32: 0f 84 03 01 00 00 je    0x161f3b
+ 161e38: be 00 00 05 00    movl  $0x50000, %esi
+ 161e3d: e8 22 e8 a5 0d    callq 0xdbc0664 ## symbol stub for: _os_unfair_lock_lock_with_options
+ 161e42: 45 84 ff          testb %r15b, %r15b
+ 161e45: 75 16             jne   0x161e5d
+ 161e47: 5b                popq  %rbx
+ 161e48: 41 5c             popq  %r12
+ 161e4a: 41 5e             popq  %r14
+ 161e4c: 41 5f             popq  %r15
+ 161e4e: 5d                popq  %rbp
+ 161e4f: c3                retq
+ 161f3b: e8 1e e7 a5 0d    callq 0xdbc065e ## symbol stub for: _os_unfair_lock_lock
+ 161f40: e9 fd fe ff ff    jmp   0x161e42
+```
+
+It takes the lock exactly once (lock_with_options, or `_os_unfair_lock_lock` when
+the former is absent) and returns — it does **not** call any callback under the
+lock and does **not** unlock (the callee 0xcce330 it also calls is just a
+`_mach_absolute_time` profiler). It is an acquire wrapper; the caller owns and
+must release.
+
+### (2) true bounds of 0x8eee10
+
+0x8eee10 runs to 0x8eeef4, not 0x8eee88: the `retq` at 0x8eee88 is one exit, and
+the blocks 0x8eee89 (init: two `_getentropy`) and 0x8eeedf (trylock failure →
+`callq 0x161ce0`) are inside the same function, joined by the back-jump
+`jmp 0x8eee2a` (0x8eeeda and 0x8eeeeb). #108's "bounds 0x8eee10–0x8eee88" was the
+first exit only.
+
+### (3) fallback run — the first acquire is a trylock from 0x8eee10
+
+Log cft109-trylock-withoptions.log (resumable +0x2821/+0x2751, watch). The word
+0x100667a0 is @0x10311609a7a0:
+
+```
+hit #3 libsystem_platform.dylib+0x2821 rdi=0x10311609a7a0 tid=0x18f07 tsd=0x307 from Google Chrome for Testing Framework+0x8eee22 watch ... @0x10311609a7a0 = 0x0000000000000000 (ok=1)
+hit #4 libsystem_platform.dylib+0x2821 rdi=0x10311609a7a0 tid=0x18f07 tsd=0x307 from Google Chrome for Testing Framework+0x8eee22 watch ... @0x10311609a7a0 = 0x0000000100000307 (ok=1)
+hit #90 libsystem_platform.dylib+0x2751 rdi=0x10311609a7a0 tid=0x18f07 tsd=0x307 from Google Chrome for Testing Framework+0x161e42 watch ... @0x10311609a7a0 = 0x0000000100000307 (ok=1)
+```
+
+hit #3 is the **first acquire**: a `trylock` from 0x8eee10 (return 0x8eee22) when
+the word is 0x0 — it becomes 0x100000307 and stays so. hit #4 is the second
+trylock from 0x8eee10 (return 0x8eee22) — the word is now 0x100000307, so it
+fails. hit #90 is the re-acquire from the wrapper 0x161ce0 (return 0x161e42) via
+`_os_unfair_lock_lock_with_options`; the word is 0x100000307 → `cmpxchgl` fails →
+`lock_slow` → `recursive_abort`. The word is never seen by
+`_os_unfair_lock_lock`/`_os_unfair_lock_unlock` (0 hits on 0x23b1/0x28c1/0x290b,
+#107) and only once by lock_with_options — at the abort itself.
+
+### Verdict (one line)
+
+The holder is **the same thread** (TSD 0x307): the first acquire is a `trylock`
+from 0x8eee10 (0x8eee1d, hit #3 — word 0x0 → 0x100000307) and the re-acquire from
+0x8eedc0 is a `_os_unfair_lock_lock_with_options` through the wrapper 0x161ce0
+(hit #90, return 0x161e42) that finds the word already owned by that thread and
+aborts — closing both arms: #108's first writer (the wrapper 0x161ce0) is
+confirmed, and the holder at the re-acquire is the trylock it did earlier from
+the same 0x8eee10.
+
+### Repro
+
+```sh
+# static
+grep -nE "callq[[:space:]]+0x64d020([[:space:]]|$)" /tmp/chrome-disasm.txt
+grep -A30 "^ *95d44c0:" /tmp/chrome-disasm.txt | head -35
+grep -A60 "^ *161ce0:" /tmp/chrome-disasm.txt | head -65
+# fallback run
+sh /tmp/stub109c-run.sh <diag-dir>/cft109-trylock-withoptions.log
+grep -E "0x2821.*rdi=0x10311609a7a0" <diag-dir>/cft109-trylock-withoptions.log
+```
