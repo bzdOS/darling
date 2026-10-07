@@ -11860,3 +11860,57 @@ ulimit -c unlimited
   src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o   # SIGSEGV
 lldb /usr/local/llvm19/bin/lld -c lld.core -o bt -o quit -b
 ```
+
+## Control #130 — not a flag bug: a trivial object links fine; the crash is deeper in the binder's content
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = ff7e6e944e4e8b9cdaeb402f88301f05eff35cde
+
+**Step 1 — the fork.** A trivial object (`int f(){return puts("x");}`) with the
+same pair `-flat_namespace -undefined suppress`:
+```
+/usr/local/llvm19/bin/ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib \
+  -flat_namespace -undefined suppress -o /tmp/t130.dylib /tmp/t130a.o   -> exit 0
+file: Mach-O 64-bit x86_64 dynamically linked shared library
+```
+**No SIGSEGV.** So it is **not** a flag bug — the content of the binder object
+matters.
+
+**Step 2 — the unnamed frames.** `#0`/`#1` are stripped
+(`___lldb_unnamed_symbol7336+141`, `…7079+889`; the binary has no debug for
+them). On `/usr/local/llvm21/bin/ld64.lld` the same minimal input still
+segfaults, and the backtrace is again in lld's **ELF** path:
+```
+#0 ___lldb_unnamed_symbol8146 + 29
+#1 std::__1::__introsort<… lld::elf::writeARMCmseImportLib …>
+#2 lld::elf::InputSection::copyRelocations<… ELFType …> + 1221
+#3 libLLVM.so.21.1 …
+```
+
+**Step 3 — bisect up from trivial, all on the step-1 command.**
+```
+(a) asm: one global fn + one BRANCH UND (callq _puts)              -> no segfault, valid dylib
+(b) + a __data symbol with a SIGNED reloc (leaq _g(%rip))          -> no segfault, valid dylib
+(c) + a second UND via BRANCH (callq _puts2)                       -> no segfault, valid dylib
+```
+None of (a)-(c) triggers the crash, so the trigger is deeper in the binder
+object's content than a branch reloc, a signed `__data` reloc, or a second
+undefined branch.
+
+### Verdict (one line)
+
+It is not a flag bug (a trivial object with the same pair links to a valid dylib)
+and steps (a)-(c) do not reproduce the crash, so the trigger is some other
+feature of `dyld_stub_binder.S.o.x86_64.o`'s content (candidate: the SIGNED_1/
+SIGNED_4 relocs or the specific symbols), while every crash backtrace — llvm19
+and llvm21 — lands in lld's ELF path.
+
+### Repro
+
+```sh
+printf 'extern int puts(const char*); int f(void){return puts("x");}' | \
+  clang -target x86_64-apple-darwin20 -arch x86_64 -c -o /tmp/t.o -x c -
+/usr/local/llvm19/bin/ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib \
+  -flat_namespace -undefined suppress -o /tmp/t.dylib /tmp/t.o   # exit 0
+```
