@@ -10241,3 +10241,78 @@ grep -nE "callq[[:space:]]+0xccdb60([[:space:]]|$)" /tmp/chrome-disasm.txt
 grep -nE "callq[[:space:]]+0x64d020([[:space:]]|$)" /tmp/chrome-disasm.txt
 grep -A30 "^ *ccdb60:" /tmp/chrome-disasm.txt | head -40
 ```
+
+## Control #107 — the abort in the lock's own id space: recursion is real
+
+**Date:** 2026-10-07
+**Branch:** task/abort-tsd-owner
+**Base:** pr-arm64 = 6ccc92d2e14c755cc191c8969e75d03b125a1c5a
+
+**Goal:** at the abort, read the lock word, its owner id, and the current
+thread's id *in the id space the lock uses* (TSD slot 3, `%gs:0x18` — the law of
+the track), and if reachable the log of the word's first acquire; verdict —
+"recursion is real" (the same id twice) or "owner confusion" (the ids diverge).
+The file int3 patch and lldb on mldr are dead lanes; working lanes are
+MLDR_TRAP_AT and one full disassembly into a file + grep.
+
+**Method:** mldr's trap report now also prints the guest TSD id, read as
+`*(uint32_t *)(mc->mc_gsbase + 0x18)` from the signal context (guarded). One run
+with the fatal trap +0x8237 and resumable +0x23b1/+0x28c1/+0x290b, watch
+`Google Chrome for Testing Framework+0x100667a0`; log cft107-abort-tsd.log.
+Rebuild: `sh build-freebsd/build-mldr-only.sh`.
+
+### Verbatim — the abort frame (log tail)
+
+```
+[darling-mldr] === MLDR_TRAP_AT hit #1: libsystem_platform.dylib+0x8237 ===
+  rdi=0x307 rsi=0x50000 rdx=0x307 rcx=0x307 rax=0x1
+  guest tid = 0x2bf6b
+  guest TSD tid = 0x307 (%gs:0x18)
+  called from 0x7fffffdfd790 <unknown>
+  stack slots resolving into known images:
+    [rsp+  8] libsystem_platform.dylib+0x257a
+    [rsp+ 48] Google Chrome for Testing Framework (data)+0x119d40
+    [rsp+168] libsystem_platform.dylib+0x2814
+    [rsp+280] Google Chrome for Testing Framework+0x161e42
+    [rsp+328] Google Chrome for Testing Framework+0x8eeeeb
+    [rsp+360] Google Chrome for Testing Framework+0x8eedd6
+  watch Google Chrome for Testing Framework+0x100667a0 @0x2d5e5289a7a0 = 0x0000000100000307 (ok=1)
+```
+
+### Verbatim — every trapped call carries the same TSD id
+
+```
+hit #1 libsystem_platform.dylib+0x23b1 rdi=0x2d5e420ff0c0 tid=0x2bf6b tsd=0x307 from libsystem_c.dylib+0xd6f2c watch ... = 0x0 (ok=0)
+hit #2 libsystem_platform.dylib+0x23b1 rdi=0x2d5e420ff0c0 tid=0x2bf6b tsd=0x307 from libsystem_c.dylib+0xd7100 watch ... = 0x0 (ok=0)
+... 184 hits total, all tsd=0x307 (one distinct value)
+```
+
+### Result
+
+At the abort the lock word 0x100667a0 is **0x0000000100000307**; the abort's
+`rdi` is **0x307** (the owner argument passed by `_os_unfair_lock_lock_slow`,
+#104) and the current thread's **TSD id is 0x307** (`%gs:0x18`). The host
+`thr_self` is 0x2bf6b — a *different* id space, which is exactly why #105's
+comparison (owner 0x307 vs thr_self 0x18ae5) concluded owner-confusion. In the
+lock's own id space the two agree. All 184 trapped lock/unlock/xchgl calls in the
+run carry tsd=0x307. The word 0x100667a0 itself has **no** trapped access at
++0x23b1 (its first acquire went through another primitive, not
+`_os_unfair_lock_lock`), so the first acquire is not in the log.
+
+### Verdict (one line)
+
+**Recursion is real**: the current thread's id in the lock's own id space
+(TSD 0x307) equals the owner in the word (0x307) — the same thread takes a lock
+it already holds, so `_os_unfair_lock_lock_slow` sees `old|1 == tid` and calls
+`__os_unfair_lock_recursive_abort`; #105's owner-confusion was an artefact of
+comparing against the host `thr_self` instead of the TSD id.
+
+### Repro
+
+```sh
+# mldr rebuilt with the TSD-id print (build-freebsd/build-mldr-only.sh)
+sh /tmp/stub103-run.sh <diag-dir>/cft107-abort-tsd.log
+grep -A4 "MLDR_TRAP_AT hit #1: libsystem_platform.dylib+0x8237" <diag-dir>/cft107-abort-tsd.log
+grep -E "0x23b1" <diag-dir>/cft107-abort-tsd.log
+grep -oE "tsd=0x[0-9a-f]+" <diag-dir>/cft107-abort-tsd.log | sort | uniq -c   # 184 tsd=0x307
+```
