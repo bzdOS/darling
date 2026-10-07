@@ -12013,3 +12013,56 @@ lldb /usr/local/llvm21/bin/lld -c "$DARLING_BUILD_DIR/lld.core" -o bt -o 'image 
 llvm-objdump -d --start-address=0x668bf0 --stop-address=0x668c30 /usr/local/llvm21/bin/lld
 llvm-objdump -d --start-address=0x6c6eb0 --stop-address=0x6c6ee0 /usr/local/llvm21/bin/lld
 ```
+
+## Control #133 — the faulting operator: getVA dereferences a null field
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = a5b5e8fb20e276e2246a083741a0104182396a76
+
+**Goal:** name the exact operator and the bad pointer behind the ld64.lld crash.
+
+**1) getVA disassembly (`llvm-objdump -d`, `lld::macho::InputSection::getVA`):**
+```
+6964a0: 55                pushq %rbp
+6964a1: 48 89 e5          movq  %rsp, %rbp
+6964a4: 53                pushq %rbx
+6964a5: 50                pushq %rax
+6964a6: 48 8b 07          movq  (%rdi), %rax        ; rax = *this
+6964a9: 48 8b 4f 10       movq  0x10(%rdi), %rcx   ; rcx = *(this+0x10)
+6964ad: 48 8b 59 38       movq  0x38(%rcx), %rbx   ; <-- PC, deref rcx+0x38
+6964b1: ff 50 20          callq *0x20(%rax)
+6964b4: 48 01 d8          addq  %rbx, %rax
+```
+PC `#0 = 0x6964ad` is `movq 0x38(%rcx), %rbx`.
+
+**2) registers at frame #0** (`register read`):
+```
+rdi = 0x00003897f82f6930   (this — rax is vtable for lld::macho::ConcatInputSection + 16)
+rcx = 0x0000000000000000   (NULL)
+rax = 0x000000000076e7f0   lld`vtable for lld::macho::ConcatInputSection + 16
+rbx = 0x000000083deb6560
+rsi = 0x0000000000000000
+```
+`rcx` is **NULL**, so `movq 0x38(%rcx), %rbx` faults on address 0x38 (null + 0x38).
+
+**3) what is passed in.** `getVA` is called from frame #1 (PC `0x668c09`), which
+#132 disassembled inside `lld::macho::createX86_64TargetInfo` (call to
+`lld::macho::InputSection::getVA` at 0x668c04). The `this` at frame #0 is a
+`lld::macho::ConcatInputSection` (its vtable is in rax), and its field at
+`+0x10` — loaded into rcx at 0x6964a9 — is 0.
+
+### Verdict (one line)
+
+`getVA` (PC 0x6964ad) dereferences `rcx+0x38`, where `rcx = *(this+0x10)` is
+**NULL** (si_addr = 0x38): a null field of the `lld::macho::ConcatInputSection`
+passed in from `createX86_64TargetInfo`'s `getVA` call — a null-pointer
+dereference on a Mach-O input section, not an ELF path.
+
+### Repro
+
+```sh
+llvm-objdump -d --start-address=0x6964a0 --stop-address=0x6964c0 /usr/local/llvm21/bin/lld
+lldb /usr/local/llvm21/bin/lld -c "$DARLING_BUILD_DIR/lld.core" \
+  -o 'frame select 0' -o 'register read rdi rcx rax rbx rsi' -o quit -b
+```
