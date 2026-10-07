@@ -11211,3 +11211,59 @@ sh build-freebsd/fix-lock-decl-visibility.sh
 ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
   | grep -E 'file_handle\.c\.o|workq_kernreturn\.c\.o' | grep -- -c | tail -1 > /tmp/c.sh; sh /tmp/c.sh
 ```
+
+## Control #119 — the shim is complete for both objects (exit 0); the dylib link stops on non-type conflicts
+
+**Date:** 2026-10-07
+**Branch:** task/shim-clock-time
+**Base:** pr-arm64 = fd5cde76fbcd664dc2a3b126885c67af60302ec1
+
+**Goal:** complete the type shim by inventory, get both object commands to exit 0,
+and then try the narrow dylib link.
+
+**Step 1 — inventory.** `i386/_types.h` (the blocked header) defines the
+`__darwin_*` set: `natural_t`, `intptr_t`, `ptrdiff_t`, `size_t`, `ssize_t`,
+`wchar_t`, `wint_t`, `ct_rune_t`, `mbstate_t`, `va_list`, `rune_t`, `clock_t`,
+`socklen_t`, `time_t`. The shim already had the first seven; the missing seven
+were added in one pass:
+
+```
+__darwin_ct_rune_t, __mbstate_t + __darwin_mbstate_t, __darwin_va_list,
+__darwin_rune_t, __darwin_clock_t, __darwin_socklen_t, __darwin_time_t
+```
+
+**Step 3 — both object commands exit 0.**
+```
+file_handle.c.o:      exit 0, 0 errors
+workq_kernreturn.c.o: exit 0, 0 errors   (was 2: __darwin_clock_t, __darwin_time_t)
+```
+
+**Step 4 — narrow link stops on non-type conflicts.** `narrow-build-kernel.sh`
+runs 908 object commands; the link path does not complete — 17 errors, all of a
+different class (redeclarations and a missing framework header), e.g.:
+```
+SDK/usr/include/sys/reason.h:183:6: error: conflicting types for 'abort_with_payload'
+.../libsyscall/wrappers/terminate_with_reason.c:120:1: same
+.../libsyscall/wrappers/libproc/libproc.h:100:5: conflicting types for 'proc_regionfilename'
+.../libsyscall/mach/err_iokit.sub:31:10: fatal error: 'IOKit/IOReturn.h' file not found
+SDK/usr/include/string.h:72:7 / :86:9 / :89:7: conflicting types for memcpy/strlen/strncpy
+```
+So no new libsystem_kernel.dylib was produced, and the #115 nm check (both
+os_unfair_lock symbols absent) could not be run. Nothing was placed in the
+overlay.
+
+### Verdict (one line)
+
+The type shim is now complete enough that both file_handle.c.o and
+workq_kernreturn.c.o compile (exit 0, 0 errors), but the narrow dylib link stops
+on a non-type class — `conflicting types` for `abort_with_payload`,
+`proc_regionfilename`, `memcpy`/`strlen`/`strncpy`, and a missing
+`IOKit/IOReturn.h` — so no dylib, no nm, overlay untouched.
+
+### Repro
+
+```sh
+ninja -t commands src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib \
+  | grep -E 'file_handle\.c\.o|workq_kernreturn\.c\.o' | grep -- -c | tail -1 > /tmp/c.sh; sh /tmp/c.sh
+sh build-freebsd/narrow-build-kernel.sh     # stops on the non-type conflicts above
+```
