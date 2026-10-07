@@ -9612,3 +9612,110 @@ timeout 90 llvm-objdump --macho --disassemble-all \
   "$DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework" \
   | grep -B2 -A2 "dbbeffc"
 ```
+
+## Control #101 — _os_unfair_lock_unlock body: one owner check; xchgl clears the word before the branch
+
+**Date:** 2026-10-07
+**Branch:** task/oul-unlock-body
+**Base:** pr-arm64 = bfaf984b792040785c5e22aba037ae20dc78c125
+
+**Goal:** static inventory of the `_os_unfair_lock_unlock` body in libsystem_platform —
+which branches exist (offsets) and which one matches rdi with the word {0x307, owner 0x1}
+(Control #99: unlock executes with correct rdi, word stays 0x307; hypothesis: no-op by owner).
+
+**Method:** symbol offset via nm, then disassembly of the body:
+```sh
+llvm-nm -n "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -i unfair
+timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" \
+  | sed -n '/^_os_unfair_lock_unlock:/,/^_os_unfair_lock_lock_no_tsd:/p'
+```
+
+### Verbatim symbol offsets
+
+```
+00000000000023b0 T _os_unfair_lock_lock
+0000000000002820 T _os_unfair_lock_trylock
+00000000000028c0 T _os_unfair_lock_unlock
+0000000000002960 t __os_unfair_lock_unlock_slow
+0000000000002b30 T _os_unfair_lock_unlock_no_tsd
+```
+
+### Verbatim disassembly (body 0x28c0–0x295b)
+
+```
+28c0: 55                      pushq %rbp
+28c1: 48 89 e5                movq %rsp, %rbp
+28c4: 48 83 ec 40             subq $0x40, %rsp
+28c8: 48 89 7d e8             movq %rdi, -0x18(%rbp)
+28cc: 48 8b 45 e8             movq -0x18(%rbp), %rax
+28d0: 48 89 45 e0             movq %rax, -0x20(%rbp)
+28d4: 48 c7 45 f8 03 00 00 00 movq $0x3, -0x8(%rbp)
+28dc: 48 8b 45 f8             movq -0x8(%rbp), %rax
+28e0: 65 8b 04 c5 00 00 00 00 movl %gs:(,%rax,8), %eax
+28e8: 89 45 f4                movl %eax, -0xc(%rbp)
+28eb: 8b 45 f4                movl -0xc(%rbp), %eax
+28ee: 89 45 dc                movl %eax, -0x24(%rbp)
+28f1: 48 8b 4d e0             movq -0x20(%rbp), %rcx
+28f5: c7 45 cc 00 00 00 00    movl $0x0, -0x34(%rbp)
+28fc: 8b 45 cc                movl -0x34(%rbp), %eax
+28ff: 89 45 c8                movl %eax, -0x38(%rbp)
+2902: 8b 45 c8                movl -0x38(%rbp), %eax
+2905: 89 45 d0                movl %eax, -0x30(%rbp)
+2908: 8b 45 d0                movl -0x30(%rbp), %eax
+290b: 87 01                   xchgl %eax, (%rcx)
+290d: 89 45 c4                movl %eax, -0x3c(%rbp)
+2910: 8b 45 c4                movl -0x3c(%rbp), %eax
+2913: 89 45 d4                movl %eax, -0x2c(%rbp)
+2916: 8b 45 d4                movl -0x2c(%rbp), %eax
+2919: 89 45 c0                movl %eax, -0x40(%rbp)
+291c: 8b 45 c0                movl -0x40(%rbp), %eax
+291f: 89 45 d8                movl %eax, -0x28(%rbp)
+2922: 8b 45 d8                movl -0x28(%rbp), %eax
+2925: 3b 45 dc                cmpl -0x24(%rbp), %eax
+2928: 0f 94 c0                sete %al
+292b: 34 ff                   xorb $-0x1, %al
+292d: 34 ff                   xorb $-0x1, %al
+292f: 24 01                   andb $0x1, %al
+2931: 0f b6 c0                movzbl %al, %eax
+2934: 48 98                   cltq
+2936: 48 83 f8 00             cmpq $0x0, %rax
+293a: 0f 84 05 00 00 00       je 0x2945
+2940: e9 11 00 00 00          jmp 0x2956
+2945: 48 8b 7d e0             movq -0x20(%rbp), %rdi
+2949: 8b 75 dc                movl -0x24(%rbp), %esi
+294c: 8b 55 d8                movl -0x28(%rbp), %edx
+294f: 31 c9                   xorl %ecx, %ecx
+2951: e8 0a 00 00 00          callq __os_unfair_lock_unlock_slow
+2956: 48 83 c4 40             addq $0x40, %rsp
+295a: 5d                      popq %rbp
+295b: c3                      retq
+```
+
+### Branch inventory (offsets)
+
+- 0x28e0: tid = %gs:0x18 — current thread id (TSD slot 3)
+- 0x290b: old = xchgl(lock, 0) — atomic exchange: word cleared, old = former word
+- 0x2925: cmpl old, tid — the only owner check
+- 0x293a: je 0x2945 — old == tid → slow path
+- 0x2940: jmp 0x2956 — old != tid → plain ret (word already cleared by xchgl)
+- 0x2945–0x2951: tail call __os_unfair_lock_unlock_slow (0x2960)
+- slow path (0x2960–0x2a7f): 0x299f je 0x29c4 (flag 0x1000000); 0x29ae je 0x29be;
+  0x29e5 je 0x29f6 → __os_unfair_lock_unowned_abort (0x29f1); 0x29ff je 0x2a07
+  (bit 0x1 set → ud2 0x2a05); 0x2a19 ___ulock_wake; ret 0x2a7f
+
+### Verdict (one line)
+
+One owner check only: xchgl (0x290b) zeroes the word unconditionally, then
+`cmpl old, tid` (0x2925) — old == tid → slow path at 0x2945, old != tid → plain
+ret at 0x2956; for {0x307, owner 0x1} with guest tid ≠ 1 the 0x2940 branch runs
+(slow path skipped) — but the word is not a full no-op: xchgl already cleared it,
+so "word stays 0x307" (Control #99) can only hold for the owner part above the
+32-bit exchange, or the word is wider than 32 bits in this build.
+
+### Repro
+
+```sh
+llvm-nm -n "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" | grep -i unfair
+timeout 60 llvm-objdump -d "$DARLING_OVERLAY/usr/lib/system/libsystem_platform.dylib" \
+  | sed -n '/^_os_unfair_lock_unlock:/,/^_os_unfair_lock_lock_no_tsd:/p'
+```
