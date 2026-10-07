@@ -11657,3 +11657,48 @@ OBJS=$(grep -oE '[^ ]+\.o ' /tmp/l124.sh | sed 's/ $//;s/$/.x86_64.o/' | tr '\n'
 ld64.lld -arch x86_64 -platform_version macos 11.0 11.0 -dylib -o x $OBJS   # no segfault
 # through clang with -Wl,-flat_namespace -Wl,-undefined,suppress -> SIGSEGV
 ```
+
+## Control #126 — the segfault is one object: dyld_stub_binder.S.o.x86_64.o
+
+**Date:** 2026-10-07
+**Branch:** task/firstpass-include-paths
+**Base:** pr-arm64 = f1cc38bf2a702531db820f59e41c765f6704d526
+
+**Goal:** with the pair `-Wl,-flat_namespace` + `-Wl,-undefined,suppress` fixed,
+bisect the 28 thin dyld objects to the minimal subset that segfaults the thin
+link.
+
+**Method.** Start from the full dyld firstpass link (28 `<obj>.o.x86_64.o`,
+`-arch x86_64 -Wl,-platform_version,macos,11.0,11.0 -Wl,-flat_namespace
+-Wl,-undefined,suppress`), drop objects by halves and by single index, re-run,
+look for `Segmentation fault`.
+
+```
+28 objects  -> SIGSEGV (baseline)
+14, 7, 4, 2 -> SIGSEGV
+1 (obj[0])  -> no segfault
+1 (obj[1])  -> SIGSEGV
+```
+`obj[1]` is
+`src/external/dyld/CMakeFiles/system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o`
+(Mach-O 64-bit x86_64 object — the dyld stub binder, hand-written assembly).
+
+**Minimal subset: 1 object** —
+`system_dyld_obj.dir/src/dyld_stub_binder.S.o.x86_64.o` — and it needs the flag
+pair: with that one object the pair segfaults, without the pair it does not.
+
+### Verdict (one line)
+
+The minimal crashing set is a single thin object,
+`dyld_stub_binder.S.o.x86_64.o` (the hand-written dyld stub binder), together
+with `-flat_namespace` + `-undefined,suppress`; one object alone does not crash
+without that pair.
+
+### Repro
+
+```sh
+# keep only dyld_stub_binder.S.o.x86_64.o in the link command, then:
+sh /tmp/l126min.sh    # -> Segmentation fault (core dumped)
+sed 's/ -Wl,-flat_namespace / /; s/ -Wl,-undefined,suppress / /' /tmp/l126min.sh > /tmp/x.sh
+sh /tmp/x.sh          # -> no segfault
+```
