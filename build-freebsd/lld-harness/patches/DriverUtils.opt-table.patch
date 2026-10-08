@@ -1,0 +1,33 @@
+--- /usr/src/contrib/llvm-project/lld/MachO/DriverUtils.cpp	2026-06-06 18:41:53.572721000 +0000
++++ b/DriverUtils.cpp	2026-10-08 01:26:35.768244000 +0000
+@@ -34,14 +34,14 @@
+ using namespace lld;
+ using namespace lld::macho;
+ 
+-// Create prefix string literals used in Options.td
+-#define PREFIX(NAME, VALUE)                                                    \
+-  static constexpr StringLiteral NAME##_init[] = VALUE;                        \
+-  static constexpr ArrayRef<StringLiteral> NAME(NAME##_init,                   \
+-                                                std::size(NAME##_init) - 1);
++#define OPTTABLE_STR_TABLE_CODE
+ #include "Options.inc"
+-#undef PREFIX
++#undef OPTTABLE_STR_TABLE_CODE
+ 
++#define OPTTABLE_PREFIXES_TABLE_CODE
++#include "Options.inc"
++#undef OPTTABLE_PREFIXES_TABLE_CODE
++
+ // Create table mapping all options defined in Options.td
+ static constexpr OptTable::Info optInfo[] = {
+ #define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS,         \
+@@ -65,7 +65,8 @@
+ #undef OPTION
+ };
+ 
+-MachOOptTable::MachOOptTable() : GenericOptTable(optInfo) {}
++MachOOptTable::MachOOptTable()
++    : GenericOptTable(OptionStrTable, OptionPrefixesTable, optInfo) {}
+ 
+ // Set color diagnostics according to --color-diagnostics={auto,always,never}
+ // or --no-color-diagnostics flags.
