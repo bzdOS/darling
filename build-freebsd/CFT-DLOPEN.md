@@ -12463,3 +12463,68 @@ export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
 sh build-freebsd/build-dyld-only.sh     # RC=0
 sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1, prints 85 missing dylib inputs
 ```
+
+## Control #139 — the target's OWN link: 3 direct dylib inputs, 1 missing (not 85)
+
+Dispatch: the 85-missing list from Control #138 was suspected to be the
+aggregate closure link (`tail -1` of `ninja -t commands`, 1935 compile
+commands), not libsystem_kernel's own link — libBLAS/libX11/libavcodec
+cannot be inputs of libsystem_kernel. Step: extract the target's own link
+by `-o <target path>` and re-measure.
+
+### Change
+
+`narrow-build-target.sh`: the link command is now the line with
+`-o <target>` in `ninja -t commands` (not `tail -1` of the closure). The
+dylib-input check strips `-Wl,-dylib_file,<sys>:<build>` redirects before
+counting: those are a search-path table, not link inputs. Object phase
+untouched.
+
+### Extracted link command
+
+First line of `/tmp/nbt-link.sh` (truncated; the full line lists 891 `.o`
+objects). Paths shown as variables:
+
+```
+: && /usr/bin/cc -fPIC -nostdinc -include $DARLING_SRC_DIR/build-host-tools/freebsd_mig_compat.h \
+    -isystem $DARLING_SRC_DIR/src/basic-headers ... -arch i386 -arch x86_64 -arch i386 -arch x86_64 -shared \
+    -o src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib <891 .o> \
+    src/external/compiler-rt/lib/builtins/libcompiler_rt_firstpass.dylib \
+    src/external/dyld/libsystem_dyld_firstpass.dylib \
+    src/external/libc/libsystem_c_firstpass.dylib \
+    src/libsimple-darling/liblibsimple_darling.a -Wl,-rpath-link,$DARLING_BUILD_DIR/src/external/libplatform
+```
+
+### Measured numbers
+
+- object commands: 1935 (same as #138)
+- link commands matching `-o .../libsystem_kernel.dylib`: exactly 1
+- `-Wl,-dylib_file` redirects in the own link: 143 (search-path table; NOT inputs)
+- **direct dylib inputs of the own link: 3**
+  - `src/external/compiler-rt/lib/builtins/libcompiler_rt_firstpass.dylib` — exists (main tree)
+  - `src/external/libc/libsystem_c_firstpass.dylib` — exists (main tree)
+  - `src/external/dyld/libsystem_dyld_firstpass.dylib` — **MISSING from both trees**
+- **missing: 1**
+
+### Result
+
+RC=1. Script stops at `MISSING dylib inputs (1)`:
+`src/external/dyld/libsystem_dyld_firstpass.dylib`. The link is not attempted
+(missing list not empty). That dylib is absent from both
+`$DARLING_BUILD_DIR/src/external/dyld/` and
+`$DARLING_BUILD_DIR/dyld-only/src/external/dyld/` (the dyld-only tree holds
+`dyld`, `dyld.patched`, `dyld.patched-dylinker` — no firstpass dylib).
+
+The #138 list of 85 was an artifact: 143 `-dylib_file` redirects of the
+aggregate link were counted as inputs. The target's own link has only 3
+direct dylib inputs — 2 present, 1 missing.
+
+The 3 lipo errors (rtsig.c i386, creat.c/killpg.c x86_64) are outside this
+step and do not block the dylib check.
+
+### Repro
+
+```sh
+export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
+sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1, prints 1 missing dylib input
+```

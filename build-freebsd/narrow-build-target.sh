@@ -57,8 +57,11 @@ sh /tmp/nbt-perarch.sh
 sh /tmp/nbt-lipo.sh
 echo "[$TARGET] objects done"
 
-# link/archive command: the last non-compile command
-ninja -t commands "$TARGET" | grep -v -- " -c " | grep -v '^cd ' | tail -1 > /tmp/nbt-link.sh
+# link/archive command: the target's OWN link — the line with -o <target path>.
+# (Control #139: tail -1 of the whole closure grabs an aggregate link, not the
+# target's own; the #138 list of 85 "missing" was dominated by -dylib_file
+# redirects of that aggregate, which are not inputs of libsystem_kernel)
+ninja -t commands "$TARGET" | grep -F -- "-o $TARGET" > /tmp/nbt-link.sh
 # cctools ar/ranlib are shell wrappers that produce no file here; llvm-ar/ranlib
 # build the Mach-O archive. (Control #121)
 sed -i.bak -E "s#${BD}/src/external/cctools-port/cctools/ar/x86_64-apple-darwin20-ar#llvm-ar#g; s#${BD}/src/external/cctools-port/cctools/ar/x86_64-apple-darwin20-ranlib#llvm-ranlib#g" /tmp/nbt-link.sh
@@ -68,7 +71,11 @@ if [ -n "$LD64" ]; then
     rm -f /tmp/nbt-link.sh.bak
 fi
 # Control #138: resolve dylib link inputs against main and dyld-only trees.
+# Control #139: count only DIRECT dylib inputs — strip -Wl,-dylib_file redirects
+# first (a search-path table, not link inputs). The #138 "85 missing" were
+# mostly such redirects of the aggregate link.
 out=$(grep -oE '\-o [^ ]+' /tmp/nbt-link.sh | tail -1 | sed 's/-o //')
+sed 's#-Wl,-dylib_file,[^ ]*##g' /tmp/nbt-link.sh > /tmp/nbt-link-nodf.sh
 : > /tmp/nbt-missing-dylibs.txt; : > /tmp/nbt-dylib-rewrite.sed
 resolve_dylib() {
     p="$1"; rel="${p#"$BD"/}"
@@ -80,8 +87,8 @@ resolve_dylib() {
     fi
     echo "$rel" >> /tmp/nbt-missing-dylibs.txt
 }
-grep -oE "${BD}/src/[^ :\"]+\.dylib" /tmp/nbt-link.sh | sort -u | while read -r p; do resolve_dylib "$p"; done
-grep -oE '(^|[[:space:]])src/[^ ]+\.dylib' /tmp/nbt-link.sh | sed 's/^[[:space:]]*//' | sort -u | while read -r rp; do resolve_dylib "$BD/$rp"; done
+grep -oE "${BD}/src/[^ :\"]+\.dylib" /tmp/nbt-link-nodf.sh | sort -u | while read -r p; do resolve_dylib "$p"; done
+grep -oE '(^|[[:space:]])src/[^ ]+\.dylib' /tmp/nbt-link-nodf.sh | sed 's/^[[:space:]]*//' | sort -u | while read -r rp; do resolve_dylib "$BD/$rp"; done
 sort -u /tmp/nbt-missing-dylibs.txt -o /tmp/nbt-missing-dylibs.txt
 if [ -s /tmp/nbt-missing-dylibs.txt ]; then
     echo "[$TARGET] MISSING dylib inputs ($(wc -l < /tmp/nbt-missing-dylibs.txt)):" >&2
