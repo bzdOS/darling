@@ -112,9 +112,13 @@ if [ -f "$LIBSIMPLE_O" ] && ! grep -q -- "$LIBSIMPLE_O" /tmp/nbt-link.sh; then
 fi
 if grep -q -- "-arch i386 -arch x86_64" /tmp/nbt-link.sh; then
     # fat link: two thin links + lipo
+    # Control #142 step 5: the FAT link lists BOTH libsyscall slices
+    # (libsyscall_32.dir/...-i386-User.c.o and libsyscall_64.dir/...-x86_64-User.c.o),
+    # so a thin link that only rewrites -arch still carries both and dies with
+    # duplicate symbols. Drop the other slice's objects per thin link.
     out=$(grep -oE '\-o [^ ]+' /tmp/nbt-link.sh | tail -1 | sed 's/-o //')
-    sed -E "s/-arch i386 -arch x86_64/-arch i386/; s#-o ${out}#-o ${out}.i386#" /tmp/nbt-link.sh > /tmp/nbt-li.sh
-    sed -E "s/-arch i386 -arch x86_64/-arch x86_64/; s#-o ${out}#-o ${out}.x86_64#" /tmp/nbt-link.sh > /tmp/nbt-lx.sh
+    sed -E "s/-arch (i386|x86_64) -arch (i386|x86_64)/-arch i386/g; s#-o ${out}#-o ${out}.i386#; s#[^ ]*libsyscall_64[^ ]*\.o *##g" /tmp/nbt-link.sh > /tmp/nbt-li.sh
+    sed -E "s/-arch (i386|x86_64) -arch (i386|x86_64)/-arch x86_64/g; s#-o ${out}#-o ${out}.x86_64#; s#[^ ]*libsyscall_32[^ ]*\.o *##g" /tmp/nbt-link.sh > /tmp/nbt-lx.sh
     sh /tmp/nbt-li.sh
     sh /tmp/nbt-lx.sh
     llvm-lipo -create -output "$out" "${out}.i386" "${out}.x86_64"
