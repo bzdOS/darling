@@ -37,9 +37,21 @@ while IFS= read -r cmd; do
     src=$(printf '%s\n' "$cmd" | sed -E 's/.* -c (.*)/\1/')
     base=$(printf '%s\n' "$cmd" | sed -E 's/ -arch [^ ]+//g; s# -o [^ ]+##; s# -c .*##')
     printf 'mkdir -p %s\n' "$(dirname "$obj")" >> /tmp/nbt-perarch.sh
-    printf '%s -arch i386 -o %s.i386.o -c %s\n' "$base" "$obj" "$src" >> /tmp/nbt-perarch.sh
-    printf '%s -arch x86_64 -o %s.x86_64.o -c %s\n' "$base" "$obj" "$src" >> /tmp/nbt-perarch.sh
-    printf 'llvm-lipo -create -output %s %s.i386.o %s.x86_64.o\n' "$obj" "$obj" "$obj" >> /tmp/nbt-lipo.sh
+    case "$src" in
+        *platform_32bit*|*/i386/*)
+            printf '%s -arch i386 -o %s.i386.o -c %s\n' "$base" "$obj" "$src" >> /tmp/nbt-perarch.sh
+            printf 'cp %s.i386.o %s\n' "$obj" "$obj" >> /tmp/nbt-lipo.sh
+            ;;
+        *platform_64bit*|*/x86_64/*)
+            printf '%s -arch x86_64 -o %s.x86_64.o -c %s\n' "$base" "$obj" "$src" >> /tmp/nbt-perarch.sh
+            printf 'cp %s.x86_64.o %s\n' "$obj" "$obj" >> /tmp/nbt-lipo.sh
+            ;;
+        *)
+            printf '%s -arch i386 -o %s.i386.o -c %s\n' "$base" "$obj" "$src" >> /tmp/nbt-perarch.sh
+            printf '%s -arch x86_64 -o %s.x86_64.o -c %s\n' "$base" "$obj" "$src" >> /tmp/nbt-perarch.sh
+            printf 'llvm-lipo -create -output %s %s.i386.o %s.x86_64.o\n' "$obj" "$obj" "$obj" >> /tmp/nbt-lipo.sh
+            ;;
+    esac
 done < /tmp/nbt-cmds.sh
 sh /tmp/nbt-perarch.sh
 sh /tmp/nbt-lipo.sh
@@ -54,6 +66,31 @@ rm -f /tmp/nbt-link.sh.bak
 if [ -n "$LD64" ]; then
     sed -i.bak "s#${BD}/src/external/cctools-port/cctools/ld64/src/x86_64-apple-darwin20-ld#${LD64}#g" /tmp/nbt-link.sh
     rm -f /tmp/nbt-link.sh.bak
+fi
+# Control #138: resolve dylib link inputs against main and dyld-only trees.
+out=$(grep -oE '\-o [^ ]+' /tmp/nbt-link.sh | tail -1 | sed 's/-o //')
+: > /tmp/nbt-missing-dylibs.txt; : > /tmp/nbt-dylib-rewrite.sed
+resolve_dylib() {
+    p="$1"; rel="${p#"$BD"/}"
+    [ "$rel" = "$out" ] && return 0
+    [ -f "$p" ] && return 0
+    if [ -f "$BD/dyld-only/$rel" ]; then
+        printf 's#%s#%s#g\n' "$p" "$BD/dyld-only/$rel" >> /tmp/nbt-dylib-rewrite.sed
+        return 0
+    fi
+    echo "$rel" >> /tmp/nbt-missing-dylibs.txt
+}
+grep -oE "${BD}/src/[^ :\"]+\.dylib" /tmp/nbt-link.sh | sort -u | while read -r p; do resolve_dylib "$p"; done
+grep -oE '(^|[[:space:]])src/[^ ]+\.dylib' /tmp/nbt-link.sh | sed 's/^[[:space:]]*//' | sort -u | while read -r rp; do resolve_dylib "$BD/$rp"; done
+sort -u /tmp/nbt-missing-dylibs.txt -o /tmp/nbt-missing-dylibs.txt
+if [ -s /tmp/nbt-missing-dylibs.txt ]; then
+    echo "[$TARGET] MISSING dylib inputs ($(wc -l < /tmp/nbt-missing-dylibs.txt)):" >&2
+    cat /tmp/nbt-missing-dylibs.txt >&2
+    exit 1
+fi
+if [ -s /tmp/nbt-dylib-rewrite.sed ]; then
+    sed -f /tmp/nbt-dylib-rewrite.sed /tmp/nbt-link.sh > /tmp/nbt-link.sh.rw && mv /tmp/nbt-link.sh.rw /tmp/nbt-link.sh
+    echo "[$TARGET] dylib inputs redirected to dyld-only: $(wc -l < /tmp/nbt-dylib-rewrite.sed)"
 fi
 if grep -q -- "-arch i386 -arch x86_64" /tmp/nbt-link.sh; then
     # fat link: two thin links + lipo

@@ -12310,3 +12310,156 @@ export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
 sh build-freebsd/build-dyld-only.sh     # RC=0
 sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1
 ```
+
+## Control #138 — per-arch asm fix passes the lipo wall; 85 dylib inputs absent from both trees
+
+Dispatch: run `narrow-build-target.sh` past the two measured walls from
+Control #137 to the ld64.lld link of `libsystem_kernel.dylib`. Two fixes
+applied to the script:
+
+1. **Per-arch asm** (wall 1 from #137): the arch of each `.S`/arch-specific
+   source is now derived from its path — `platform_32bit` or `/i386/` →
+   `-arch i386` only; `platform_64bit` or `/x86_64/` → `-arch x86_64` only.
+   For single-arch objects the thin `.o` is copied to the fat path instead
+   of `llvm-lipo`. The 16 lipo errors from #137 (setjmp, mcount) are gone.
+
+2. **Dylib input resolution** (wall 2): after extracting the link command,
+   every `$DARLING_BUILD_DIR/src/...dylib` path is checked against the main
+   tree, then the dyld-only tree. Found-in-dyld-only paths are rewritten via
+   sed. Absent-from-both paths are accumulated; if any exist the script
+   prints the list and exits 1 before attempting the link. No silent
+   substitutions, no stubs.
+
+### Result
+
+```text
+$ sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1
+[src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib] object commands:     1935
+cc: error: unsupported option '-arch' for target 'x86_64-unknown-freebsd15.1'
+sys/cdefs.h:643:8: error: "Can't define _NONSTD_SOURCE when only UNIX conformance is available."
+llvm-lipo: error: 'src/startup/CMakeFiles/rtsig.dir/rtsig.c.o.i386.o': No such file or directory
+llvm-lipo: error: 'src/external/libc/compat-43/CMakeFiles/libc-compat_legacy.dir/FreeBSD/creat.c.o.x86_64.o': No such file or directory
+llvm-lipo: error: 'src/external/libc/compat-43/CMakeFiles/libc-compat_legacy.dir/FreeBSD/killpg.c.o.x86_64.o': No such file or directory
+[src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib] objects done
+[src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib] MISSING dylib inputs (      85):
+```
+
+First error line: `cc: error: unsupported option '-arch' for target 'x86_64-unknown-freebsd15.1'`.
+
+3 lipo errors remain (down from 16): `rtsig.c` (i386), `creat.c` (x86_64),
+`killpg.c` (x86_64) — sources that fail to compile for one arch due to
+FreeBSD-targeted `cc` rejecting `-arch` or SDK header conformance issues.
+These are separate from the asm-arch wall and do not block the dylib check.
+
+The dylib check fires after `objects done` and stops the script with 85
+missing inputs. `libsystem_dyld_firstpass.dylib` is absent from both
+`$DARLING_BUILD_DIR/src/external/dyld/` and
+`$DARLING_BUILD_DIR/dyld-only/src/external/dyld/` (the dyld-only tree has
+`dyld`, `dyld.patched`, `dyld.patched-dylinker` — no firstpass dylib).
+
+### Missing dylib inputs (85, absent from both main and dyld-only trees)
+
+```text
+src/duct/src/libsystem_duct_firstpass.dylib
+src/external/Libinfo/libsystem_info_firstpass.dylib
+src/external/bsm/libbsm.0.dylib
+src/external/bzip2/libbz2.1.0.dylib
+src/external/cctools/libmacho/libmacho_firstpass.dylib
+src/external/commoncrypto/libcommonCrypto.dylib
+src/external/configd/SystemConfiguration.fproj/SystemConfiguration
+src/external/configd/libsystem_configuration.dylib
+src/external/copyfile/libcopyfile.dylib
+src/external/corecrypto/libcorecrypto_firstpass.dylib
+src/external/coretls/libcoretls.dylib
+src/external/coretls/libcoretls_cfhelpers.dylib
+src/external/coretls/libsystem_coretls.dylib
+src/external/dyld/libsystem_dyld_firstpass.dylib
+src/external/energytrace/libenergytrace.dylib
+src/external/icu/icuSources/libicucore.A.dylib
+src/external/keymgr/libkeymgr_firstpass.dylib
+src/external/libauto/libauto.dylib
+src/external/libc/libdarwin/libsystem_darwin.dylib
+src/external/libcxx/libc++.1.dylib
+src/external/libcxxabi/libc++abi.dylib
+src/external/libiconv/libcharset.1.dylib
+src/external/libnetwork/libnetwork.dylib
+src/external/libnotify/libsystem_notify_firstpass.dylib
+src/external/libresolv/libresolv.9.dylib
+src/external/libressl-2.8.3/libcrypto.44.dylib
+src/external/libressl-2.8.3/libssl.46.dylib
+src/external/libsystem/libSystem.B.dylib
+src/external/libtrace/libsystem_trace_firstpass.dylib
+src/external/libunwind/libunwind_firstpass.dylib
+src/external/libxml2/libxml2.2.dylib
+src/external/libxpc/libxpc_firstpass.dylib
+src/external/ncurses/ncurses/ncurses/libncurses.5.4.dylib
+src/external/objc4/runtime/libobjc.A.dylib
+src/external/openpam/libpam.2.dylib
+src/external/openssl/src/libcrypto.0.9.8.dylib
+src/external/openssl/src/libssl.0.9.8.dylib
+src/external/removefile/libremovefile.dylib
+src/external/sqlite/libsqlite3.0.dylib
+src/external/syslog/libsystem_asl.tproj/libsystem_asl_firstpass.dylib
+src/external/xar/libxar.1.dylib
+src/external/xnu/libkern/kxld/libkxld.dylib
+src/external/zlib/libz.1.dylib
+src/frameworks/Accelerate/vecLib/BLAS/libBLAS.dylib
+src/frameworks/Accelerate/vecLib/BNNS/libBNNS.dylib
+src/frameworks/Accelerate/vecLib/LAPACK/libLAPACK.dylib
+src/frameworks/Accelerate/vecLib/LinearAlgebra/libLinearAlgebra.dylib
+src/frameworks/Accelerate/vecLib/Quadrature/libQuadrature.dylib
+src/frameworks/Accelerate/vecLib/Sparse/libSparse.dylib
+src/frameworks/Accelerate/vecLib/SparseBLAS/libSparseBLAS.dylib
+src/frameworks/Accelerate/vecLib/vDSP/libvDSP.dylib
+src/frameworks/Accelerate/vecLib/vMisc/libvMisc.dylib
+src/lib/system/dnssd/libsystem_dnssd.dylib
+src/libDiagnosticMessagesClient/libDiagnosticMessagesClient.dylib
+src/libMobileGestalt/libMobileGestalt.dylib
+src/libcache/libcache.dylib
+src/libelfloader/libelfloader.dylib
+src/libiconv/libiconv.2.dylib
+src/libm/libsystem_m_firstpass.dylib
+src/libsystem_coreservices/libsystem_coreservices.dylib
+src/native/libEGL.dylib
+src/native/libFreeType.dylib
+src/native/libGL.dylib
+src/native/libGLU.dylib
+src/native/libX11.dylib
+src/native/libXRandR.dylib
+src/native/libXcursor.dylib
+src/native/libXext.dylib
+src/native/libavcodec.dylib
+src/native/libavformat.dylib
+src/native/libavutil.dylib
+src/native/libcairo.dylib
+src/native/libdbus.dylib
+src/native/libfontconfig.dylib
+src/native/libfuse.dylib
+src/native/libgif.dylib
+src/native/libjpeg.dylib
+src/native/libpng.dylib
+src/native/libpulse.dylib
+src/native/libswresample.dylib
+src/native/libtiff.dylib
+src/native/libxkbfile.dylib
+src/networkextension/libsystem_networkextension.dylib
+src/quarantine/libquarantine.dylib
+src/sandbox/libsystem_sandbox.dylib
+```
+
+9 of 94 dylib inputs exist in the main tree (firstpass pieces: compiler_rt,
+libc, blocks, dispatch, malloc, platform, pthread, kernel, launchd). None of
+the 85 missing ones exist in the dyld-only tree either.
+
+### nm gate
+
+Not run: no fresh `libsystem_kernel.dylib` was produced (the link stopped on
+missing inputs). Overlay untouched.
+
+### Repro
+
+```sh
+export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
+sh build-freebsd/build-dyld-only.sh     # RC=0
+sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1, prints 85 missing dylib inputs
+```
