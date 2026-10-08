@@ -33,6 +33,8 @@ INCLUDES="-I$GEN_DIR -I$LLD_SRC/lld/include -I$LLD_SRC/lld/MachO -I$LLVM_PREFIX/
 # source path relative to $LLD_SRC/lld : patch to apply to it
 PATCHED="MachO/DriverUtils.cpp:$HERE/patches/DriverUtils.opt-table.patch
 MachO/LTO.cpp:$HERE/patches/LTO.thin-backend-pool.patch
+MachO/SyntheticSections.cpp:$HERE/patches/SyntheticSections.stub-helper-cache.patch
+MachO/Arch/X86_64.cpp:$HERE/patches/X86_64.stub-helper-header.patch
 Common/DWARF.cpp:$HERE/patches/DWARF.line-table-addr.patch"
 
 patch_for() {
@@ -47,6 +49,7 @@ compile_one() {
   patch=$(patch_for "$rel")
   if [ -n "$patch" ]; then
     staged="$GEN_DIR/lld/$rel"
+    mkdir -p "$(dirname "$staged")"
     cp "$src" "$staged"
     patch -s -p1 -d "$GEN_DIR" -i "$patch"
     src="$staged"

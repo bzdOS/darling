@@ -1,0 +1,24 @@
+--- a/lld/MachO/SyntheticSections.cpp
++++ b/lld/MachO/SyntheticSections.cpp
+@@ -797,14 +797,17 @@
+ 
+   // treatUndefinedSymbol() can replace binder with a DylibSymbol; re-check.
+   stubBinder = dyn_cast_or_null<DylibSymbol>(binder);
+-  if (stubBinder == nullptr)
+-    return;
+ 
+-  in.got->addEntry(stubBinder);
+-
++  // The stub helper header refers to the loader cache whether or not a binder
++  // was resolved, so the cache gets its output section before we bail out.
+   in.imageLoaderCache->parent =
+       ConcatOutputSection::getOrCreateForInput(in.imageLoaderCache);
+   addInputSection(in.imageLoaderCache);
++
++  if (stubBinder == nullptr)
++    return;
++
++  in.got->addEntry(stubBinder);
+   // Since this isn't in the symbol table or in any input file, the noDeadStrip
+   // argument doesn't matter.
+   dyldPrivate =

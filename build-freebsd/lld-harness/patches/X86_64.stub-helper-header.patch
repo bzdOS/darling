@@ -1,0 +1,14 @@
+--- a/lld/MachO/Arch/X86_64.cpp
++++ b/lld/MachO/Arch/X86_64.cpp
+@@ -157,6 +157,11 @@
+   SymbolDiagnostic d = {nullptr, "stub helper header"};
+   writeRipRelative(d, buf, in.stubHelper->addr, 7,
+                    in.imageLoaderCache->getVA());
++  // The binder's GOT slot is only allocated when setUp() resolved a binder, so
++  // under -undefined suppress there is no slot to relocate to: leave the
++  // template bytes rather than dereference a null binder.
++  if (in.stubHelper->stubBinder == nullptr)
++    return;
+   writeRipRelative(d, buf, in.stubHelper->addr, 0xf,
+                    in.got->addr +
+                        in.stubHelper->stubBinder->gotIndex * LP64::wordSize);
