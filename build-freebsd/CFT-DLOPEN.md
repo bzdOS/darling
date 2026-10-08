@@ -12239,3 +12239,74 @@ llvm-objdump -d --start-address=0x668bf0 --stop-address=0x668c20 /usr/local/llvm
 sed -n '155,161p' /usr/src/contrib/llvm-project/lld/MachO/Arch/X86_64.cpp
 sed -n '105,140p' /usr/src/contrib/llvm-project/lld/MachO/SymbolTable.cpp
 ```
+
+## Control #137 — dyld-only refresh passes (RC=0); libsystem_kernel narrow link stops on absent main-tree dylib inputs
+
+Dispatch (repeat of an interrupted turn): rebuild `libsystem_kernel` with
+both hidden fixes (`fix-unlock-export.sh` #113 + `fix-lock-decl-visibility.sh`
+#118 — re-checked present in the worktree) via `narrow-build-target.sh`; the
+gate is `llvm-nm -gU` on the fresh dylib (exports must NOT contain
+`_os_unfair_lock_lock` / `_os_unfair_lock_unlock`). The prior wall was
+`dyld/VersionMap.h` (Control #122): the main SDK's copy is a dangling symlink
+(target `src/external/AvailabilityVersions/gen/...` absent, verified), and
+`narrow-build-target.sh` appends the dyld-only SDK's real copy as the LAST
+`-I`.
+
+### Step 1 — build-dyld-only.sh: RC=0
+
+```text
+$ export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
+$ sh build-freebsd/build-dyld-only.sh      # RC=0
+== applying salvage files ...
+== dedup: strip glue.c fallbacks that duplicate the static libs
+removed: __stderrp memset _NSConcreteStackBlock _NSConcreteGlobalBlock _Block_object_assign _Block_object_dispose uuid_unparse_upper
+== cmake configure
+== ninja system_loader
+[284/284] (no FAILED)
+== raw: Mach-O 64-bit x86_64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>
+== patched: Mach-O 64-bit x86_64 dynamic linker, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>
+DONE patched=$DARLING_BUILD_DIR/dyld-only/src/external/dyld/dyld.patched
+```
+
+VersionMap.h wall gone: a test compile of `#include <dyld/VersionMap.h>`
+with the main SDK `-I` FIRST and the dyld-only `-I` SECOND resolves from the
+real copy (it then needs `<set>`, which the build supplies via
+`-I.../libcxx/include`; without that `-I`: `fatal error: 'set' file not found`).
+
+### Step 2 — narrow-build-target.sh: RC=1 at the link
+
+```text
+$ sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1
+[src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib] object commands:     1935
+... per-arch compiles + llvm-lipo ...
+[src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib] objects done
+cc: error: no such file or directory: 'src/external/dyld/libsystem_dyld_firstpass.dylib'
+```
+
+The path is BOTH a plain link input and a `-Wl,-dylib_file` target
+(`-Wl,-dylib_file,/usr/lib/system/libdyld.dylib:$DARLING_BUILD_DIR/src/external/dyld/libsystem_dyld_firstpass.dylib`).
+Of the 94 unique dylib paths under `$DARLING_BUILD_DIR/src` that the link
+command references, 9 exist (firstpass pieces: compiler_rt, libc, blocks,
+dispatch, malloc, platform, pthread, kernel, launchd); 85 are absent — the
+main tree was never fully built.
+
+Second wall in the same run — 16 `llvm-lipo: error: '...': No such file or
+directory` for fat objects whose wrong-arch thin half failed to compile:
+arch-specific asm built for the other arch, e.g.
+`platform_32bit.dir/src/setjmp/i386/_setjmp.S.o.x86_64.o`
+(`register %rdi is only available in 64-bit mode`, setjmp.S:99) and its
+mirror (`platform_64bit ... .i386.o`); also libc `mcount.S` (i386/x86_64
+mirrors) and `startup/rtsig.c`.
+
+### nm gate
+
+Not run: no fresh `libsystem_kernel.dylib` was produced (the link stopped).
+Overlay untouched.
+
+### Repro
+
+```sh
+export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
+sh build-freebsd/build-dyld-only.sh     # RC=0
+sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1
+```
