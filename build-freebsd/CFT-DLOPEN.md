@@ -12545,3 +12545,64 @@ target (the dyld binary). The other firstpass dylibs present in the dyld-only
 tree (`libsystem_c`, `libcompiler_rt`, `libsystem_kernel`, ...) are inside
 `system_loader`'s closure; `libsystem_dyld_firstpass.dylib` is a separate
 target, outside it, so it is never built by the dyld-only refresh.
+
+## Control #140 — the firstpass build step and its two walls
+
+Dispatch: build the one missing link input
+`src/external/dyld/libsystem_dyld_firstpass.dylib` as a single ninja target in
+the dyld-only tree, then re-run to the link and the nm gate.
+
+### (a) The build step
+
+`build-dyld-only.sh` now runs, after `system_loader`:
+
+```sh
+ninja -C "${BUILDDIR}" src/external/dyld/libsystem_dyld_firstpass.dylib
+```
+
+Its own closure, not the tree.
+
+### Wall 1 — no `-platform_version` (fixed)
+
+The target's link carries only `-Wl,-sdk_version,11.0`; ld64.lld requires
+`-platform_version`. Only `system_loader` gets it (`src/external/dyld/CMakeLists.txt:133`).
+Added `-Wl,-platform_version,macos,${CMAKE_OSX_DEPLOYMENT_TARGET},${CMAKE_OSX_DEPLOYMENT_TARGET}`
+to the `system_dyld` and `system_dyld_firstpass` targets in the salvage
+CMakeLists (the firstpass target's LINK_FLAGS is built by `cmake/darling_lib.cmake`
+`add_circular`). The first link error then changes.
+
+### Wall 2 — ld64.lld segfault (the #125 wall)
+
+With `-platform_version` present the firstpass link now segfaults ld64.lld:
+
+```text
+#6 lld::macho::InputSection::getVA(unsigned long) const
+#8 lld::macho::StubHelperSection::writeTo(unsigned char*) const
+clang++: error: unable to execute command: Segmentation fault (core dumped)
+```
+
+This is the Control #125/#135 wall (`InputSection::parent` NULL in
+`StubHelperSection::writeTo`) on the `-Wl,-flat_namespace -Wl,-undefined,suppress`
+firstpass link. The input is the dyld objects; the other firstpass dylibs
+built with the same flags, so the crash is input-specific. The missing input
+cannot be produced by this target route.
+
+### (b) The three lipo-wall objects are NOT in the target's own link
+
+| object | command fact | main-tree `.o` | in own link |
+|---|---|---|---|
+| `src/startup/CMakeFiles/rtsig.dir/rtsig.c.o` | host `cc`, no `-target`; `-arch` rejected (`nbt-run139.log:2-3`) | absent | **no** |
+| `.../libc-compat_legacy.dir/FreeBSD/creat.c.o` | `-target x86_64-apple-darwin20 -D_NONSTD_SOURCE`; SDK `cdefs.h:643` (`nbt-run139.log:11679`) | thin i386 | **no** |
+| `.../libc-compat_legacy.dir/FreeBSD/killpg.c.o` | same as creat.c (`nbt-run139.log:11688`) | thin i386 | **no** |
+
+The Control #139 own link (891 objects) holds only
+`libsystem_kernel/{emulation,libsyscall}/...` objects; these three are in the
+closure's compile list (1935), not the link. The dispatch's premise that they
+would "stand on the link after missing=0" does not hold.
+
+### (c) Re-run
+
+Not run: with the firstpass dylib unbuilt, `narrow-build-target.sh` stops
+again at `MISSING dylib inputs (1)` before the link — the same deterministic
+result as Control #139, with no link outcome to report. (d) nm gate: no
+dylib produced.

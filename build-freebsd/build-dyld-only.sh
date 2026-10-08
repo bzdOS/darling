@@ -81,6 +81,12 @@ cmake -G Ninja -B "${BUILDDIR}" \
 echo "== ninja system_loader"
 ninja -C "${BUILDDIR}" system_loader || exit 3
 
+# The firstpass dylib is a direct link input of libsystem_kernel
+# (narrow-build-target.sh), but system_loader's closure does not include it.
+# Build that one target (its own closure, not the tree).
+echo "== ninja system_dyld_firstpass"
+ninja -C "${BUILDDIR}" src/external/dyld/libsystem_dyld_firstpass.dylib || exit 5
+
 RAW="${BUILDDIR}/src/external/dyld/dyld"
 PATCHED="${BUILDDIR}/src/external/dyld/dyld.patched"
 echo "== raw: $(file -b "${RAW}" 2>/dev/null)"

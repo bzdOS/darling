@@ -77,7 +77,9 @@ set_target_properties(system_dyld PROPERTIES
 set_property(TARGET system_dyld_obj APPEND_STRING PROPERTY
 	COMPILE_FLAGS " -fno-exceptions -fno-rtti -DBUILDING_LIBDYLD=1")
 set_property(TARGET system_dyld APPEND_STRING PROPERTY
-	LINK_FLAGS " -Wl,-compatibility_version,1.0.0 -Wl,-current_version,421.1.0")
+	LINK_FLAGS " -Wl,-compatibility_version,1.0.0 -Wl,-current_version,421.1.0 -Wl,-platform_version,macos,${CMAKE_OSX_DEPLOYMENT_TARGET},${CMAKE_OSX_DEPLOYMENT_TARGET}")
+set_property(TARGET system_dyld_firstpass APPEND_STRING PROPERTY
+	LINK_FLAGS " -Wl,-platform_version,macos,${CMAKE_OSX_DEPLOYMENT_TARGET},${CMAKE_OSX_DEPLOYMENT_TARGET}")
 #target_link_libraries(system_dyld PRIVATE platform_static32 platform_static64 system_c system_kernel compiler_rt launch)
 
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS_SAVED} -nostdlib")
