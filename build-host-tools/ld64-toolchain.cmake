@@ -12,8 +12,10 @@ set(CMAKE_CXX_COMPILER /usr/bin/c++)
 # (machofile()._fixups.data()+..., macho_relocatable_file.cpp:759): the plain
 # operator[] form trips the libc++ hardening assert on the legitimate
 # one-past-the-end index and dies with ud2/SIGILL.
-set(CMAKE_C_FLAGS_INIT "-DDARLING")
-set(CMAKE_CXX_FLAGS_INIT "-DDARLING")
+# -include ld64-prefix-fix.h repairs PROGRAM_PREFIX, whose value CMakeLists.txt:28
+# emits with quotes the shell strips (see the header's comment).
+set(CMAKE_C_FLAGS_INIT "-DDARLING -include ${CMAKE_CURRENT_LIST_DIR}/ld64-prefix-fix.h")
+set(CMAKE_CXX_FLAGS_INIT "-DDARLING -include ${CMAKE_CURRENT_LIST_DIR}/ld64-prefix-fix.h")
 
 set(CMAKE_FIND_ROOT_PATH /usr)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
