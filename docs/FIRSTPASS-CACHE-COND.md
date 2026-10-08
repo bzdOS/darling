@@ -84,7 +84,7 @@ overlay and build trees, then:
 
 ```sh
 export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
-cd "$DARLING_SRC_DIR" && sh build-freebsd/build.dy-only.sh
+cd "$DARLING_SRC_DIR" && sh build-freebsd/build-dyld-only.sh
 # -> RC=0, builds system_loader + libsystem_dyld_firstpass.dylib (with -fixup_chains)
 
 llvm-nm -gU "$DARLING_BUILD_DIR/dyld-only/src/external/dyld/libsystem_dyld_firstpass.dylib"
@@ -95,7 +95,7 @@ The generated firstpass link command contains `-Wl,-fixup_chains` (verified:
 
 ## 5. Link result
 
-`sh build-freebsd/build.dy-only.sh` → **RC=0**. The firstpass dylib is produced:
+`sh build-freebsd/build-dyld-only.sh` → **RC=0**. The firstpass dylib is produced:
 
 ```
 $DARLING_BUILD_DIR/dyld-only/src/external/dyld/libsystem_dyld_firstpass.dylib
