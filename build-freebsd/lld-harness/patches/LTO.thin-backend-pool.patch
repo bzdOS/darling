@@ -1,0 +1,11 @@
+--- a/lld/MachO/LTO.cpp
++++ b/lld/MachO/LTO.cpp
+@@ -89,7 +89,7 @@
+   lto::ThinBackend backend;
+   auto onIndexWrite = [&](StringRef S) { thinIndices.erase(S); };
+   if (config->thinLTOIndexOnly) {
+-    backend = lto::createWriteIndexesThinBackend(
++    backend = lto::createWriteIndexesThinBackend(llvm::ThreadPoolStrategy(),
+         std::string(config->thinLTOPrefixReplaceOld),
+         std::string(config->thinLTOPrefixReplaceNew),
+         std::string(config->thinLTOPrefixReplaceNativeObject),

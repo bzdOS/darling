@@ -14,9 +14,20 @@ main: link returned <n>
 ```
 
 It is used to reproduce a crash in `lld::macho::link` without a full toolchain
-build. `main()` returns the `bool` that `lld::macho::link()` returns, so its
-exit code is **inverted** relative to the real `ld.lld` (`true` → 1). Read the
-stderr text and the reference binary, not the harness exit code alone.
+build. `main()` prints markers on stderr so a crash report says how far it got:
+
+```
+main: start
+main: handler initialized
+main: calling link
+main: link returned 1
+```
+
+`main()` also follows the reference convention for the exit code: `link()`
+returns a bool, and the real `ld.lld` turns it into 0 on success and non-zero on
+failure. Returning the bool directly (as an earlier revision of this harness
+did) reports the opposite of the reference and every rc in a parity table reads
+inverted. `parity.sh` exists to keep that honest.
 
 ## The defect
 
@@ -71,36 +82,71 @@ No hand-written table: `OptionStrTable` and `OptionPrefixesTable` are the
 generator's output, so the record array and the prefix array cannot drift apart
 again.
 
-## Reproduction
+Measured, same binary before and after the patch: `-v` and `--help` both died
+with SIGSEGV (rc=139) inside `GenericOptTable::GenericOptTable` before it, and
+run afterwards (exit codes per the parity table below). `--help` prints 259
+lines of option help against the reference's 297: the system
+`lld/MachO/Options.td` predates options added upstream later
+(`--bp-compression-sort`, `--icf=safe_thunks`, …), a difference of content,
+not of format.
+
+## Building it from a clean checkout
 
 ```sh
-sh build-freebsd/lld-harness/gen-options.sh          # tblgen step, byte-identical table
-sh build-freebsd/lld-harness/build-ld64.sh            # compile DriverUtils, link, run the check
+sh build-freebsd/lld-harness/build-ld64.sh
 ```
 
-Expected, measured on a host with llvm21 under `/usr/local`:
+One script, three steps, no leftovers from a previous session:
 
-| command | before the patch | after the patch |
-| --- | --- | --- |
-| `ld64.lld -v` | rc=139, SIGSEGV in `GenericOptTable` | rc=0, `error: must specify -arch` |
-| `ld64.lld --help` | rc=139, SIGSEGV | 259 lines of option help |
-| `ld64.lld -arch x86_64 -v` | rc=139, SIGSEGV | same two errors as `ld.lld -flavor darwin` |
+1. `gen-options.sh` — `llvm-tblgen --gen-opt-parser-defs` over
+   `lld/MachO/Options.td`.
+2. `compile-sources.sh` — every file of `lld/MachO`, `lld/MachO/Arch` and
+   `lld/Common` in its own compiler call, plus `main.cpp`. 40 objects, about
+   70 s.
+3. link, then `parity.sh`.
 
-The reference binary `ld.lld -flavor darwin -v` prints `error: must specify
--arch` too: `config()` runs before the `-v` handler (`Driver.cpp:800` vs
-`Driver.cpp:1518`). Our harness prints the same stderr text; its exit code is
-inverted by the harness `main()` described above.
+Two things about the sources are not obvious and are pinned here:
 
-`--help` output (259 lines) is a subset of the reference output (297 lines):
-the system `lld/MachO/Options.td` is older and lacks options added upstream
-later (`--bp-compression-sort`, `--icf=safe_thunks`, …). That difference is the
-table's content, not its format.
+* **Include order.** `lld/include` comes before the llvm install, because that
+  install ships its own `lld/Common/ErrorHandler.h` and that copy no longer
+  declares `lld::outs()`/`lld::errs()`, which the system sources still call.
+  `lld/MachO` is on the path too, for `Arch/X.h` and `InputFiles.h`.
+* **Three sources carry a one-argument patch** (`patches/`), because the
+  installed llvm is newer than the lld sources:
+  `DriverUtils.opt-table.patch` (the option table, above),
+  `LTO.thin-backend-pool.patch` (`createWriteIndexesThinBackend()` grew a
+  `ThreadPoolStrategy` parameter) and `DWARF.line-table-addr.patch`
+  (`getFileLineInfoForAddress()` grew an `Approximate` flag). Nothing else in
+  those two directories needed changing; the remaining 37 files compile as they
+  stand.
+
+## Exit-code parity with the reference
+
+`parity.sh` links the same three cases through the harness and through
+`ld.lld -flavor darwin`, and prints both exit codes and both stderr texts:
+
+| case | harness | reference | stderr |
+| --- | --- | --- | --- |
+| `-v` | 1 | 1 | `error: must specify -arch`, both |
+| `-dylib … does-not-exist.o` | 1 | 1 | `error: cannot open …`, both |
+| `-dylib … trivial.o` | 0 | 0 | empty, both |
+
+The successful case links a 16752-byte arm64 dylib from a one-function object
+and writes the same size as the reference (same length, different bytes: the
+`LC_UUID` and the embedded linker path differ).
+
+`-v` is 1 on both sides because `config()` runs before the `-v` handler
+(`Driver.cpp:800` against `Driver.cpp:1518`), so a bare `-v` never prints a
+version; it is still the cheapest probe that the option table got past its
+constructor.
 
 ## Files
 
 * `gen-options.sh` — the exact `llvm-tblgen --gen-opt-parser-defs` invocation.
 * `generated/Options.inc` — its output (sha256 `8fa50f25…72c294`, 126533 bytes);
   regenerate and compare rather than edit.
-* `patches/DriverUtils.opt-table.patch` — the patch against the tree's
-  `lld/MachO/DriverUtils.cpp`.
-* `build-ld64.sh` — compile the patched file, link the harness, run the check.
+* `patches/` — the three patches named above.
+* `compile-sources.sh` — one compiler call per source file.
+* `main.cpp` — the instrumented entry point and the exit-code convention.
+* `build-ld64.sh` — generate, compile, link, check.
+* `parity.sh` — the rc table against the reference binary.

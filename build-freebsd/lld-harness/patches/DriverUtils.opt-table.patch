@@ -1,5 +1,5 @@
---- /usr/src/contrib/llvm-project/lld/MachO/DriverUtils.cpp	2026-06-06 18:41:53.572721000 +0000
-+++ b/DriverUtils.cpp	2026-10-08 01:26:35.768244000 +0000
+--- a/lld/MachO/DriverUtils.cpp
++++ b/lld/MachO/DriverUtils.cpp
 @@ -34,14 +34,14 @@
  using namespace lld;
  using namespace lld::macho;

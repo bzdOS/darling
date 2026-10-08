@@ -1,0 +1,11 @@
+--- a/lld/Common/DWARF.cpp
++++ b/lld/Common/DWARF.cpp
+@@ -93,7 +93,7 @@
+   DILineInfo info;
+   for (const llvm::DWARFDebugLine::LineTable *lt : lineTables) {
+     if (lt->getFileLineInfoForAddress(
+-            {offset, sectionIndex}, nullptr,
++            {offset, sectionIndex}, false, nullptr,
+             DILineInfoSpecifier::FileLineInfoKind::AbsoluteFilePath, info))
+       return info;
+   }
