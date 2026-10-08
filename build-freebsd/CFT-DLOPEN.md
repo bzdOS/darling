@@ -12528,3 +12528,20 @@ step and do not block the dylib check.
 export DARLING_SRC_DIR=... DARLING_BUILD_DIR=...
 sh build-freebsd/narrow-build-target.sh src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib   # RC=1, prints 1 missing dylib input
 ```
+
+### Addendum — the 1 missing input is a defined ninja target, just unbuilt
+
+`libsystem_dyld_firstpass.dylib` is a target in both trees
+(`CXX_SHARED_LIBRARY_LINKER__system_dyld_firstpass`):
+
+```text
+$ ninja -t targets all | grep -i dyld_firstpass
+src/external/dyld/libsystem_dyld_firstpass.dylib: CXX_SHARED_LIBRARY_LINKER__system_dyld_firstpass_Release   # main tree
+src/external/dyld/libsystem_dyld_firstpass.dylib: CXX_SHARED_LIBRARY_LINKER__system_dyld_firstpass_          # dyld-only tree
+```
+
+It is unbuilt because `build-dyld-only.sh` builds only the `system_loader`
+target (the dyld binary). The other firstpass dylibs present in the dyld-only
+tree (`libsystem_c`, `libcompiler_rt`, `libsystem_kernel`, ...) are inside
+`system_loader`'s closure; `libsystem_dyld_firstpass.dylib` is a separate
+target, outside it, so it is never built by the dyld-only refresh.
