@@ -100,6 +100,16 @@ if [ -s /tmp/nbt-dylib-rewrite.sed ]; then
     sed -f /tmp/nbt-dylib-rewrite.sed /tmp/nbt-link.sh > /tmp/nbt-link.sh.rw && mv /tmp/nbt-link.sh.rw /tmp/nbt-link.sh
     echo "[$TARGET] dylib inputs redirected to dyld-only: $(wc -l < /tmp/nbt-dylib-rewrite.sed)"
 fi
+# Control #142 step 4: libsystem_kernel references libsimple's lock symbols
+# (src/libsimple/src/lock.c: _libsimple_lock_lock/_unlock and the four
+# _libsimple_rwlock_*). The link carries src/libsimple-darling/liblibsimple_darling.a,
+# but that archive is built by the cctools ar wrapper and its symbols do not
+# resolve, so add the prebuilt fat lock.o object directly to the link.
+LIBSIMPLE_O="${BD}/src/libsimple-darling/CMakeFiles/libsimple_darling.dir/src/lock.c.o"
+if [ -f "$LIBSIMPLE_O" ] && ! grep -q -- "$LIBSIMPLE_O" /tmp/nbt-link.sh; then
+    sed "s#src/libsimple-darling/liblibsimple_darling.a#${LIBSIMPLE_O} src/libsimple-darling/liblibsimple_darling.a#" /tmp/nbt-link.sh > /tmp/nbt-link.sh.ls && mv /tmp/nbt-link.sh.ls /tmp/nbt-link.sh
+    echo "[$TARGET] added libsimple lock.o to the link ($(llvm-nm -gU "$LIBSIMPLE_O" | grep -c ' T _libsimple') libsimple symbols)"
+fi
 if grep -q -- "-arch i386 -arch x86_64" /tmp/nbt-link.sh; then
     # fat link: two thin links + lipo
     out=$(grep -oE '\-o [^ ]+' /tmp/nbt-link.sh | tail -1 | sed 's/-o //')
