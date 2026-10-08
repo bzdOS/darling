@@ -83,6 +83,7 @@ resolve_dylib() {
     [ -f "$p" ] && return 0
     if [ -f "$BD/dyld-only/$rel" ]; then
         printf 's#%s#%s#g\n' "$p" "$BD/dyld-only/$rel" >> /tmp/nbt-dylib-rewrite.sed
+        printf 's#%s%s#%s%s#g\n' '\([[:space:]]\)' "$rel" '\1' "$BD/dyld-only/$rel" >> /tmp/nbt-dylib-rewrite.sed
         return 0
     fi
     echo "$rel" >> /tmp/nbt-missing-dylibs.txt
