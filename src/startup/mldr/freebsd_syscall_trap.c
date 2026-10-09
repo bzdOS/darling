@@ -1245,6 +1245,9 @@ mldr_plant_traps(uintptr_t base, size_t size, const char *name)
                                 } else if (at[0] == 0x48 && at[1] == 0x89
                                            && at[2] == 0xe5) {
                                     t->emulate = 3;      /* movq %rsp,%rbp */
+                                } else if (at[0] == 0x55 && at[1] == 0x48
+                                           && at[2] == 0x89 && at[3] == 0xe5) {
+                                    t->emulate = 6;      /* pushq %rbp; movq %rsp,%rbp */
                                 } else {
                                     t->resume = 0;       /* cannot emulate: die */
                                 }
@@ -3203,6 +3206,17 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                 mldr_report_trap(t, mc);
                 mc->mc_rbp = mc->mc_rsp;
                 mc->mc_rip = t->addr + 3;
+                return;
+            } else if (t->resume && t->emulate == 6) {
+                /* pushq %rbp; movq %rsp,%rbp (55 48 89 e5): the ud2 clobbers
+                 * 55 48, leaving 89 e5. Emulate both: save old rbp on the
+                 * stack, set rbp to the new rsp, skip all 4 bytes. */
+                uintptr_t nsp = (uintptr_t)mc->mc_rsp - 8;
+                mldr_report_trap(t, mc);
+                *(volatile uint64_t *)nsp = mc->mc_rbp;
+                mc->mc_rsp = nsp;
+                mc->mc_rbp = nsp;
+                mc->mc_rip = t->addr + 4;
                 return;
             } else if (t->resume && t->emulate == 4) {
                 /* movl %eax,%ebx (89 c3): ebx = eax (32-bit, zero-extended). */
