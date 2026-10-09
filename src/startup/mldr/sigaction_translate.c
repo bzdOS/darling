@@ -14,6 +14,8 @@
 #ifdef DARLING_FREEBSD
 
 #include "sigaction_translate.h"
+#include "linux_siginfo.h"
+#include "linux_ucontext.h"
 
 #include <signal.h>
 #include <sys/syscall.h>
@@ -272,6 +274,67 @@ struct sat_registry_entry {
 };
 static struct sat_registry_entry sat_registry[32];
 
+/* ── delivery trampoline: FreeBSD ABI -> Linux ABI around the guest handler ─
+ *
+ * Installed (see mldr_sys_rt_sigaction below) as the FreeBSD sa_sigaction for
+ * every guest handler that is not DFL/IGN/ERR. FreeBSD calls it with the
+ * native signal number, a native `siginfo_t*` and a native `ucontext_t*`;
+ * the guest handler expects the Linux-ABI equivalents. This is exactly the
+ * gap SPEC-signal-abi-bridge.md leaves open as "Открытые вопросы #5" and that
+ * docs/SIGEXC-STATE-DEREF.md traced the step-20 SIGSEGV to: without it the
+ * guest reads FreeBSD `mcontext.mc_fpformat` (= 0x10002) as the Linux
+ * `uc_mcontext.fpregs` pointer and dereferences it.
+ *
+ * Convert both, call the guest handler with the Linux-ABI pointers, then
+ * write the guest's (possibly edited) general registers back into the native
+ * ucontext that sigreturn(2) will restore.
+ *
+ * Async-signal-safe: no malloc/free; both converted structs are stack locals,
+ * and both converters are pure field copies.
+ */
+
+/* inverse of sat_linux_signo_to_freebsd() over 1..31; 0 when there is no
+ * counterpart (SIGSTKFLT/SIGPWR — never installed through this file). */
+static int
+sat_freebsd_signo_to_linux(int native_signo)
+{
+    for (int ls = 1; ls <= 31; ls++) {
+        if (sat_linux_signo_to_freebsd(ls) == native_signo)
+            return ls;
+    }
+    return 0;
+}
+
+typedef void (*sat_guest_handler_t)(int, struct linux_siginfo_compat *, void *);
+
+static void
+sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
+                             void *native_uctx)
+{
+    int linux_signo = sat_freebsd_signo_to_linux(native_signo);
+    if (linux_signo < 1 || linux_signo > 31)
+        return;
+
+    struct sat_registry_entry *ent = &sat_registry[linux_signo];
+    if (!ent->valid)
+        return;
+
+    void *handler = ent->wire.lsa_handler;
+    if (handler == SAT_LINUX_SIG_DFL || handler == SAT_LINUX_SIG_IGN ||
+        handler == SAT_LINUX_SIG_ERR)
+        return;
+
+    struct linux_siginfo_compat linfo;
+    struct linux_ucontext_compat luctx;
+
+    mldr_siginfo_freebsd_to_linux(native_info, linux_signo, &linfo);
+    mldr_ucontext_freebsd_to_linux((const ucontext_t *)native_uctx, &luctx);
+
+    ((sat_guest_handler_t)handler)(linux_signo, &linfo, &luctx);
+
+    mldr_ucontext_linux_to_freebsd(&luctx, (ucontext_t *)native_uctx);
+}
+
 long
 mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
                        size_t sigsetsize)
@@ -339,13 +402,26 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
     struct sigaction *pnew = NULL, *pold = (wire_old != NULL) ? &native_old : NULL;
 
     if (wire_act != NULL) {
+        /* Record the guest's request BEFORE installing: the delivery
+         * trampoline reads this table, so it must never be able to run with
+         * a stale entry for a signal that arrives right after sigaction. */
+        sat_registry[linux_signo].wire = *wire_act;
+        sat_registry[linux_signo].valid = true;
+
         memset(&native_new, 0, sizeof(native_new));
-        /* sa_handler/sa_sigaction share one union slot on FreeBSD; the
-         * guest handler is passed through untranslated (SPEC §7 step 4 —
-         * either a real trampoline pointer, expected to be called
-         * three-arg since we force SA_SIGINFO below, or one of
-         * SIG_DFL/IGN/ERR, numerically identical on both ABIs). */
-        native_new.sa_handler = (void (*)(int))wire_act->lsa_handler;
+        /* sa_handler/sa_sigaction share one union slot on FreeBSD. A real
+         * handler is NOT installed raw: FreeBSD would call it with native
+         * FreeBSD siginfo_t/ucontext_t while the guest expects the Linux
+         * ABI (SPEC §5 open question #5). Install the ABI-bridging
+         * trampoline instead. SIG_DFL/IGN/ERR are numerically identical on
+         * both ABIs, so those go through raw. */
+        if (wire_act->lsa_handler != SAT_LINUX_SIG_DFL &&
+            wire_act->lsa_handler != SAT_LINUX_SIG_IGN &&
+            wire_act->lsa_handler != SAT_LINUX_SIG_ERR) {
+            native_new.sa_handler = (void (*)(int))sat_guest_handler_trampoline;
+        } else {
+            native_new.sa_handler = (void (*)(int))wire_act->lsa_handler;
+        }
         native_new.sa_flags = sat_flags_linux_to_native(wire_act->sa_flags,
                                                           wire_act->lsa_handler);
 
@@ -399,11 +475,6 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
          * no restorer to speak of on the Linux side either). */
         struct sat_registry_entry *ent = &sat_registry[linux_signo];
         wire_old->sa_restorer = ent->valid ? ent->wire.sa_restorer : NULL;
-    }
-
-    if (wire_act != NULL) {
-        sat_registry[linux_signo].wire = *wire_act;
-        sat_registry[linux_signo].valid = true;
     }
 
     return 0;

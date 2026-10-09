@@ -25,7 +25,7 @@
  *     host's own glibc headers — this host runs Linux, confirmed against
  *     waitid.h field-for-field: si_signo/si_errno/si_code order, the
  *     _kill/_timer/_rt/_sigchld/_sigfault/_sigpoll/_sigsys union, and the
- *     SI_USER/SI_QUEUE/SI_TIMER/... and SEGV_*/ILL_*/FPE_*/BUS_*/CLD_*
+ *     SI_USER/SI_QUEUE/SI_TIMER/... and the SEGV_/ILL_/FPE_/BUS_/CLD_ families
  *     enum values in bits/siginfo-consts.h).
  * Deliberately NOT modeled on
  * src/external/xnu/darling/.../conversion/signal/sigaction.h:46-66
@@ -57,6 +57,22 @@
 
 #include <signal.h>   /* siginfo_t (FreeBSD-native, from the build's libc) */
 #include <sys/types.h> /* pid_t, uid_t */
+
+/*
+ * FreeBSD's <sys/signal.h> defines si_overrun/si_band (and si_trapno/
+ * si_timerid/si_mqd/si_syscall) as macros aliasing into its own siginfo_t
+ * union. Two of those names are used as member names in the Linux-ABI struct
+ * below and would be macro-rewritten into a syntax error. The member names
+ * are mldr-internal (the guest handler reads its own struct; only the byte
+ * offsets matter), so drop just the two that collide for this translation
+ * unit.
+ */
+#ifdef si_overrun
+#undef si_overrun
+#endif
+#ifdef si_band
+#undef si_band
+#endif
 
 /*
  * Linux si_code space is split by kernel convention:
