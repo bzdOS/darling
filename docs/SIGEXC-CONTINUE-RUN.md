@@ -72,3 +72,26 @@ sudo dmesg | tail                              # pid N (mldr) ... exited on sign
 ```
 
 Log `diag/sigexc-continue-run-1.log` (102 452 486 B, frozen).
+
+## Redo — log `diag/sigexc-fix-2.log` (Control #145), RUN_DONE made to land
+
+Same run, head-requested log name. Same result: both Chrome traps hit once, then
+death on SIGTRAP at `0x212aa00`; log frozen at 1 292 548 lines / 102 452 485 B,
+and then the wrapper's own line lands:
+
+```
+RUN_DONE rc=133
+```
+
+(rc 133 = 128 + 5 — the guest's SIGTRAP). `dmesg`:
+`pid 99903 (mldr), jid 0, uid 0: exited on signal 5`.
+
+### Why the previous wrapper survived its own `timeout 1700`
+
+When the guest dies, `launch-dynamic`/`sudo` exit, but the **darlingserver** —
+the daemon that holds the run socket — is reparented to the `timeout` process
+and keeps running. `timeout` waits for that (now daemon) child and never
+returns, so the wrapper's `RUN_DONE` line never executes; `timeout`'s SIGTERM
+alone does not stop the daemon. Stopping the darlingserver by exact pid let the
+`timeout` return and the wrapper log `RUN_DONE rc=133` (a `timeout -k <grace>`
+would do the same without manual intervention).
