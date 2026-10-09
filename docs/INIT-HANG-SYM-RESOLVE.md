@@ -523,3 +523,112 @@ LOG=/tmp/foundation-probe-158b-init-hang.log
 `_getentropy` в Darling (известный по лёну вопрос, не проверялся в этом шаге);
 содержимое обоих прямых вызовов из `0x212aa00` в `0xccdb60` не разбиралось
 (там 12 `callq`, 9 разрешены — см. шаг 10).
+
+---
+
+# Шаг 12: минимальный гостевой пробник getentropy — изоляция смерти от Chrome
+
+Задача: повторный вход тем же потоком в путь `getentropy`/`arc4random` как
+причина смерти. Шаг 11 сузил каскад до `0x212aa00 → 0xccdb60 →
+0x64d020 → _getentropy ×2` (`esi = 8`). Пробник делает ровно эти два вызова
+и ничего больше, без Chrome. Исходник: `build-freebsd/getentropy-probe.c`
+(собранный `tests/getentropy-probe-macho` — продукт сборки, не коммитится,
+как и остальные `tests/*-macho`).
+
+## Сборка и запуск (repro)
+
+```sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin
+ROOT="${DARLING_SRC_DIR:?}"; OVERLAY="${DARLING_OVERLAY:?}"; OBJ="${DARLING_BUILD_DIR:?}"/getentropy-probe
+mkdir -p "$OBJ/staged/usr/lib" "$OBJ/staged/usr/lib/system" "$OBJ/sdk-flat"
+tar xzf "$ROOT/tests/vendor/macosx-sdk-flat.tar.gz" -C "$OBJ/sdk-flat"
+cp "$OVERLAY/usr/lib/libSystem.B.dylib" "$OBJ/staged/usr/lib/libSystem.B.dylib"
+(cd "$OVERLAY/usr/lib/system" && find . -maxdepth 1 -type f | pax -rw "$OBJ/staged/usr/lib/system")
+clang -target x86_64-apple-macos10.12 -nostdinc -w \
+      -I"$OBJ/sdk-flat/usr/include" -I"$ROOT/tests/vendor/fakesdk" -O0 \
+      -c "$ROOT/build-freebsd/getentropy-probe.c" -o "$OBJ/getentropy-probe.o"
+ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 \
+      -syslibroot "$OBJ/staged" -Z -o "$ROOT/tests/getentropy-probe-macho" \
+      "$OBJ/getentropy-probe.o" "$OBJ/staged/usr/lib/libSystem.B.dylib"
+
+export DARLING_BUILD_DIR="${DARLING_BUILD_DIR:-/tmp/darling-build}"
+sudo env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY \
+  DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=getentropy-probe-macho \
+  DARLING_STAGING_TREES=usr/lib \
+  DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_BINDINGS=1 DYLD_PRINT_APIS=1 \
+  DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_STATISTICS=1 \
+  DYLD_PRINT_WARNINGS=1 DYLD_PRINT_TO_STDERR=1 \
+  "$DARLING_BUILD_DIR"/launch-dynamic > /tmp/getentropy-probe-1.log 2>&1
+```
+
+Сборка: `Mach-O 64-bit x86_64 executable`, `llvm-nm` показывает
+`U _getentropy`, `U _write`, `T _main`.
+
+## Результат: вариант (б) — повторный вход НЕ причина
+
+Выдержка лога `/tmp/getentropy-probe-1.log` (строки 1923–1944), все семь строк
+вывода пробника:
+
+```
+probe: before first getentropy
+dyld: lazy bind: getentropy-probe-macho:0x827125018 = libsystem_kernel.dylib:_getentropy, *0x827125018 = 0xB83FB682A8
+probe: first getentropy rc=0
+probe: first 85
+26
+e1
+fb
+fb
+73
+9d
+16
+probe: before second getentropy (same thread)
+probe: second getentropy rc=0
+probe: second 23
+8d
+16
+b8
+23
+18
+d8
+45
+probe: both calls returned, exiting 0
+```
+
+Измеренные факты:
+
+- Оба вызова вернули `rc = 0`, результаты различаются в каждой позиции
+  (`85 26 e1 fb fb 73 9d 16` против `23 8d 16 b8 23 18 d8 45`; байт `0x16`
+  есть в обоих, но на разных смещениях) — второй вызов действительно прошёл,
+  а не был закэширован.
+- `_getentropy` прибинден к тому же поставщику, что и в Chrome-фреймворке
+  (шаг 11): `libsystem_kernel.dylib` (`_getentropy` @ `0xB83FB682A8` в этом
+  прогоне; в логе Chrome — тот же поставщик).
+- **Сигнатуры смерти нет.** По всему логу нет ни `__os_unfair_lock_recursive_abort`,
+  ни `SIGILL`, ни `ud2`-падения. Все совпадения по словам `abort` / `crash` /
+  `recursive` — обычные строки бинда (`_abort`, `_abort_with_payload`,
+  `_CRSetCrashLogMessage`, `_os_unfair_recursive_lock_lock_with_options`),
+  то есть имена символов, а не события; единственное упоминание `ud2` —
+  стартовая строка mldr «patched raw-syscall trampolines to ud2».
+- Пробник дошёл до `return 0`, после чего гость вышел (mldr стал `ZN <defunct>`,
+  размер лога застыл на 215 810 B), а внешний процесс завис — это ровно та же
+  форма «мёртвый гость, ждущий сервер», что разобрана в шаге 7
+  (`docs/INIT-HANG-CLASS.md`), новой информации в ней нет.
+
+**Вывод по приёмке: вариант (б).** Повторный вход тем же потоком в
+`getentropy` смерть не вызывает — корень не в re-entry, и гипотеза шага 11
+снята без Chrome вовсе. Следующий по наряду шаг — ловушка второго acquire
+внутри Chrome.
+
+## Что не измерено
+
+- Exit status гостя числом не прочитан: `launch-dynamic` форкает `mldr`
+  через `darlingserver`, и после завершения гостя сервер не выходит, так что
+  код возврата пробрасывается мимо. Прямой запуск `mldr` (как в
+  `tests/run-smoke.sh`) для этого бинаря не годится: `run-smoke.sh` кладёт в
+  префикс только `hello-static-macho` (статический), а пробник динамический —
+  прямой запуск дал `mldr exit status: 1` при отсутствии вывода пробника.
+  Вместо кода возврата измерен сам факт: финальная строка пробника напечатана,
+  аварийной диагностики в логе нет.
+- Не измерено, что именно происходит в гостевом `arc4random`-пути после
+  `getentropy` (пробник его не касается: шаг 11 показал два прямых вызова
+  `_getentropy`, без `arc4random`).
