@@ -336,9 +336,14 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
      * handler. If native SIGTRAP lands here, the disposition was mldr's own
      * trampoline at delivery time. */
     if (native_signo == SIGTRAP) {
+        const ucontext_t *uc = (const ucontext_t *)native_uctx;
+        long long rip = (long long)uc->uc_mcontext.mc_rip;
+        int si_code = native_info->si_code;
+        void *si_addr = native_info->si_addr;
         fprintf(stderr,
             "[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest"
-            " handler=%p (linux_signo=%d)\n", handler, linux_signo);
+            " handler=%p (linux_signo=%d) rip=0x%llx si_code=%d si_addr=%p\n",
+            handler, linux_signo, rip, si_code, si_addr);
         fflush(stderr);
     }
 
