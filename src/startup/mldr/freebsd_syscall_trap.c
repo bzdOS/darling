@@ -2575,6 +2575,20 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * EINVAL, which is why the guest's sigexc machinery — the path that
          * turns hardware faults into Mach exceptions — never installed a
          * handler. See sigaction_translate.c and docs/SPEC-signal-abi-bridge.md. */
+        /* Control #148 step 26: audit every guest rt_sigaction whose Linux
+         * signal maps to native SIGTRAP (5) — names the old/new handler and
+         * the caller, so the last owner of the SIGTRAP disposition before
+         * the death is on record. */
+        if ((int)a1 == 5 /* LINUX_SIGTRAP */) {
+            void *newh = (a2 != NULL) ? *(void **)a2 : (void *)0;
+            char cb[256];
+            mldr_describe_addr((uintptr_t)__builtin_return_address(0), cb, sizeof(cb));
+            fprintf(stderr,
+                "[darling-mldr] SIGTRAP-AUDIT: rt_sigaction(5) from %s"
+                " old=%p new=%p\n",
+                cb, mldr_sat_sigtrap_disposition(), newh);
+            fflush(stderr);
+        }
         return mldr_sys_rt_sigaction((int)a1, (const void *)a2,
                                      (void *)a3, (size_t)a4);
     case LINUX_SYS_rt_sigprocmask: {
@@ -3407,6 +3421,13 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
 
     (void)info;
     mldr_describe_addr(site, descr, sizeof(descr));
+
+    /* Control #148 step 26: this handler being reached means mldr's own
+     * SIGTRAP disposition won at delivery time. */
+    fprintf(stderr,
+        "[darling-mldr] SIGTRAP-AUDIT-DELIVER: mldr sigtrap_handler reached,"
+        " site=%s\n", descr);
+    fflush(stderr);
 
     if (at[0] == 0xcc && strstr(descr, "+0x64d020") != NULL) {
         uint64_t ret = 0;

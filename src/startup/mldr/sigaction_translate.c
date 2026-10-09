@@ -274,6 +274,14 @@ struct sat_registry_entry {
 };
 static struct sat_registry_entry sat_registry[32];
 
+/* Control #148 step 26: current guest disposition for Linux SIGTRAP (5). */
+void *
+mldr_sat_sigtrap_disposition(void)
+{
+    struct sat_registry_entry *ent = &sat_registry[5];
+    return ent->valid ? ent->wire.lsa_handler : NULL;
+}
+
 /* ── delivery trampoline: FreeBSD ABI -> Linux ABI around the guest handler ─
  *
  * Installed (see mldr_sys_rt_sigaction below) as the FreeBSD sa_sigaction for
@@ -323,6 +331,16 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
     if (handler == SAT_LINUX_SIG_DFL || handler == SAT_LINUX_SIG_IGN ||
         handler == SAT_LINUX_SIG_ERR)
         return;
+
+    /* Control #148 step 26: this IS the delivery of a signal to a guest
+     * handler. If native SIGTRAP lands here, the disposition was mldr's own
+     * trampoline at delivery time. */
+    if (native_signo == SIGTRAP) {
+        fprintf(stderr,
+            "[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest"
+            " handler=%p (linux_signo=%d)\n", handler, linux_signo);
+        fflush(stderr);
+    }
 
     struct linux_siginfo_compat linfo;
     struct linux_ucontext_compat luctx;

@@ -158,4 +158,9 @@
 long mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
                             size_t sigsetsize);
 
+/* Control #148 step 26: the guest's current disposition for Linux signal 5
+ * (SIGTRAP) — the registered handler value (SIG_DFL/IGN/ERR or a pointer),
+ * or NULL when nothing is registered. For the SIGTRAP registration audit. */
+void *mldr_sat_sigtrap_disposition(void);
+
 #endif /* DARLING_FREEBSD */
