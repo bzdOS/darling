@@ -3457,6 +3457,21 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
     }
     /* Not our site (or cannot resume): honest death. */
     {
+        /* Control #147 step 25: report the trap honestly before dying — the
+         * old silent re-raise hid which int3 this was. `site` = rip-1 (the
+         * int3 address), so at[0] is the trap opcode (0xcc for int3) and the
+         * byte before it is the last byte of the preceding instruction. */
+        uint64_t prev = 0;
+        int prev_ok = mldr_dump_read_guarded((uintptr_t)(site - 1), &prev);
+        fprintf(stderr,
+            "[darling-mldr] sigtrap NOT-OUR-SITE: rip=0x%016llx si_code=%d"
+            " si_addr=0x%016llx byte[rip-1]=0x%02x byte[rip-2]=0x%02x%s"
+            " site=%s\n",
+            (unsigned long long)mc->mc_rip, (int)info->si_code,
+            (unsigned long long)(uintptr_t)info->si_addr,
+            (unsigned)at[0], (unsigned)(prev & 0xff),
+            prev_ok ? "" : "(unreadable)", descr);
+        fflush(stderr);
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
         sigaction(signo, &sa_dfl, NULL);
         raise(signo);
