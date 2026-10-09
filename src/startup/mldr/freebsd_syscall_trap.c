@@ -639,8 +639,11 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
 
     /* ── memory management ──────────────────────────────────────────── */
     case MACOS_SYS_mmap:
-        /* macOS mmap args: addr, len, prot, flags, fd, offset — same layout */
-        return freebsd_raw_syscall(SYS_mmap, a1, a2, a3, a4, a5, a6);
+        /* macOS mmap args: addr, len, prot, flags, fd, offset — same layout.
+         * Darwin ignores fd under MAP_ANON; FreeBSD returns EINVAL for a
+         * non-(-1) fd there, so anonymous mappings forward fd=-1. */
+        return freebsd_raw_syscall(SYS_mmap, a1, a2, a3, a4,
+                                   (a4 & MAP_ANON) ? -1 : a5, a6);
 
     case MACOS_SYS_munmap:
         return freebsd_raw_syscall(SYS_munmap, a1, a2, 0, 0, 0, 0);
@@ -1715,7 +1718,10 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (a4 & 0x10)    freebsd_flags |= MAP_FIXED;
         if (a4 & 0x20)    freebsd_flags |= MAP_ANON;     /* MAP_ANONYMOUS */
         if (a4 & 0x20000) freebsd_flags |= MAP_STACK;
-        long mr = freebsd_raw_syscall(SYS_mmap, a1, a2, a3, freebsd_flags, a5, a6);
+        /* Darwin ignores fd under MAP_ANON; FreeBSD rejects a non-(-1) fd
+         * with EINVAL, so anonymous mappings forward fd=-1. */
+        long mr = freebsd_raw_syscall(SYS_mmap, a1, a2, a3, freebsd_flags,
+                                      (a4 & 0x20) ? -1 : a5, a6);
 #if defined(__x86_64__)
         /*
          * Patch raw-syscall trampolines in every executable image dyld maps,
