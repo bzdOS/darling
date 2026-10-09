@@ -1377,8 +1377,10 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
         int retslot = (trap->emulate == 3) ? 1 : 0;
 
         fprintf(stderr,
-            "[darling-mldr] hit #%ld %s rdi=0x%llx rax=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
+            "[darling-mldr] hit #%ld %s rdi=0x%llx rsi=0x%llx rdx=0x%llx rax=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
             trap->hits, trap->label, (unsigned long long)mc->mc_rdi,
+            (unsigned long long)mc->mc_rsi,
+            (unsigned long long)mc->mc_rdx,
             (unsigned long long)mc->mc_rax,
             (unsigned long)host_tid, (unsigned long)tsd_tid,
             mldr_describe_addr(sp[retslot], buf, sizeof(buf)), watch);
