@@ -1,0 +1,173 @@
+/*
+ * objc-constdict-desc.m — Control #160, step 38 marker probe.
+ *
+ * purpose:     Measure which lookUpImpOrForward branch (step 37, §2) really
+ *              fires when `description` is sent to an NSConstantDictionary
+ *              instance under the guest runtime — the class chrome's fatal
+ *              msgSend bound to (CoreFoundationExtras, an empty stub root
+ *              class: flags 0x2, super 0, baseMethods 0, step 36).
+ * input:       argv[1] == "stamp" installs this probe's own
+ *              objc_setForwardHandler before the sends, to prove which
+ *              forward handler the runtime consults; the default run (no
+ *              argument) measures the pristine guest behaviour.
+ * output:      Every line carries the marker CONSTDICT, plus the acceptance
+ *              line  desc-imp=<value> foundation_790b0=<expected> match=<yes|no>
+ *              which compares the returned pointer against
+ *              &__NSCFCopyDescription2 (Foundation+0x790B0) — the value
+ *              chrome's run returned from the same message. The last line
+ *              of a clean run is CONSTDICT DONE rc=0. Pointers are printed
+ *              raw (%p) and no method is ever sent to a returned value, so
+ *              a code pointer cannot crash the probe before it prints.
+ * sideEffects: None.
+ *
+ * ASLR anchors: runtime address minus the symbol's file offset in the
+ * staged overlay image gives that image's load base:
+ *   Foundation:        _NSLog (0x790f0) — __NSCFCopyDescription2 is 0x790b0,
+ *                      so expected = &_NSLog - 0x40
+ *   CoreFoundation:    _CFStringGetLength (0xef8b0)
+ *   libobjc:           _objc_msgSend (0x480c0) — __objc_msgForward is 0x48e80
+ *   CoreFoundationExtras: _OBJC_CLASS_$_NSConstantDictionary (0x2050)
+ *   libSystem:         _close (0xf706, defined in libSystem.B.dylib)
+ *
+ * Build: build-freebsd/build-constdict-desc-probe.sh (same recipe as
+ * build-freebsd/build-real-macho-tests.sh: clang -target
+ * x86_64-apple-macos10.12 + ld64.lld against the staged overlay).
+ * Run:   build-freebsd/run-constdict-desc-probe.sh
+ */
+#import <objc/objc.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+#import <Foundation/Foundation.h>
+#import <dlfcn.h>
+#import <string.h>
+
+extern int printf(const char *, ...);
+
+/* Installed when argv[1] == "stamp", before any send: if the guest runtime
+ * really routes an unresolvable selector through the forward handler, this
+ * prints and the stamp proves the path; if it never prints, the send
+ * returned by some other route entirely. objc_setForwardHandler's real
+ * prototype lives in objc/runtime.h and takes the stret handler too. */
+static void stamp_handler(id self, SEL _cmd) {
+    printf("CONSTDICT forward-handler-called self=%p cmd=%s\n",
+           (void *)self, sel_getName(_cmd));
+}
+
+/* Anchor symbols, declared as chars and printed by ADDRESS: passing the
+ * symbol itself would read its first 8 bytes as the pointer value. The
+ * asm label spelling is needed because $ is not a C identifier character. */
+extern char _anchor_NSLog __asm__("_NSLog");
+extern char _anchor_CFStringGetLength __asm__("_CFStringGetLength");
+extern char _anchor_objc_msgSend __asm__("_objc_msgSend");
+extern char _anchor_NSConstantDictionary __asm__("_OBJC_CLASS_$_NSConstantDictionary");
+extern char _anchor_close __asm__("_close");
+
+/* A function used only as a code pointer with a real x86-64 prologue
+ * (55 48 89 e5) for the variant-B fake receiver (step 34's corrupted isa). */
+static void prologue_source(void) { }
+
+static void where(const char *tag, const void *p) {
+    Dl_info info;
+    int ok = dladdr(p, &info);
+    printf("CONSTDICT %s value=%p dladdr=%d fname=%s fbase=%p sname=%s saddr=%p\n",
+           tag, p, ok,
+           (ok && info.dli_fname) ? info.dli_fname : "(none)",
+           (ok ? info.dli_fbase : NULL),
+           (ok && info.dli_sname) ? info.dli_sname : "(none)",
+           (ok ? info.dli_saddr : NULL));
+}
+
+/* The core measurement: hand-built fake object (isa = class, zeros after),
+ * one `description` message, the raw return and the comparison against
+ * chrome's measured outcome. */
+static void probe(const char *tag, void *isa) {
+    struct { void *isa; long z[8]; } fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.isa = isa;
+
+    void *expected = (void *)((char *)&_anchor_NSLog - 0x40); /* Foundation+0x790b0 */
+    printf("CONSTDICT %s isa=%p class=%s expected_foundation_790b0=%p\n",
+           tag, isa, isa ? class_getName((Class)isa) : "(nil)", expected);
+
+    printf("CONSTDICT %s before-send\n", tag);
+    id r = ((id (*)(id, SEL))objc_msgSend)((id)&fake, sel_registerName("description"));
+    printf("CONSTDICT %s after-send\n", tag);
+    printf("desc-imp=%p foundation_790b0=%p match=%s\n",
+           (void *)r, expected, (r == (id)expected) ? "yes" : "no");
+    printf("CONSTDICT %s description=%p\n", tag, (void *)r);
+    where(tag, r);
+}
+
+/* Control: a REAL object (no fake) — the send must return a real
+ * description object; this proves the probe's send path itself is sound. */
+static void control(const char *tag, id obj) {
+    void *expected = (void *)((char *)&_anchor_NSLog - 0x40);
+    printf("CONSTDICT %s real-obj=%p class=%s\n", tag, (void *)obj,
+           class_getName(object_getClass(obj)));
+    printf("CONSTDICT %s before-send\n", tag);
+    id r = ((id (*)(id, SEL))objc_msgSend)(obj, sel_registerName("description"));
+    printf("CONSTDICT %s after-send\n", tag);
+    printf("CONSTDICT %s description=%p (expected_foundation_790b0=%p match=%s)\n",
+           tag, (void *)r, expected, (r == (id)expected) ? "yes" : "no");
+}
+
+int main(int argc, char **argv) {
+    /* Unbuffered: a FATAL signal mid-run must not lose the markers — the
+     * first run crashed inside a send and every printf was lost to the
+     * stdio buffer. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    int stamp = (argc > 1 && strcmp(argv[1], "stamp") == 0);
+    if (stamp) {
+        objc_setForwardHandler((void *)stamp_handler, NULL);
+    }
+    @autoreleasepool {
+        printf("CONSTDICT anchors NSLog=%p CFStringGetLength=%p objc_msgSend=%p CFE-NSConstantDictionary=%p close=%p\n",
+               (void *)&_anchor_NSLog, (void *)&_anchor_CFStringGetLength,
+               (void *)&_anchor_objc_msgSend, (void *)&_anchor_NSConstantDictionary,
+               (void *)&_anchor_close);
+
+        /* Control 1: the empty dictionary singleton (Foundation's own path). */
+        control("empty-dict", [NSDictionary dictionary]);
+
+        /* Control 2: a placeholder instance. */
+        control("placeholder", [[NSDictionary alloc] init]);
+
+        /* The case under investigation: the CoreFoundationExtras stub class. */
+        Class stub = objc_getClass("NSConstantDictionary");
+        printf("CONSTDICT stub-class=%p name=%s\n", (void *)stub,
+               stub ? class_getName(stub) : "(nil)");
+        if (stub) {
+            /* What the runtime's own tables say about this class, queried
+             * before the send so the queries cannot pre-populate a cache
+             * that changes the printed result. */
+            unsigned count = 0;
+            Method *ml = class_copyMethodList(stub, &count);
+            printf("CONSTDICT stub method-list-count=%u\n", count);
+            for (unsigned i = 0; i < count; i++) {
+                printf("CONSTDICT stub method[%u]=%s imp=%p\n", i,
+                       sel_getName(method_getName(ml[i])),
+                       (void *)method_getImplementation(ml[i]));
+            }
+            free(ml);
+            SEL desc = sel_registerName("description");
+            printf("CONSTDICT stub responds(description)=%d getMethodImplementation=%p\n",
+                   class_respondsToSelector(stub, desc),
+                   (void *)class_getMethodImplementation(stub, desc));
+            where("where-stub-getimp", (void *)class_getMethodImplementation(stub, desc));
+
+            probe("stub", stub);
+        }
+
+        /* Variant B: a receiver whose isa is a code pointer with a real
+         * prologue — the corrupted-receiver shape of step 34. Expected to
+         * die inside the lookup; the markers above are already printed. */
+        unsigned char prologue[4];
+        memcpy(prologue, (void *)&prologue_source, 4);
+        printf("CONSTDICT variant-b code-isa=%p prologue=%02x %02x %02x %02x\n",
+               (void *)&prologue_source,
+               prologue[0], prologue[1], prologue[2], prologue[3]);
+        probe("variant-b", (void *)&prologue_source);
+    }
+    printf("CONSTDICT DONE rc=0\n");
+    return 0;
+}

@@ -36,6 +36,9 @@ Module.symvers
 # and macosx-sdk-flat.tar.gz is a fat binary blob.
 tests/*
 !tests/src
+# Control #160 step 38: the NSConstantDictionary description IMP probe source
+# (the built binary tests/objc-constdict-desc-macho stays ignored).
+!tests/objc-constdict-desc.m
 
 # The upstream rule was a bare `tests`, which matches a path component named
 # `tests` at ANY depth, not just the top-level one. `tests/*` above is anchored
