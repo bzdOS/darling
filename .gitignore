@@ -39,6 +39,9 @@ tests/*
 # Control #160 step 38: the NSConstantDictionary description IMP probe source
 # (the built binary tests/objc-constdict-desc-macho stays ignored).
 !tests/objc-constdict-desc.m
+# Control #162 step 40: the msgSend miss-path probe source
+# (the built binary tests/objc-msgSend-imp-undoc-macho stays ignored).
+!tests/objc-msgSend-imp-undoc.m
 
 # The upstream rule was a bare `tests`, which matches a path component named
 # `tests` at ANY depth, not just the top-level one. `tests/*` above is anchored
