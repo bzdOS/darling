@@ -42,6 +42,7 @@ tests/*
 # Control #162 step 40: the msgSend miss-path probe source
 # (the built binary tests/objc-msgSend-imp-undoc-macho stays ignored).
 !tests/objc-msgSend-imp-undoc.m
+!tests/objc-got-slot-undoc.m
 
 # The upstream rule was a bare `tests`, which matches a path component named
 # `tests` at ANY depth, not just the top-level one. `tests/*` above is anchored
