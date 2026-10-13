@@ -79,23 +79,33 @@ static void where(const char *tag, const void *p) {
 
 /* The core measurement: hand-built fake object (isa = class, zeros after),
  * one `description` message, the raw return and the comparison against
- * chrome's measured outcome. */
+ * chrome's measured outcome. The `copy` send after it reproduces the exact
+ * shape of chrome's death (Control #160): chrome died sending `copy` to the
+ * code pointer that `description` returned. With the stub's own real methods
+ * (Control #167) both returns are the receiver itself. */
 static void probe(const char *tag, void *isa) {
     struct { void *isa; long z[8]; } fake;
     memset(&fake, 0, sizeof(fake));
     fake.isa = isa;
 
     void *expected = (void *)((char *)&_anchor_NSLog - 0x40); /* Foundation+0x790b0 */
-    printf("CONSTDICT %s isa=%p class=%s expected_foundation_790b0=%p\n",
-           tag, isa, isa ? class_getName((Class)isa) : "(nil)", expected);
+    printf("CONSTDICT %s isa=%p class=%s receiver=%p expected_foundation_790b0=%p\n",
+           tag, isa, isa ? class_getName((Class)isa) : "(nil)", (void *)&fake, expected);
 
     printf("CONSTDICT %s before-send\n", tag);
     id r = ((id (*)(id, SEL))objc_msgSend)((id)&fake, sel_registerName("description"));
     printf("CONSTDICT %s after-send\n", tag);
     printf("desc-imp=%p foundation_790b0=%p match=%s\n",
            (void *)r, expected, (r == (id)expected) ? "yes" : "no");
-    printf("CONSTDICT %s description=%p\n", tag, (void *)r);
+    printf("CONSTDICT %s description=%p same-as-receiver=%s\n",
+           tag, (void *)r, (r == (id)&fake) ? "yes" : "no");
     where(tag, r);
+
+    printf("CONSTDICT %s before-copy-send\n", tag);
+    id r2 = ((id (*)(id, SEL))objc_msgSend)(r, sel_registerName("copy"));
+    printf("CONSTDICT %s after-copy-send\n", tag);
+    printf("CONSTDICT %s copy-ret=%p same-as-receiver=%s\n",
+           tag, (void *)r2, (r2 == (id)&fake) ? "yes" : "no");
 }
 
 /* Control: a REAL object (no fake) — the send must return a real

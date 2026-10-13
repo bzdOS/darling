@@ -97,3 +97,29 @@ Every claim above has its command in the artifact doc it cites:
 `docs/OBJC-DESC-IMP-BIND.md` · #160 `docs/OBJC-DESC-IMP-PROBE.md` · #161
 `docs/OBJC-FWD-HANDLER-ABSENT.md` · #162 `docs/OBJC-MSGSEND-MISS-PATH.md` · #163
 `docs/OBJC-FWD-CHAIN-CF.md` · #164 `docs/OBJC-FWD-PREP-EMPTY.md`.
+
+---
+
+## 5. Addendum 2026-10-13 (Control #167): the exe/dylib bind asymmetry, a track finding of its own
+
+Measured live while fixing the chain (F1–F3 of `docs/OBJC-STUB-METHODS-FIX.md`),
+and worth its own paragraph because it constrains every future fix that leans
+on another image's symbol:
+
+- **F1.** A guest EXECUTABLE linked against libobjc binds both
+  `_OBJC_CLASS_$_NSObject` (→ libobjc+0x5c050) and `_OBJC_METACLASS_$_NSObject`
+  (→ libobjc+0x5c000) at load with no error.
+- **F2.** A guest DYLIB holding the same two references (the wrapper's own
+  link line: one class `: NSObject` + `-reexport_library` CoreFoundation +
+  libobjc by full path) keeps them as unbound imports (`super=0` in the file
+  dump) and the guest refuses to load it: `dyld: Symbol not found:
+  _OBJC_METACLASS_$_NSObject` → `abort_with_payload` at image load. So the
+  wrapper link is NOT anomalous; the asymmetry between the executable path
+  and the dylib path in the guest's two-level bind is itself the fact.
+- **F3.** The failing name was the metaclass's (the class symbol was never
+  reported missing).
+
+Until this is explained, any fix whose success depends on a dylib binding a
+class symbol from another image is not a fix — which is exactly why the
+chosen fix (the stub's own methods, Control #167) carries zero load-time
+binds. Status: measured and unexplained, owned by this track.

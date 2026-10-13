@@ -72,7 +72,7 @@ def main():
         objc = [s for s in syms if OBJC.search(s)]
         if not objc:
             continue
-        keep = [s for s in syms if not OBJC.search(s)]
+        keep = [s for s in syms if not OBJC.search(s) and s != "__objc_empty_cache"]
         classes = sorted({OBJC.search(s).group(2) for s in objc})
         target = reexport_target(wrapper)
         real = OD + target if target else None
@@ -86,8 +86,22 @@ def main():
                 f.write(f"void {s[1:]}(void) {{}}\n")
         with open(mpath, "w") as f:
             for name in classes:
+                # Root-class stub with its OWN real methods (Control #167):
+                # inheriting NSObject (Control #166) failed because the guest
+                # cannot load a dylib whose metaclass import is
+                # _OBJC_METACLASS_$_NSObject (Symbol not found at image load —
+                # the exe/dylib bind asymmetry measured in Control #167).
+                # With zero load-time binds, that failure class is
+                # unreachable, and the two sends chrome dies on —
+                # [x description], then [<return> copy] — resolve to real
+                # methods that return the receiver itself (a real object).
                 f.write(f"__attribute__((objc_root_class))\n@interface {name}\n@end\n"
-                        f"@implementation {name}\n@end\n")
+                        f"@implementation {name}\n"
+                        f"- (id)description {{ return self; }}\n"
+                        f"- (id)copyWithZone:(void *)zone {{ (void)zone; return self; }}\n"
+                        f"- (id)copy {{ return self; }}\n"
+                        f"@end\n")
+(Control #167 step 46: stub classes carry their own real methods — the fix passes live acceptance)
         objs = []
         for src, out, extra in ((cpath, fn + ".c.o", []),
                                 (mpath, fn + ".m.o", ["-fobjc-runtime=macosx-10.12"])):
