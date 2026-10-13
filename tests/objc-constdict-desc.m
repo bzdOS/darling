@@ -61,6 +61,7 @@ extern char _anchor_CFStringGetLength __asm__("_CFStringGetLength");
 extern char _anchor_objc_msgSend __asm__("_objc_msgSend");
 extern char _anchor_NSConstantDictionary __asm__("_OBJC_CLASS_$_NSConstantDictionary");
 extern char _anchor_close __asm__("_close");
+extern char _anchor_supl __asm__("_memset_pattern16");
 
 /* A function used only as a code pointer with a real x86-64 prologue
  * (55 48 89 e5) for the variant-B fake receiver (step 34's corrupted isa). */
@@ -131,6 +132,7 @@ int main(int argc, char **argv) {
         objc_setForwardHandler((void *)stamp_handler, NULL);
     }
     @autoreleasepool {
+        where("where-supl-text", (void *)&_anchor_supl);
         printf("CONSTDICT anchors NSLog=%p CFStringGetLength=%p objc_msgSend=%p CFE-NSConstantDictionary=%p close=%p\n",
                (void *)&_anchor_NSLog, (void *)&_anchor_CFStringGetLength,
                (void *)&_anchor_objc_msgSend, (void *)&_anchor_NSConstantDictionary,
