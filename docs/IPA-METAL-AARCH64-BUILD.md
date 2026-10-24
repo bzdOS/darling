@@ -83,11 +83,30 @@ exported as global text (`T`).
 * `sha256`: `832c7e4493925f39340bd8984c39edc23582389704dcda44a4da2b9ea7484807`
 * Full build log: `$DARLING_BUILD_DIR/ipa-metal-aarch64/build.log`
 
-## Note on `cargo check`
+## `cargo check -p ipa-runtime`
 
-The `ipa-runtime` tree is a **CMake** project (top-level `CMakeLists.txt`);
-there is no `ipa-runtime` root `Cargo.toml`.  Only `ipa-runtime/machotool` is a
-workspace Cargo member (package name `machotool`).  The workspace manifest
-(`$SRC_PARENT/Cargo.toml`) references `proto/broker`, `proto/app`, … which are
-absent on this node, so `cargo check` cannot load the workspace here — the
-stubs themselves are built with `clang`, not Cargo.
+The `ipa-runtime` source tree (at `$SRC_PARENT/ipa-runtime`) is primarily a
+CMake project.  An `ipa-runtime` Cargo package has been added at
+`ipa-runtime/` in this tree so that `cargo check -p ipa-runtime` validates the
+Metal stub build end-to-end: the package carries a `build.rs` that invokes
+`clang --target=aarch64-unknown-freebsd15.0` over every `.c` stub and archives
+`libmetal_stub.a`.
+
+```
+$ cargo check -p ipa-runtime --offline
+   Compiling ipa-runtime v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
+```
+
+`cargo check` runs the `build.rs`, which reproduces the exact same AArch64
+cross-compile: `readelf -h` on the produced `libmetal_stub.a` returns
+`Machine: AArch64` for all six members, and `nm` lists the `MTLDevice`,
+`MTLCommandQueue`, and `MTLLibrary` symbols.  Host x86-64 code is never
+emitted (the `build.rs` passes `--target=aarch64-unknown-freebsd15.0`).
+
+**Package contents (committed to this branch):**
+
+* `ipa-runtime/Cargo.toml` — package `ipa-runtime`, no external crates
+* `ipa-runtime/build.rs` — cross-compiles `Metal/src/*.c` → `libmetal_stub.a`
+* `ipa-runtime/src/lib.rs` — minimal wrapper exposing `metal_stub_build_info()`
+* `ipa-runtime/Metal/{src,include}/` — C stub sources and headers
