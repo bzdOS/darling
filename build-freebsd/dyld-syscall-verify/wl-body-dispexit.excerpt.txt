@@ -1,0 +1,83 @@
+         [traplog] SIGILL LEAVE tid=102581 a=9 b=1
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=1
+XDG_RUNTIME_DIR=/tmp/wayland-gwr[traplog] SIGILL LEAVE tid=102581 a=32 b=1
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=1
+
+[traplog] SIGILL LEAVE tid=102581 a=1 b=1
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=99
+[darling-mldr] unhandled Linux syscall 99 — ENOSYS
+[traplog] linux-unhandled tid=102581 a=99 b=140737486256536
+[traplog] SIGILL LEAVE tid=102581 a=-78 b=99
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=228
+[traplog] SIGILL LEAVE tid=102581 a=0 b=228
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=96
+[traplog] SIGILL LEAVE tid=102581 a=0 b=96
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=99
+[darling-mldr] unhandled Linux syscall 99 — ENOSYS
+[traplog] linux-unhandled tid=102581 a=99 b=140737486256536
+[traplog] SIGILL LEAVE tid=102581 a=-78 b=99
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=1
+[step 02] [traplog] SIGILL LEAVE tid=102581 a=10 b=1
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=1
+bundle load: /System/Library/Frameworks/AppKit.framework/Versions/C/Resources/Backends/Wayland.backend[traplog] SIGILL LEAVE tid=102581 a=102 b=1
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=1
+
+[traplog] SIGILL LEAVE tid=102581 a=1 b=1
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=6
+[traplog] SIGILL LEAVE tid=102581 a=0 b=6
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=6
+[traplog] SIGILL LEAVE tid=102581 a=0 b=6
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=6
+[traplog] SIGILL LEAVE tid=102581 a=0 b=6
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=6
+[traplog] SIGILL LEAVE tid=102581 a=0 b=6
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=6
+[traplog] SIGILL LEAVE tid=102581 a=0 b=6
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=267
+[darling-mldr] unhandled Linux syscall 267 — ENOSYS
+[traplog] linux-unhandled tid=102581 a=267 b=-100
+[traplog] SIGILL LEAVE tid=102581 a=-78 b=267
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=2
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=217
+[traplog] SIGILL LEAVE tid=102581 a=-22 b=217
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=3
+[traplog] SIGILL LEAVE tid=102581 a=0 b=3
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=257
+[traplog] SIGILL LEAVE tid=102581 a=0 b=257
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=77
+[traplog] SIGILL LEAVE tid=102581 a=0 b=77
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=6
+[traplog] SIGILL LEAVE tid=102581 a=0 b=6
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=263
+[darling-mldr] unhandled Linux syscall 263 — ENOSYS
+[traplog] linux-unhandled tid=102581 a=263 b=-100
+[traplog] SIGILL LEAVE tid=102581 a=-78 b=263
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=9
+[traplog] SIGILL LEAVE tid=102581 a=35280609280 b=9
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=309
+[traplog] SIGILL LEAVE tid=102581 a=0 b=309
+[traplog] elf-dlsym ENTER tid=102581 p=0x979f3a7451e b=10419345491976
+[traplog] elf-dlsym RETURN tid=102581 p=0x837a1af90 b=0
+[traplog] SIGILL ENTER tid=102581 p=0x979f370ff49 b=1
+[wayland_shim] dlsym_fatal('wl_proxy_get_version') => 0x837a1af90
+[traplog] SIGILL LEAVE tid=102581 a=66 b=1
+[traplog] elf-dlsym ENTER tid=102581 p=0x979f3a722f2 b=10419345491976
+[traplog] elf-dlsym RETURN tid=102581 p=0x837a18f30 b=0
