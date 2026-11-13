@@ -109,6 +109,64 @@ static void probe(const char *tag, void *isa) {
            tag, (void *)r2, (r2 == (id)&fake) ? "yes" : "no");
 }
 
+/* Step 38: is +resolveInstanceMethod: the owner of the description resolve
+ * on the REAL class? Measured on NSConstantDictionary itself (the class
+ * chrome's object carried, step 36: flags 0x2, super 0, baseMethods 0). The
+ * stub's metaclass has no method list and no superclass, so a resolve step
+ * there would have nothing to find; planting a logger at
+ * +resolveInstanceMethod: on that metaclass gives the step a name if it ever
+ * runs. The method does not exist there (baseMethods 0), so the logger is
+ * added rather than replaced — and the log says which happened. */
+static int real_resolve_calls;
+
+static BOOL real_resolve_logger(Class self, SEL _cmd, SEL sel) {
+    real_resolve_calls++;
+    printf("CONSTDICT real-resolve-fired n=%d class=%s sel=%s\n",
+           real_resolve_calls,
+           self ? class_getName(self) : "(nil)",
+           sel ? sel_getName(sel) : "(nil)");
+    return NO;
+}
+
+static void real_class_measure(const char *tag, Class real) {
+    SEL desc = sel_registerName("description");
+    SEL resolve = sel_registerName("resolveInstanceMethod:");
+    Class meta = object_getClass((id)real);
+
+    printf("CONSTDICT %s class=%p name=%s meta=%p meta-name=%s\n",
+           tag, (void *)real, class_getName(real),
+           (void *)meta, meta ? class_getName(meta) : "(nil)");
+
+    unsigned cc = 0, mc = 0;
+    Method *cm = class_copyMethodList(real, &cc);
+    Method *mm = class_copyMethodList(meta, &mc);
+    printf("CONSTDICT %s method-list class=%u meta=%u\n", tag, cc, mc);
+    if (cm) free(cm);
+    if (mm) free(mm);
+
+    IMP pre = class_getMethodImplementation(real, desc);
+    printf("CONSTDICT %s pre-hook getMethodImplementation(description)=%p responds=%d\n",
+           tag, (void *)pre, class_respondsToSelector(real, desc));
+    where("where-real-class-pre-hook-getimp", (void *)pre);
+
+    Method rm = class_getInstanceMethod(meta, resolve);
+    if (rm) {
+        IMP old = method_setImplementation(rm, (IMP)real_resolve_logger);
+        printf("CONSTDICT %s resolve-hook=setImplementation old=%p\n",
+               tag, (void *)old);
+    } else {
+        BOOL added = class_addMethod(meta, resolve, (IMP)real_resolve_logger, "c@::");
+        printf("CONSTDICT %s resolve-hook=addMethod added=%d meta-responds-now=%d\n",
+               tag, added, class_respondsToSelector(meta, resolve));
+    }
+
+    IMP post = class_getMethodImplementation(real, desc);
+    printf("CONSTDICT %s post-hook getMethodImplementation(description)=%p\n",
+           tag, (void *)post);
+    where("where-real-class-post-hook-getimp", (void *)post);
+    printf("CONSTDICT %s resolve-fired-after-hook=%d\n", tag, real_resolve_calls);
+}
+
 /* Control: a REAL object (no fake) — the send must return a real
  * description object; this proves the probe's send path itself is sound. */
 static void control(const char *tag, id obj) {
@@ -166,6 +224,19 @@ int main(int argc, char **argv) {
                    class_respondsToSelector(real_stub, desc),
                    (void *)class_getMethodImplementation(real_stub, desc));
             where("where-real-stub-getimp", (void *)class_getMethodImplementation(real_stub, desc));
+        }
+
+        /* Step 38: the resolve owner on the real class. Everything that can
+         * be read before a send is read before it: a hit on the armed
+         * Foundation+0x790b0 trap is fatal (resume=0), so the send goes last
+         * and whatever it does not reach is already in the log. */
+        if (real_stub) {
+            real_class_measure("real-class", real_stub);
+            printf("CONSTDICT real-class resolve-fired-before-send=%d\n",
+                   real_resolve_calls);
+            probe("real-class", (void *)real_stub);
+        } else {
+            printf("CONSTDICT real-class absent: objc_getClass(NSConstantDictionary)=nil\n");
         }
 
         /* Empty root class: no superclass, no methods added (step-36 shape). */
