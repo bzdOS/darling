@@ -144,30 +144,54 @@ int main(int argc, char **argv) {
         /* Control 2: a placeholder instance. */
         control("placeholder", [[NSDictionary alloc] init]);
 
-        /* The case under investigation: the CoreFoundationExtras stub class. */
-        Class stub = objc_getClass("NSConstantDictionary");
-        printf("CONSTDICT stub-class=%p name=%s\n", (void *)stub,
-               stub ? class_getName(stub) : "(nil)");
-        if (stub) {
-            /* What the runtime's own tables say about this class, queried
-             * before the send so the queries cannot pre-populate a cache
-             * that changes the printed result. */
+        /* The case under investigation: the CoreFoundationExtras stub class
+         * as-is in the current runtime (may have methods), plus an explicitly
+         * EMPTY root class (method-list-count=0, like step 36) to emulate the
+         * chrome scenario without touching overlay/staging. */
+        Class real_stub = objc_getClass("NSConstantDictionary");
+        printf("CONSTDICT real-stub-class=%p name=%s\n", (void *)real_stub,
+               real_stub ? class_getName(real_stub) : "(nil)");
+        if (real_stub) {
             unsigned count = 0;
-            Method *ml = class_copyMethodList(stub, &count);
-            printf("CONSTDICT stub method-list-count=%u\n", count);
+            Method *ml = class_copyMethodList(real_stub, &count);
+            printf("CONSTDICT real-stub method-list-count=%u\n", count);
             for (unsigned i = 0; i < count; i++) {
-                printf("CONSTDICT stub method[%u]=%s imp=%p\n", i,
+                printf("CONSTDICT real-stub method[%u]=%s imp=%p\n", i,
                        sel_getName(method_getName(ml[i])),
                        (void *)method_getImplementation(ml[i]));
             }
-            free(ml);
+            if (ml) free(ml);
             SEL desc = sel_registerName("description");
-            printf("CONSTDICT stub responds(description)=%d getMethodImplementation=%p\n",
-                   class_respondsToSelector(stub, desc),
-                   (void *)class_getMethodImplementation(stub, desc));
-            where("where-stub-getimp", (void *)class_getMethodImplementation(stub, desc));
+            printf("CONSTDICT real-stub responds(description)=%d getMethodImplementation=%p\n",
+                   class_respondsToSelector(real_stub, desc),
+                   (void *)class_getMethodImplementation(real_stub, desc));
+            where("where-real-stub-getimp", (void *)class_getMethodImplementation(real_stub, desc));
+        }
 
-            probe("stub", stub);
+        /* Empty root class: no superclass, no methods added (step-36 shape). */
+        Class empty = objc_allocateClassPair(NULL, "EmptyConstDictProbe", 0);
+        if (empty) {
+            objc_registerClassPair(empty);
+        }
+        printf("CONSTDICT empty-stub-class=%p name=%s\n", (void *)empty,
+               empty ? class_getName(empty) : "(nil)");
+        if (empty) {
+            unsigned count = 0;
+            Method *ml = class_copyMethodList(empty, &count);
+            printf("CONSTDICT empty-stub method-list-count=%u\n", count);
+            for (unsigned i = 0; i < count; i++) {
+                printf("CONSTDICT empty-stub method[%u]=%s imp=%p\n", i,
+                       sel_getName(method_getName(ml[i])),
+                       (void *)method_getImplementation(ml[i]));
+            }
+            if (ml) free(ml);
+            SEL desc = sel_registerName("description");
+            printf("CONSTDICT empty-stub responds(description)=%d getMethodImplementation=%p\n",
+                   class_respondsToSelector(empty, desc),
+                   (void *)class_getMethodImplementation(empty, desc));
+            where("where-empty-stub-getimp", (void *)class_getMethodImplementation(empty, desc));
+
+            probe("empty-stub", empty);
         }
 
         /* Variant B: a receiver whose isa is a code pointer with a real
