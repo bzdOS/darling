@@ -26,6 +26,7 @@ clang -target x86_64-apple-macos10.12 -fobjc-runtime=macosx-10.12 -c \
 clang -target x86_64-apple-macos10.12 -c \
   "$SRC/build-freebsd/stub-frameworks/OpenDirectory-stub-data.c" -o "$W/od.c.o"
 ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
+  -compatibility_version 1.0.0 -current_version 1.0.0 \
   -install_name /System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory \
   -o "$W/OpenDirectory" "$W/od.m.o" "$W/od.c.o" "$W/empty_cache.o"
 llvm-nm -m "$W/OpenDirectory" | grep -E "OBJC_CLASS|kOD"
