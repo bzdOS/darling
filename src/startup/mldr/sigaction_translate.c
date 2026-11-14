@@ -366,6 +366,23 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
             "[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest"
             " handler=%p (linux_signo=%d) rip=0x%llx si_code=%d si_addr=%p\n",
             handler, linux_signo, rip, si_code, si_addr);
+        /* Frame-pointer walk of the guest stack at the trap, so the call chain
+         * of a deliberate crash (CHECK, NOTREACHED) is in the log. Bounded:
+         * 16 frames, rbp must stay 8-aligned, ascending and within 1 MiB. */
+        {
+            unsigned long long bp = (unsigned long long)uc->uc_mcontext.mc_rbp;
+            unsigned long long sp0 = (unsigned long long)uc->uc_mcontext.mc_rsp;
+            fprintf(stderr, "[darling-mldr] SIGTRAP-AUDIT-CHAIN: rsp=0x%llx rbp=0x%llx\n", sp0, bp);
+            for (int depth = 0; depth < 16; depth++) {
+                if (bp == 0 || (bp & 7) || bp < sp0 || bp - sp0 > (1ull << 20))
+                    break;
+                unsigned long long *fp = (unsigned long long *)bp;
+                fprintf(stderr, "[darling-mldr] SIGTRAP-AUDIT-CHAIN: #%d ret=0x%llx\n", depth, fp[1]);
+                if (fp[0] <= bp)
+                    break;
+                bp = fp[0];
+            }
+        }
         fflush(stderr);
     }
 
