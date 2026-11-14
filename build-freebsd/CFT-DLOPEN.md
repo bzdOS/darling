@@ -13234,3 +13234,255 @@ runs (`WAYLAND_DISPLAY` unset). The first WindowServer call has not happened.
   dylibs of the first build were linked with a Linux-host lld, and the VM build
   of the same generator output later produced byte-identical `suppl.dylib`
   (md5 `348680c7...`), which is how the stall was ruled out as a variable.
+
+## Step 47 — anonymous mmap VM tag
+
+Question: Chromium dies at `Framework+0x95d07c1` (an `IMMEDIATE_CRASH`) after
+its page allocator fails to reserve 32 GiB `PROT_NONE` with VM tag `0xfd`.
+Hypothesis from step 46: the Darwin tag (`VM_MAKE_TAG(0xfd)`, `0xfd << 24`,
+passed in the `fd` argument of an anonymous `mmap`) reaches the host unchanged
+and the host answers `EINVAL`.
+
+Answer: **refuted.** The tag is already dropped in mldr (`fd = -1` under
+`MAP_ANON`); the reservation never reached the host at all. The failure was
+upstream of the system call: the supplement dylib exported `_mmap` as a stub.
+Paths below are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`.
+Branch `task/mmap-vmtag`, from the step-46 head.
+
+### (1) Where the guest's mmap goes
+
+`mmap` in the guest is Darling's `libsystem_kernel` `_mmap` (ORs in
+`MAP_UNIX03`, calls `___mmap`) -> `sys_mmap`
+(`src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c`),
+which rewrites the Darwin flags to Linux ones (ANON/FIXED/SHARED/PRIVATE only)
+and issues Linux syscall 9. mldr's `freebsd_syscall_trap.c` traps it on the
+`SIGILL` path (`LINUX_SYS_mmap`), translates the flags back to FreeBSD ones and
+forwards `fd = -1` for anonymous mappings. The Darwin-numbered case
+(`MACOS_SYS_mmap`, SIGSYS path) is never taken in these runs (0 `SIGSYS ENTER`).
+
+Diagnostic (gated by `DARLING_TRAP_LOG`, commit "mldr: log the guest mmap ..."):
+every guest mmap prints the guest `len/prot`, guest flags and fd, the flags and
+fd handed to the host, and the result (`mmap-ret-ok` / `mmap-ret-errno`). The
+host values are snapshotted into `volatile` locals first: the first version
+printed host flags `0x0` for every call, because the syscall wrapper leaves
+r8-r10 as plain inputs and the host kernel does not preserve them (run C below
+shows that artefact; run D has the fixed print). The Darwin-numbered case now
+also passes only flags whose Darwin and FreeBSD values coincide (Darwin
+`MAP_NOCACHE` 0x400 is `MAP_STACK`, `MAP_JIT` 0x800 is `MAP_NOSYNC`,
+`MAP_RESILIENT_CODESIGN` 0x2000 is `MAP_GUARD`); that case is not exercised.
+
+### (2) Evidence before: the 32 GiB mmap was never issued
+
+Run B (`$DARLING_BUILD_DIR/chrome-vmtag-B.log`, every mmap logged, stock
+supplement). 495 mmaps, none with `PROT_NONE`, none larger than the 253 MB
+framework `__TEXT` mapping:
+
+```text
+$ grep -c 'mmap-linux-len-prot.* b=0$' chrome-vmtag-B.log
+0
+$ grep -c mmap-ret-errno chrome-vmtag-B.log
+0
+[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest handler=0x28a43959c2a0 (linux_signo=5) rip=0x28a4431e07c1 ...
+```
+
+(same stop as step 46: `Framework+0x95d07c1`.) So the host never saw a tagged
+`mmap`, and no host `EINVAL` exists to explain the NULL.
+
+### (3) Cause: `_mmap` bound to the supplement and was `xorl %eax,%eax; ret`
+
+The framework's imports are two-level. Ordinal 67 is the supplement
+(`/usr/lib/suppl.dylib`); `chrome-imports-by-ordinal.py ... --missing 67` lists
+919 names bound to it, among them:
+
+```text
+    _getpid
+    _mach_vm_map
+    _mmap
+    _munmap
+    _vm_allocate
+```
+
+The supplement defined `_mmap` itself (`llvm-nm -U suppl.dylib`:
+`0000000000000a27 T _mmap`, a three-byte stub). dyld searches the supplement
+first and follows its re-exports only when it has no definition, so the real
+`libsystem_kernel` `_mmap` (`0000000000020820 T _mmap`) was never reached. The
+stub returned 0, not `MAP_FAILED`; the allocator's wrapper (+0x16e3f60, inner
+call +0x16e4300) treats that as failure. Systematic check (every name the
+supplement exports against the export tries of the four re-exported providers):
+
+```text
+suppl 838 exports; 442 also defined by libsystem_c/_kernel/_m/_platform
+  e.g. _mmap _munmap _vm_allocate _getpid _abort _exit _fopen _getenv _NDR_record
+```
+
+(`_NDR_record` is one of the step-46 data-as-code suspects: it was a text stub
+over a real data object.) This is not a one-name accident; it is the whole
+class "supplement name that a provider also defines".
+
+### (4) Fixes (separate commits)
+
+1. `mldr: log the guest mmap ...`: the gated diagnostic and the Darwin-case
+   flag mask above. No behaviour change for the traced Linux-numbered path.
+2. `suppl: do not emit stubs for names the providers already define`:
+   `build-freebsd/gen-cg-supl.py` reads the export tries of the four
+   re-exported providers (from the overlay root it is given) and drops each
+   name one defines, except the names it treats explicitly (assembly bodies,
+   forwards, `DATA_VALUES`). 442 shadowing names, 437 dropped (5 are explicit).
+3. `suppl: drop stubs for every name the libSystem closure defines ...`: the
+   provider set is the dylibs `libSystem.B.dylib` re-exports (33;
+   `gen-cg-supl.py --providers <overlay>` prints them) and
+   `build-suppl-stubs.sh` passes exactly that list as `-reexport_library`.
+   Needed because commit 2 alone moved the stop to `malloc_get_all_zones`
+   (run D below). Of the 401 names left after commit 2, 175 more are dropped;
+   226 definitions remain.
+
+`check-suppl-bodies.py` passes on every build (`0 outward`).
+
+### (5) Rebuild and which binaries the guest loaded
+
+Build commands (on the test host, no full rebuild):
+
+```sh
+sh build-freebsd/build-mldr-only.sh                       # DARLING_BUILD_DIR, DARLING_SRC_DIR set
+sh build-freebsd/build-suppl-stubs.sh $DARLING_BUILD_DIR/suppl-stubs-vmtag2
+cp $DARLING_BUILD_DIR/suppl-stubs-vmtag2/{suppl,cg-supl}.dylib $DARLING_OVERLAY/usr/lib/
+```
+
+mldr lives in `$DARLING_BUILD_DIR/dserver/mldr-real/` and the harness execs
+that path directly (there is no staged copy). Backups kept there:
+`mldr.pre-exitattr` (the step-45 binary) and `mldr.pre-mmapvmtag`.
+
+```text
+mldr.pre-mmapvmtag                          aea7910d915310fad7496e6e30af7e09
+build-tree output == installed (final)      0d9ff633fe9eba6ae6e8231a758c17c7
+```
+
+Intermediate builds: `131b3163...` (run A), `f070388a...` (runs B, C). That the
+guest ran the final mldr in D and E is shown by the log itself: the host-flag
+line reads `p=0x1002` there and `p=0x0` in C (the old print).
+
+Supplement, overlay copy vs the copy the harness staged into
+`/tmp/darling-local-overlay/usr/lib` (the harness removes and restages that
+tree on every start, no REFRESH needed). md5 of the staged copy was read after
+runs C and E, and before run C, when it still held the previous run's file:
+
+```text
+before run C (stale stage)   staged suppl.dylib efafb09c17fe1a4438c7fd8276469ee5
+after run C (and D)          overlay == staged == build output  dfcf4bc91249741d25a360726a34de19
+after run E                  overlay == staged == build output  10ad208b76a312ab125c462876b76b20
+```
+
+Runs A and B used the unchanged step-46 file (`efafb09c...`); their staged copy
+was not compared separately. The previous installed copies are kept as
+`$DARLING_BUILD_DIR/suppl-stubs-vmtag/*.pre-mmapvmtag` (`suppl` `efafb09c...`,
+`cg-supl` `98754386...`). `cg-supl.dylib` was rebuilt and installed too
+(`c9445d40...` after commit 2, `21f83ff0...` after commit 3); the guest does
+not load it.
+
+### (6) Runs
+
+Wrapper (same as step 46, plus start time and duration appended to the log):
+
+```sh
+/usr/local/bin/sudo -n env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY \
+  DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=chrome-macho \
+  DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
+  DARLING_TRAP_LOG=1 CHROME_APP=<chrome-for-testing-dir>/chrome-mac-x64/"Google Chrome for Testing.app" \
+  timeout --foreground -k 5 $TO $DARLING_BUILD_DIR/launch-dynamic >> $LOG 2>&1
+echo WRAPPER_RC=$? >> $LOG; echo "WRAPPER_DURATION=..." >> $LOG
+```
+
+| run | log (`$DARLING_BUILD_DIR/`) | mldr | suppl | WRAPPER_RC | duration | timeout |
+| --- | --- | --- | --- | --- | --- | --- |
+| A | `chrome-vmtag-A.log` | `131b3163` (logs >= 1 GiB and failures only) | `efafb09c` stock | 133 | 161 s | 3600 s |
+| B | `chrome-vmtag-B.log` | `f070388a` (all mmaps) | `efafb09c` stock | 133 | 204 s | 3600 s |
+| C | `chrome-vmtag-C.log` | `f070388a` | `dfcf4bc9` (commit 2) | 132 | 75 s | 3600 s |
+| D | `chrome-vmtag-D.log` | `0d9ff633` final | `dfcf4bc9` (commit 2) | 132 | 2 s | 3600 s |
+| E | `chrome-vmtag-E.log` | `0d9ff633` final | `10ad208b` (commit 3) | 133 | 2 s | 3600 s |
+
+No run was cut off by its timeout. The 2 s of D and E is the wrapper's own
+measurement (log mtime and the darlingserver start time agree with it); the
+runs after the first were fast, most likely warm caches, which was not
+investigated. 132 = 128 + SIGILL, 133 = 128 + SIGTRAP.
+
+### (7) Evidence after
+
+Run D (final mldr, commit-2 supplement). The first PROT_NONE reservation,
+verbatim (the guest fd is `0xfd000000` as a signed int, the host gets `-1` and
+the FreeBSD `MAP_ANON|MAP_PRIVATE` flags):
+
+```text
+[traplog] mmap-linux-len-prot tid=1011785 a=34359738368 b=0
+[traplog] mmap-guest-flags-fd tid=1011785 p=0x22 b=-50331648
+[traplog] mmap-host-flags-fd tid=1011785 p=0x1002 b=-1
+[traplog] mmap-ret-ok tid=1011785 a=1099515047936 b=0
+```
+
+Later in the same run: two more 32 GiB mappings, one `68719472640` (64 GiB less
+a page) and one `17179869184` (16 GiB), all `mmap-ret-ok`. The host-flag
+histogram of run D: `345 p=0x12 b=3` (file, `MAP_FIXED|MAP_PRIVATE`) and
+`156 p=0x1002 b=-1` (anonymous). The old stop is gone.
+
+### (8) Next stops
+
+Run C and D (commit-2 supplement): genuine `ud2`, not a trap of ours:
+
+```text
+[darling-mldr] genuine SIGILL (ud2, not a patched trampoline) at Google Chrome for Testing Framework+0x212a879 rip=0x3df10a53a879 rax=0x0
+[darling-mldr] FATAL signal 4 (code=5) at addr=0x3df10a53a879
+```
+
+The routine (+0x212a4c0) calls a function with `(mach_task_self, 0, &ptr,
+&count)`, both out values zeroed, and branches to the `ud2` when `count == 0`:
+that shape is `malloc_get_all_zones` finding no zone (Chromium's
+allocator-shim zone setup). Inferred from the disassembly, not observed: the
+supplement still held `_malloc_get_all_zones`, `_malloc`, `_free`, `_pthread_*`
+and `_dispatch_*` as `xorl %eax,%eax; ret` stubs (the generator output of that
+build lists them). Commit 3 removes those stubs.
+
+Run E (commit 3), the current stop, `WRAPPER_RC=133`:
+
+```text
+[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest handler=0x2f16af79c2a0 (linux_signo=5) rip=0x2f16b1cbc94d si_code=1 si_addr=0x2f16b1cbc94d
+[darling-mldr] SIGTRAP-AUDIT: rt_sigaction(5) from 0x22382a <unknown> old=0x2f16af79c2a0 new=0x0
+WRAPPER_RC=133
+```
+
+Framework image `mh=0x2f16afe10000` (dyld-trace), so rip = Framework +
+`0x1eac94d`, the byte after an `int3` (bytes `cc 0f 0b` = `int3; ud2`, a
+Chromium `IMMEDIATE_CRASH`). Raw bytes at +0x1eac93f: `85 67 2f 0d 31 db eb de
+45 31 f6 eb ad cc 0f 0b`. The enclosing function (+0x1eac88c) builds a
+`CFString` from a `std::string`, then calls `objc_msgSend(class, sel, arg)` where
+the selector ref (+0xfd92640) is `bundleWithURL:` and the class import is
+`_OBJC_CLASS_$_NSBundle` (chained import 71, ordinal 5 = FoundationExtras),
+releases the temporary and branches to the `int3` when the message result is
+nil. Classification: Chromium fatal on `+[NSBundle bundleWithURL:]` returning
+nil, not a Darling fault. No `EXIT-SYSCALL`, no `FATAL signal`, no `Symbol not
+found`, no `[pid:...:ERROR` line in run E.
+
+### (9) Display / WindowServer
+
+Not reached. Run E: 0 matches for `wayland`, `WindowServer`, `CGSDefault`,
+`NSApplication`, `X11`; the only guest `connect()` is
+`[gsw-bisect] connect fd=3 len=43 bytes=01 00 2f 74` (the darlingserver RPC
+socket, once, before `ChromeMain`), as in step 46. No compositor was provided.
+
+### (10) Not verified
+
+- The URL passed to `bundleWithURL:` and why the result is nil (a missing
+  `NSBundle` in the overlay `FoundationExtras`, which defines no `NSBundle`
+  symbol and carries no such selector string, versus a path problem): not
+  measured.
+- That `malloc_get_all_zones` was the call behind the run C/D `ud2` (inferred
+  from the disassembly; the guest was not traced at that point).
+- That dropping the other names changes nothing else: Chrome reaches a
+  different stop at each step, and there is no regression test beyond these
+  five runs.
+- That dyld's re-export walk resolves the dropped names for all 33 providers.
+  It did for every import Chrome performed before the run E stop; a missing
+  name would show as `Symbol not found`, and none did.
+- The Darwin-numbered mmap case (`MACOS_SYS_mmap`) with the new flag mask: this
+  guest does not take it.
+- The remaining supplement stubs (211 text, 10 data in `suppl.dylib`, for
+  example `_environ`, `_in6addr_any`, `_kCT*`, `_kSC*`) were not audited for
+  data-as-code beyond the provider-shadow check.
