@@ -28,6 +28,8 @@
 # mldr, which hands the whole environment to the guest. DARLING_TEST_ARGS
 # becomes the guest's argv[1..].
 #
+# CHROME_LOG_PREFIX (default chrome-wl) names the log: $DARLING_BUILD_DIR/<prefix>-SUFFIX.log
+#
 # Other useful NAME=val arguments: DARLING_KEEP_LOCAL=1 (do not re-stage the
 # frameworks), DARLING_RPC_LOG=1 (darlingserver call/reply log).
 # The log is never overwritten. WRAPPER_RC and WRAPPER_DURATION are the last
@@ -35,7 +37,7 @@
 S=$1; T=$2; shift 2
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
 : "${CHROME_APP:?}" "${XDG_RUNTIME_DIR:?}" "${WAYLAND_DISPLAY:?}"
-LOG=$DARLING_BUILD_DIR/chrome-wl-$S.log
+LOG=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S.log
 [ -e "$LOG" ] && { echo "exists $LOG"; exit 1; }
 START=$(date +%s)
 echo "WRAPPER_START=$START timeout=$T" > "$LOG"
