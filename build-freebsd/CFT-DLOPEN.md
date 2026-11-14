@@ -12606,3 +12606,57 @@ Not run: with the firstpass dylib unbuilt, `narrow-build-target.sh` stops
 again at `MISSING dylib inputs (1)` before the link — the same deterministic
 result as Control #139, with no link outcome to report. (d) nm gate: no
 dylib produced.
+
+## Step 43/2 — re-export providers run attempt (task suppl-reexport-runs)
+
+Base: pr-arm64 after merge of 054078de9 (doc-only). Branch: task/supl-reexport-runs.
+
+### (1) Sudo diagnostics (pre-run)
+
+- `ls -l /usr/local/bin/sudo /usr/bin/sudo`: `/usr/local/bin/sudo` exists `-rwsr-xr-x root:wheel 228312`; `/usr/bin/sudo` missing.
+- `/usr/local/bin/sudo -n true` => RC=0.
+- `/usr/bin/sudo -n true` => RC=127, stderr `/bin/sh: /usr/bin/sudo: not found`.
+Working path for runs: `/usr/local/bin/sudo`.
+
+### (2) Mechanism restored and build/static gates
+
+Reapplied per `docs/task-supl-reexport-providers/supl-reexport-providers.md` §1:
+SKIP_NAMES 23 in `build-freebsd/gen-cg-supl.py`; `build-suppl-stubs.sh` links with
+`-reexport_library` for `libsystem_c.dylib`, `libsystem_kernel.dylib`,
+`libsystem_m.dylib`, `libsystem_platform.dylib`.
+
+Build: `sh build-freebsd/build-suppl-stubs.sh` (env PATH/DARLING_* as in step 43 doc) => RC=0 (ld64.lld target-version warnings only).
+Generator:
+- suppl: `822 text stubs, 11 data stubs, 2 forwarding stubs, 23 skipped, 858 total`
+- cg-supl: `848 text stubs, 13 data stubs, 2 forwarding stubs, 23 skipped, 886 total`
+
+Static checks (built `build/suppl-stubs/*.dylib`):
+- `llvm-nm -m .../suppl.dylib | grep -E '(___stack_chk_fail|___error|___bzero|_bzero)$'` => only `___bzero`/`_bzero` (`__TEXT,__text`) external.
+- `llvm-objdump --macho --private-headers .../suppl.dylib|cg-supl.dylib` => 4 `LC_REEXPORT_DYLIB` load commands each (for the 4 providers).
+
+### (3) Run A
+
+Command (via `/usr/local/bin/sudo -n`): `MLDR_TRAP_AT='Foundation+0x790b0' timeout -k 5 300 "$DARLING_BUILD_DIR/launch-dynamic"` with CHROME_APP set to the app bundle, `DARLING_STAGING_TREES` from build, `WAYLAND_DISPLAY=wayland-1`, `XDG_RUNTIME_DIR=/tmp/wayland-test`, `DARLING_SMOKE_REFRESH=1`.
+
+Result: launch did not reach a clean running state. Metrics from log:
+- `FATAL signal`: 0
+- `Symbol not found`: 1
+- `dyld: loaded`: 134
+- `MLDR_TRAP_AT hit`: 0
+
+Failure:
+```text
+[darling-mldr] MLDR_TRAP_AT: armed Foundation+0x790b0 ...
+dlopen //Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework: ... Symbol not found: ___atomic_store
+  Referenced from: //Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework (which was built for Mac OS X 13.0)
+  Expected in: /usr/lib/suppl.dylib
+```
+
+### (4) Run B
+
+Not run: Run A failed at framework dlopen with `Symbol not found: ___atomic_store` before the `Framework+0x212ab3a` site could be exercised; §9.11 site not reached/re-measured in this attempt.
+
+### Verdict / fallback
+
+- Sudo unblocked for runs (`/usr/local/bin/sudo -n true` RC=0). Static re-export shape as planned, but Run A still fails with two-level import binding to suppl: `___atomic_store` is omitted and not resolved through re-export for this load path (framework expected in `/usr/lib/suppl.dylib`). No wall-§9.11 classification obtained.
+- Overlay suppl/cg-supl restored to pre-step43-2 baseline; generator/build script reverted to committed baseline on this branch after the run. Re-export dylibs remain in build artifacts for inspection (`build/suppl-stubs/`, log `build/chrome-reexport-runs-A-20261114.log`).

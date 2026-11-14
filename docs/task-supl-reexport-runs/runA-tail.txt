@@ -1,0 +1,80 @@
+dyld: loaded: <4C4C44D9-5555-3144-A149-A8E85DE91E92> /System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03ed9000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C444F-5555-3144-A1A8-0ECB0D1B0FBC> /System/Library/Frameworks/UniformTypeIdentifiers.framework/Versions/A/UniformTypeIdentifiers
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 40960-byte executable mapping at 0x1d6f03edc000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4111692E-BBCD-3EC7-BC4B-31F7AFCF321C> /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03efa000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C446D-5555-3144-A103-C661069B3221> /System/Library/Frameworks/Metal.framework/Versions/A/Metal
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03efd000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C44C7-5555-3144-A114-9EDBCCAD5C53> /System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f00000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C4413-5555-3144-A11D-4B006DAE4F75> /System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f03000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C440C-5555-3144-A183-1C3C7D0356B9> /System/Library/Frameworks/CoreBluetooth.framework/Versions/A/CoreBluetooth
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f06000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C444F-5555-3144-A1B0-173DB3DB6C76> /System/Library/Frameworks/IOBluetooth.framework/Versions/A/IOBluetooth
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f09000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C447F-5555-3144-A1AF-CF1E35E4980E> /System/Library/Frameworks/MediaPlayer.framework/Versions/A/MediaPlayer
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f0c000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C44EE-5555-3144-A1DA-C99F3409B8F7> /System/Library/Frameworks/AuthenticationServices.framework/Versions/A/AuthenticationServices
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f0f000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C44EC-5555-3144-A144-5B880DC71E4F> /System/Library/Frameworks/GameController.framework/Versions/A/GameController
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f12000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C44B4-5555-3144-A1D0-FBE375028C08> /System/Library/Frameworks/Vision.framework/Versions/A/Vision
+[darling-mldr] patch_linux_raw_syscalls: no known raw-syscall trampoline signature matched in a 8192-byte executable mapping at 0x1d6f03f15000 — if this dylib makes raw Linux-ABI syscalls, they will silently run as FreeBSD syscalls under Linux numbers instead of failing (see freebsd_syscall_trap.c's file header)
+dyld: loaded: <4C4C44E3-5555-3144-A160-E40EBB0B11B3> /System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications
+dyld: unloaded: <4C4C4409-5555-3144-A170-AD4644F310AD> //Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework
+dyld: unloaded: <4C4C4453-5555-3144-A1C6-FCF8CAE46A95> /System/Library/Frameworks/Security.framework/Versions/A/Security
+dyld: unloaded: <4C4C4445-5555-3144-A192-2F97B4BDFA60> /System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices
+dyld: unloaded: <4C4C4448-5555-3144-A13D-7FD0F4ACC49B> /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+dyld: unloaded: <4C4C44A6-5555-3144-A176-4F621C7E611A> /System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork
+dyld: unloaded: <4C4C4484-5555-3144-A185-0F4A27D4DAED> /usr/lib/IOKitExtras.dylib
+dyld: unloaded: <4C4C44F6-5555-3144-A1BF-7C09816101E2> /System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory
+dyld: unloaded: <4C4C4456-5555-3144-A115-8F45B1743231> /System/Library/Frameworks/CryptoTokenKit.framework/Versions/A/CryptoTokenKit
+dyld: unloaded: <4C4C4486-5555-3144-A139-A1672F9F0117> /System/Library/Frameworks/LocalAuthentication.framework/Versions/A/LocalAuthentication
+dyld: unloaded: <4C4C44DE-5555-3144-A102-CF9CB2DC2576> /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
+dyld: unloaded: <4C4C4435-5555-3144-A17E-EEC1F864F784> /System/Library/Frameworks/AudioUnit.framework/Versions/A/AudioUnit
+dyld: unloaded: <4C4C4495-5555-3144-A13E-AD6008B3567E> /System/Library/Frameworks/AVFAudio.framework/Versions/A/AVFAudio
+dyld: unloaded: <4C4C445B-5555-3144-A184-95BF05E6603F> /System/Library/Frameworks/Carbon.framework/Versions/A/Carbon
+dyld: unloaded: <4C4C4495-5555-3144-A120-4F8F32312810> /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
+dyld: unloaded: <4C4C44AE-5555-3144-A150-3DF6F7146E72> /System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage
+dyld: unloaded: <4C4C44C6-5555-3144-A19D-C97D74F3CCD7> /System/Library/Frameworks/Network.framework/Versions/A/Network
+dyld: unloaded: <4C4C44F0-5555-3144-A133-33B0964F1C6B> /usr/lib/SystemConfigurationExtras.dylib
+dyld: unloaded: <4C4C44FE-5555-3144-A1EB-9F5C510FB501> /System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface
+dyld: unloaded: <4C4C44B7-5555-3144-A1F5-452A6D02BE6B> /System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia
+dyld: unloaded: <4C4C447E-5555-3144-A1EF-4FAB96BAE07C> /System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox
+dyld: unloaded: <4C4C44E2-5555-3144-A166-0BFAD706EFB9> /System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL
+dyld: unloaded: <4C4C44E2-5555-3144-A188-43912E65A3B3> /System/Library/Frameworks/Quartz.framework/Versions/A/Quartz
+dyld: unloaded: <4C4C44D8-5555-3144-A17F-2F0D5088401F> /System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa
+dyld: unloaded: <4C4C44A5-5555-3144-A1A9-0E88C0EB43D4> /System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox
+dyld: unloaded: <4C4C446D-5555-3144-A1C2-E25BE8B5AD7B> /System/Library/Frameworks/CoreMediaIO.framework/Versions/A/CoreMediaIO
+dyld: unloaded: <4C4C445F-5555-3144-A1E5-80BD913F13AD> /System/Library/Frameworks/Accessibility.framework/Versions/A/Accessibility
+dyld: unloaded: <4C4C445D-5555-3144-A150-C14463891EFB> /System/Library/Frameworks/MetalKit.framework/Versions/A/MetalKit
+dyld: unloaded: <4C4C44B7-5555-3144-A189-B154CFF8D5C7> /usr/lib/IOBluetoothExtras.dylib
+dyld: unloaded: <4C4C4431-5555-3144-A1F8-9548A19D0653> /System/Library/Frameworks/CoreMIDI.framework/Versions/A/CoreMIDI
+dyld: unloaded: <4C4C44EF-5555-3144-A1AF-7933D3CCCB99> /System/Library/Frameworks/MediaAccessibility.framework/Versions/A/MediaAccessibility
+dyld: unloaded: <4C4C44DB-5555-3144-A1DC-C30263EBF6B8> /System/Library/Frameworks/SecurityInterface.framework/Versions/A/SecurityInterface
+dyld: unloaded: <4C4C4491-5555-3144-A1CA-71A623C7D426> /System/Library/Frameworks/CoreHaptics.framework/Versions/A/CoreHaptics
+dyld: unloaded: <4C4C4428-5555-3144-A197-EB277BC760BB> /System/Library/Frameworks/ForceFeedback.framework/Versions/A/ForceFeedback
+dyld: unloaded: <4C4C4415-5555-3144-A1B0-6582105CADBF> /System/Library/Frameworks/CoreWLAN.framework/Versions/A/CoreWLAN
+dyld: unloaded: <4C4C4492-5555-3144-A108-78EDD8F31E4D> /System/Library/Frameworks/CoreLocation.framework/Versions/A/CoreLocation
+dyld: unloaded: <4C4C4415-5555-3144-A15E-8AD16C741ABA> /System/Library/Frameworks/CoreML.framework/Versions/A/CoreML
+dyld: unloaded: <4C4C44D0-5555-3144-A10F-087045297EB1> /System/Library/Frameworks/DiskArbitration.framework/Versions/A/DiskArbitration
+dyld: unloaded: <4C4C44CE-5555-3144-A1E8-0B1922DF4C9F> /System/Library/Frameworks/ServiceManagement.framework/Versions/A/ServiceManagement
+dyld: unloaded: <4C4C44F6-5555-3144-A17C-CE7B8D911924> /System/Library/Frameworks/SafariServices.framework/Versions/A/SafariServices
+dyld: unloaded: <4C4C44A2-5555-3144-A1F9-5605BA984348> /usr/lib/UserNotificationsExtras.dylib
+dyld: unloaded: <4C4C44F9-5555-3144-A1EA-53EB00373FB1> /System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework/Versions/A/LocalAuthenticationEmbeddedUI
+dyld: unloaded: <4C4C4431-5555-3144-A1C9-18E0B12C0EBD> /usr/lib/libcups.2.dylib
+dyld: unloaded: <E019611F-6C78-3B38-8810-24BF888ADD99> /usr/lib/libbsm.0.dylib
+dyld: unloaded: <4C4C44F3-5555-3144-A163-9E4763A1005E> /usr/lib/libpmenergy.dylib
+dyld: unloaded: <4C4C44C0-5555-3144-A165-80058B73D2C1> /usr/lib/libpmsample.dylib
+dyld: unloaded: <4C4C44EB-5555-3144-A118-9E752AA7AC9A> /usr/lib/libsandbox.1.dylib
+dyld: unloaded: <AD5EE974-67C3-324A-9274-68442DF7579D> /usr/lib/libbz2.1.0.dylib
+dyld: unloaded: <4C4C449C-5555-3144-A1A0-D310B414C619> /usr/lib/suppl.dylib
+dyld: unloaded: <4111692E-BBCD-3EC7-BC4B-31F7AFCF321C> /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration
+dyld: unloaded: <4C4C444F-5555-3144-A1B0-173DB3DB6C76> /System/Library/Frameworks/IOBluetooth.framework/Versions/A/IOBluetooth
+dyld: unloaded: <4C4C44E3-5555-3144-A160-E40EBB0B11B3> /System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications
+dlopen //Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework: dlopen(//Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework, 261): Symbol not found: ___atomic_store
+  Referenced from: //Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Google Chrome for Testing Framework (which was built for Mac OS X 13.0)
+  Expected in: /usr/lib/suppl.dylib
+.
