@@ -468,7 +468,11 @@ static const char *src_dir(void) {
 static void cleanup(void) {
     system("pkill -9 darlingserver 2>/dev/null");
     system("rm -rf " PREFIX);
-    system("rm -rf " LOCAL_OVERLAY);
+    /* DARLING_KEEP_LOCAL=1: keep the staged local overlay between runs. Staging
+     * the frameworks takes minutes; the staged files are not modified by a run
+     * (the launcher binary is copied again each start). Default: wipe. */
+    if (getenv("DARLING_KEEP_LOCAL") == NULL)
+        system("rm -rf " LOCAL_OVERLAY);
 }
 
 /*
@@ -839,6 +843,45 @@ int main(void) {
 
         /* update od to point to the local copy */
         od = LOCAL_OVERLAY;
+    }
+
+    /*
+     * DARLING_GUEST_EXPOSE: colon-separated absolute HOST directories that the
+     * guest must see at the SAME path. The guest's "/" is the local overlay
+     * (guest paths are rewritten to <overlay><path>), which cleanup() wipes on
+     * every start, so nothing can be pre-placed there. For each entry a
+     * symlink <overlay><dir> -> <dir> is created after staging; the kernel
+     * follows it to the real directory. Used for the compositor socket
+     * directory (XDG_RUNTIME_DIR), the profile directory and local pages.
+     */
+    {
+        const char *expose = getenv("DARLING_GUEST_EXPOSE");
+        if (expose && expose[0]) {
+            char list[2048];
+            snprintf(list, sizeof(list), "%s", expose);
+            char *sp = NULL;
+            for (char *dir = strtok_r(list, ":", &sp); dir != NULL;
+                 dir = strtok_r(NULL, ":", &sp)) {
+                if (dir[0] != '/') {
+                    fprintf(stderr, "expose: %s is not absolute, skipped\n", dir);
+                    continue;
+                }
+                char link[1100], parent[1100];
+                snprintf(link, sizeof(link), "%s%s", LOCAL_OVERLAY, dir);
+                snprintf(parent, sizeof(parent), "%s", link);
+                char *slash = strrchr(parent, '/');
+                if (slash && slash != parent) {
+                    *slash = '\0';
+                    char mk[1200];
+                    snprintf(mk, sizeof(mk), "mkdir -p '%s'", parent);
+                    (void)system(mk);
+                }
+                if (symlink(dir, link) < 0 && errno != EEXIST)
+                    fprintf(stderr, "expose: symlink %s -> %s: %s\n", link, dir, strerror(errno));
+                else
+                    printf("exposed to guest: %s -> %s\n", link, dir);
+            }
+        }
     }
 
     /*
