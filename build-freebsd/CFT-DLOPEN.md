@@ -13486,3 +13486,263 @@ socket, once, before `ChromeMain`), as in step 46. No compositor was provided.
 - The remaining supplement stubs (211 text, 10 data in `suppl.dylib`, for
   example `_environ`, `_in6addr_any`, `_kCT*`, `_kSC*`) were not audited for
   data-as-code beyond the provider-shadow check.
+
+## Step 48 — NSBundle bundleWithURL
+
+Question: Chromium dies at `Framework+0x1eac94c` (`int3; ud2`) after
+`+[NSBundle bundleWithURL:]` returns nil (step 47). Which URL, which `NSBundle`,
+why nil?
+
+Answer: **the `NSBundle` implementation is not at fault and the app-bundle layout
+is not at fault.** The URL is built from a corrupt string, and the string is
+corrupt because `memmove`/`memcpy` in the guest resolved to a supplement stub that
+copies nothing. Behind that wall the next one is a string `sysctl` that reports
+its length without the NUL, which made Chromium's macOS version parse fail at the
+same kind of `IMMEDIATE_CRASH`. Both are fixed; Chromium now runs 50-63 s and is
+killed by signal 65. Paths below are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`,
+`$DARLING_BUILD_DIR`. Branch `task/nsbundle-url`, from the step-47 head.
+
+### (1) Measurement tools added to mldr (gated)
+
+- `DARLING_TRAP_LOG=1` now also prints, for a trapped Linux path syscall
+  (open, stat, lstat, access, readlink, openat, newfstatat, readlinkat,
+  faccessat), `[traplog] path nr=<n> <string>` (guarded read, 200 bytes,
+  non-printable bytes shown as `?`). The guest's `/` is the staged overlay, so
+  every path starts with `/tmp/darling-local-overlay`.
+- `MLDR_TRAP_STR=<rdi|rsi|rdx|rcx>` (with `MLDR_TRAP_AT`) prints the guest C string
+  the register points to, plus 64 raw bytes; `*<reg>` first follows a
+  `std::string` (prints its three words, then the data pointer).
+
+Wrapper (as in step 46/47; `$1` is the log suffix, extra env goes after it):
+
+```sh
+LOG=$DARLING_BUILD_DIR/chrome-nsbundle-$1.log     # never overwritten
+echo "WRAPPER_START=$S timeout=900" > $LOG
+sudo -n env DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... \
+  DARLING_TEST_BINARY=chrome-macho \
+  DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
+  DARLING_TRAP_LOG=1 "$@" CHROME_APP=<chrome-for-testing-dir>/chrome-mac-x64/"Google Chrome for Testing.app" \
+  timeout --foreground -k 5 900 $DARLING_BUILD_DIR/launch-dynamic >> $LOG 2>&1
+echo WRAPPER_RC=$? >> $LOG; echo "WRAPPER_DURATION=...s TIMEOUT=900s" >> $LOG
+```
+
+### (2) Which NSBundle
+
+`resolve-chained-import.py` on the framework, import 71:
+
+```text
+import[0x47] = lib_ordinal 5 (0x5), weak=0, name=_OBJC_CLASS_$_NSBundle
+  -> provided by: /usr/lib/FoundationExtras.dylib
+```
+
+`FoundationExtras.dylib` defines no `NSBundle`; it re-exports
+`Foundation.framework`, whose overlay binary defines it
+(`llvm-nm`: `t +[NSBundle bundleWithURL:]`, `t +[NSBundle bundleWithPath:]`,
+`t +[NSBundle mainBundle]`). Source: `src/external/foundation/src/NSBundle.m`:
+`bundleWithURL:` is `[[[self alloc] initWithURL:url] autorelease]`, and
+`initWithURL:` returns nil only if `CFBundleCreate` does. `CFBundleCreate` on an
+existing directory without `Info.plist` returns a flat bundle (it only returns
+NULL for a NULL URL or a path that is not an existing directory), so a nil result
+needs a NULL or nonexistent URL.
+
+### (3) The URL
+
+The crashing function (+0x1eac890) takes a `std::string`, makes a `CFString`
+from it, builds a file URL, sends `bundleWithURL:`, and crashes on nil. Its caller
+(return address read at the function entry, run D: +0x1eac300, inside the function at
++0x1eac2d0) gets the string from +0x140c840, which looks like
+`GetFrameworkBundlePath` (names inferred from the disassembly): a trap at the start
+of its `Append` chain is hit (run H), so the not-bundled branch is taken and it builds `<exe dir>/Frameworks/Google Chrome for Testing
+Framework.framework/Versions/154.0.8029.0` (literals 10, 45, 8, 12 bytes). Traps
+on each step, string and size at each call (`MLDR_TRAP_STR=*rsi`), run
+`chrome-nsbundle-I-140c985` .. `-I-140c9d0`:
+
+```text
+ after Append("Frameworks")          struct: 6f77656d6172462f 0000000000736b72 0b..  size 11, "/Frameworks"
+ before Append(<45 bytes>) returns   struct: 0000013800024380 0000000000000039 8000000000000040
+   (size 0x39 = 57 = 12 + 45, long form)
+   MLDR_TRAP_STR rsi -> "/Frameworks/????" (len 16)
+   hex: 2f 46 72 61 6d 65 77 6f 72 6b 73 2f ff fd bc 3f 00 00 00 00 00 00 00 00 ...
+ after the 4th Append                "/Frameworks/????/Versions" ... size 0x19, then 0x26 with 12 zero bytes
+```
+
+The string handed to the `CFString` call (`chrome-nsbundle-C.log`, trap at
++0x1eac8d2, `MLDR_TRAP_STR=rsi`, rdi = 0 = `kCFAllocatorDefault`):
+
+```text
+  MLDR_TRAP_STR rsi -> "/Frameworks/????/Versions/" (len 26)
+  MLDR_TRAP_STR hex: 2f 46 72 61 6d 65 77 6f 72 6b 73 2f ff fd bc 3f 2f 56 65 72 73 69 6f 6e 73 2f 00 00 ...
+chrome-nsbundle-F.log   struct @...: 0000013800024400 0000000000000026 8000000000000040    (size 0x26 = 38)
+```
+
+So the 12-byte `/Frameworks/` prefix and the 8-byte `Versions` copy are right,
+and the two copies of the 45-byte and 12-byte literals are not (4 garbage bytes
+`ff fd bc 3f`, then zeros). The literals themselves are fine in guest memory
+(`MLDR_TRAP_WATCH` at +0xe480230 = `0x4320656c676f6f47` = "Google C",
++0xe480170 = `0x30382e302e343531` = "154.0.80"). `0xff 0xfd` is not valid UTF-8, so
+`CFStringCreate...` returns NULL, the URL is NULL, `bundleWithURL:nil` is nil. No
+file syscall for that path is ever issued: `grep -c 'Frameworks/?'
+chrome-nsbundle-A.log` is 0, while the path log of the same run ends with the
+`CFBundle` probes of `/` (`Contents`, `Resources`, `Support Files`, then
+`chrome-macho`), which belong to `[NSBundle mainBundle]`, not to this call. (The
+NULL-URL branch is inferred from that absence plus the disassembly; the
+CFString result itself was not printed.)
+
+### (4) Cause: suppl stubs for `_memmove`, `_memcpy`, `_strlen`, ...
+
+The framework's `__memmove` stub (indirect-symbol table: `_memcpy`, `_memmove`,
+`_strlen`, `_memchr`, `_memset`, `_strchr` are all bound through ordinal 67, the
+supplement). Before:
+
+```text
+$ llvm-objdump --macho -d suppl.dylib | grep -A3 '^_memmove:'
+_memmove:
+    14ec:	31 c0	xorl	%eax, %eax
+    14ee:	c3	retq
+```
+
+`llvm-nm -U suppl.dylib` lists `_memchr _memcmp _memcpy _memmove _memset
+_memset_pattern16 _strchr _strcmp _strcpy _strlen _strncmp _strncpy _strnlen
+_strstr` as text stubs. Step 47's generator dropped a stub for every name a
+`libSystem` provider defines, but `provider_exports()` only read trie lines of
+the form `0x<addr> <name>`. `libsystem_c` defines these names only as re-exports:
+
+```text
+$ llvm-objdump --macho --exports-trie libsystem_c.dylib | grep -w '_memmove\|_memcpy'
+[re-export] _memmove (__platform_memmove from libsystem_platform)
+[re-export] _memcpy (__platform_memmove from libsystem_platform)
+```
+
+so they were never counted, and the stubs kept shadowing them. (Why the 10-byte and
+8-byte appends still worked was not measured; the first long-form append that
+needs the real copy is the one that failed.)
+
+Fix (`build-freebsd/gen-cg-supl.py`): `provider_exports()` also takes
+`[re-export] <name>` lines. 226 -> 212 names; exactly the 14 above are dropped.
+`check-suppl-bodies.py`: 0 outward.
+
+### (5) Next wall: `kern.osproductversion` length
+
+With the supplement fixed, run J stops at a new `int3` at +0x18c85b7 (rc=133).
+It is a shared failure block; the jumps into it come from a version parser
+(`major*10000 + minor*100 + patch`, `StringToInt` on three fields). Trap at its
+split call (+0x18c8367), `chrome-nsbundle-P.log`:
+
+```text
+  MLDR_TRAP_STR rsi -> "11.7." (len 5)
+```
+
+The emulated sysctl is `11.7.4`; the caller got 5 bytes. libsystem_kernel's
+`copyout_string` (`sysctl.c`) set `*oldlen = strlen(str)`; XNU reports the length
+including the NUL and callers build `std::string(buf, size - 1)`. The split gave
+`["11", "7", ""]`, `StringToInt("")` failed, `CHECK` -> `int3`.
+
+Fix: `build-freebsd/patches/xnu-sysctl-string-nul.patch` (`copyout_string` counts the
+NUL, truncates to the caller's buffer). The change belongs in the `src/external/xnu`
+submodule, whose tree is dirty; it was made there, **not committed there**, and the
+patch was made with `git -C src/external/xnu diff -- <that one file>`. Apply:
+`git -C $DARLING_SRC_DIR/src/external/xnu apply $DARLING_SRC_DIR/build-freebsd/patches/xnu-sysctl-string-nul.patch`.
+
+### (6) Rebuild: one object, relinked
+
+A narrow libsystem_kernel build has been blocked for many steps (missing
+firstpass dylibs). Only one object changed, so
+`build-freebsd/relink-libsystem-kernel-sysctl.sh <outdir>` recompiles `sysctl.c`
+with its exact ninja command (x86_64 only, output outside the build tree) and
+relinks the thin x86_64 dylib from the tree's own objects with the exact ninja
+link command (substitutions listed in the script header). Check on an unchanged
+object first: same disassembly text (md5 equal), same exports trie, same bind
+info as the tree's own `libsystem_kernel.dylib.x86_64`; only `LC_UUID` and the
+debug-map timestamps differ, and the installed copy's 8-byte version patch is
+reapplied by the script.
+
+### (7) md5 proof of what the guest loaded
+
+```text
+                                   pre-fix (backup)                   built / installed / staged
+mldr (execed in place, no stage)   0d9ff633fe9eba6ae6e8231a758c17c7  53b4743f849dcc522066712ca5d8d54b
+suppl.dylib                        10ad208b76a312ab125c462876b76b20  442592210b03b56deccc4103b20a26a2
+cg-supl.dylib                      21f83ff0e04d92cb6eebc2e294ca956d  24b7b877c7447e1bdfc07db8ab7a6230
+libsystem_kernel.dylib             88288b78f8031331bd4480e2ecf55636  843519806a85ec524d2632fd8d07e103
+```
+
+For the last three, build output == overlay copy == the copy the harness staged
+into `/tmp/darling-local-overlay/usr/lib` (read after runs Q and R). Backups:
+`$DARLING_OVERLAY/usr/lib/{suppl,cg-supl}.dylib.pre-nsbundle`,
+`$DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib.pre-nsbundle`,
+`$DARLING_BUILD_DIR/dserver/mldr-real/mldr.pre-nsbundle` (the earlier
+`mldr.pre-*` are kept). Intermediate mldr builds differ per run (md5 not kept for
+run A; B `dbccfcc8...`; C, D `e538d4dd...`; E onward `53b4743f...`).
+
+### (8) Runs
+
+| run | log (`$DARLING_BUILD_DIR/`) | what | WRAPPER_RC | duration | timeout |
+| --- | --- | --- | --- | --- | --- |
+| A | `chrome-nsbundle-A.log` | path log, nothing fixed | 133 | 47 s | 900 s |
+| B | `chrome-nsbundle-B.log` | trap +0x1eac8d2 `rsi` | 132 | 77 s | 900 s |
+| C, D | `chrome-nsbundle-C.log`, `-D.log` | trap +0x1eac8d2 `rsi` (hex); trap +0x1eac890 | 132, 132 | 4 s, 3 s | 900 s |
+| E, F | `chrome-nsbundle-E.log`, `-F.log` | trap +0x1eac2f8 (register unsupported, empty); +0x1eac2fb `*rdi` | 132, 132 | 11 s, 18 s | 900 s |
+| G | `chrome-nsbundle-G-e480230.log`, `-G-e480170.log` | watch literals | 132, 132 | 24 s, 20 s | 900 s |
+| H | `chrome-nsbundle-H.log` | trap at the Append chain (hit: not bundled) | 132 | 6 s | 900 s |
+| I | `chrome-nsbundle-I-140c985.log`, `-I-140c99e`, `-I-140c9b7`, `-I-140c9d0` | string after each Append | 132 x4 | 3, 26, 12, 33 s | 900 s |
+| J | `chrome-nsbundle-J.log` | suppl fixed | 133 | 3 s | 900 s |
+| K, L, M, N, O | `chrome-nsbundle-K.log` .. `-O.log` | traps at libunwind `_Unwind_RaiseException`, `_Unwind_Resume`, landing pad, +0x18c85aa, +0x18c85b2: none hit (the `int3` is reached by a direct jump) | 133 x5 | 248, 7, 3, 4, 4 s | 900 s |
+| P | `chrome-nsbundle-P.log` | trap +0x18c8367 `rsi` -> "11.7." | 132 | 2 s | 900 s |
+| Q | `chrome-nsbundle-Q.log` | both fixes | 193 | 50 s | 900 s |
+| R | `chrome-nsbundle-R.log` | repeat of Q | 193 | 63 s | 900 s |
+
+132 = 128 + SIGILL is the planted one-shot `ud2` of the trap, not a Chromium
+fault; 133 = 128 + SIGTRAP is the Chromium `int3`; 193 = 128 + 65. No run was
+cut off by its timeout. The wall time of a run includes the harness's own staging
+and varies from 2 s to 4 min on this host (not investigated).
+
+### (9) Next stop (runs Q, R)
+
+`WRAPPER_RC=193`, i.e. the guest is killed by signal 65 (FreeBSD `SIGRTMIN`) after
+50 and 63 s. Classification: process kill by an unhandled real-time signal, not a
+fault, not an exit syscall (no exit/`exit_group` trapped, no `FATAL signal`,
+no `Symbol not found`). The log stops mid-syscall, with no mldr message:
+
+```text
+[ERROR:allocator_interception_apple.mm(92)] vm_region_64: (os/kern) no space available (3)
+[darling-mldr] unhandled Linux syscall 63 — ENOSYS          (uname)
+[darling-mldr] unhandled Linux syscall 24 — ENOSYS          (sched_yield, repeated)
+[darling-mldr] unhandled Linux syscall 157 — ENOSYS         (prctl, second thread)
+WRAPPER_RC=193
+```
+
+One `[pid:...:ERROR` line shape appears (`[ERROR:allocator_interception_apple.mm(92)]`,
+Chromium's own `vm_region_64` failure). The main thread was still doing
+directory probes for ICU data (`usr/share/icu/icudt66l/id.res`) and for
+`Frameworks/.../Versions/154.0.8029.0/154...`; a second thread exists.
+
+Hypothesis, not verified: darlingserver wakes a client thread for a
+server-to-client call by `tgkill`-ing `LINUX_SIGRTMIN + 1`
+(`src/external/darlingserver/src/thread.cpp:1058`); the guest side defines
+`LINUX_SIGRTMIN` as 32 (`dserver-rpc-defs.h`), mldr's translation has no entry for
+a real-time signal, and a signal with no handler terminates the process. The
+sender of signal 65 was not measured. The harness leaves its `darlingserver`
+running after such a death (one was left by run Q, one by run R; both stopped by
+hand).
+
+### (10) WindowServer
+
+Not reached. Runs Q, R: 0 matches for `wayland`, `WindowServer`, `CGSDefault`,
+`NSApplication`, `X11`, `wl_display`; the only guest `connect()` is the darlingserver
+RPC socket (`[gsw-bisect] connect fd=3 len=43`). No Wayland socket path is
+probed, nothing needs a compositor yet; none was installed or started.
+
+### (11) Not verified
+
+- That the `CFString` call returned NULL for the corrupt string (inferred from
+  invalid UTF-8, the absence of any file syscall for that path, and the
+  disassembly branch structure).
+- The sender of signal 65 and that it is the S2C interrupt.
+- Whether other `libSystem` re-export aliases were hidden the same way beyond the
+  14 dropped names (the generator now sees them all; no other shadowing was
+  checked at run time).
+- Callers that relied on the old `copyout_string` length (everything built from the
+  tree now sees XNU's value; no regression run).
+- That the relinked `libsystem_kernel.dylib` is bit-identical to a tree build; it
+  has equal text, exports and binds, not equal bytes.
+- Why the wall time of a run varies (2 s to 248 s).
