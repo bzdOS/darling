@@ -65,11 +65,14 @@ SKIP_NAMES = {
 # the copied bodies carried rel32 calls whose displacement was computed for the
 # provider's layout, so in the supplement they landed in the middle of unrelated
 # functions (SIGILL in __platform_bzero). The bodies are therefore written here in
-# assembly. They are position independent and self-contained: the only outward
-# references are branches to imported symbols (__platform_memset / __platform_memmove,
-# real definitions in libsystem_platform, reached through the -reexport_library link),
-# which the linker turns into stubs. check-suppl-bodies.py enforces this on the
-# linked image.
+# assembly. They are position independent and self-contained: no call, jump or
+# RIP-relative reference leaves the body (rep stosb / rep movsb instead of a call to
+# memset/memmove). An import was tried first (a stub bound to __platform_memset
+# through the -reexport_library link) and failed at run time: the linker attributes
+# the import to one of the four provider dylibs and dyld then answered "Symbol not
+# found: __platform_memset, Expected in: libsystem_kernel.dylib" at the first
+# call, so the imported route is not usable with this overlay. check-suppl-bodies.py
+# enforces the no-outward-reference rule on the linked image.
 #   __atomic_load(size, src, dst, order), __atomic_store(size, dst, src, order)
 ASM_BODIES = {
     "___atomic_load": """\
@@ -95,10 +98,9 @@ ASM_BODIES = {
     movq (%rsi), %rax
     movq %rax, (%rdx)
     jmp 9f
-5:  movslq %edi, %rax
+5:  movslq %edi, %rcx
     movq %rdx, %rdi
-    movq %rax, %rdx
-    callq __platform_memmove
+    rep movsb
 9:  mfence
     popq %rbp
     retq""",
@@ -126,19 +128,19 @@ ASM_BODIES = {
     movq (%rdx), %rax
     movq %rax, (%rsi)
     jmp 9f
-5:  movslq %edi, %rax
+5:  movslq %edi, %rcx
     movq %rsi, %rdi
     movq %rdx, %rsi
-    movq %rax, %rdx
-    callq __platform_memmove
+    rep movsb
 9:  mfence
     popq %rbp
     retq""",
     # bzero(p, n) == memset(p, 0, n)
     "__platform_bzero": """\
-    movq %rsi, %rdx
-    xorl %esi, %esi
-    jmp __platform_memset""",
+    movq %rsi, %rcx
+    xorl %eax, %eax
+    rep stosb
+    retq""",
 }
 DEF_INSTALL = "/usr/lib/suppl.dylib"
 
