@@ -359,6 +359,28 @@ mldr_open_flags_linux_to_freebsd(long linux_flags)
     return freebsd_flags;
 }
 
+/*
+ * purpose:  DARLING_TRAP_LOG diagnostic for the guest's anonymous/large mmap.
+ *           Logs the arguments the guest passed, the flags and fd actually
+ *           handed to the host, and the host's result. Every mmap is logged
+ *           (a few hundred per Chrome start).
+ * input:    path   — which trap case ("linux" or "darwin");
+ *           len, prot, gflags, gfd — guest arguments;
+ *           hflags, hfd — host arguments; ret — host return (-errno on error).
+ * sideEffects: write(2) on stderr when DARLING_TRAP_LOG is set; nothing else.
+ */
+static void
+mldr_mmap_log(const char *path, long len, long prot, long gflags, long gfd,
+              long hflags, long hfd, long ret)
+{
+    if (!mldr_trap_log_enabled || !mldr_trap_log_handlers)
+        return;
+    mldr_tlog(path, len, prot);
+    mldr_tlogx("mmap-guest-flags-fd", (const void *)(uintptr_t)gflags, gfd);
+    mldr_tlogx("mmap-host-flags-fd", (const void *)(uintptr_t)hflags, hfd);
+    mldr_tlog(ret < 0 ? "mmap-ret-errno" : "mmap-ret-ok", ret, 0);
+}
+
 /* ── signal number translation ─────────────────────────────────────────────── */
 
 /*
@@ -642,8 +664,21 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
         /* macOS mmap args: addr, len, prot, flags, fd, offset — same layout.
          * Darwin ignores fd under MAP_ANON; FreeBSD returns EINVAL for a
          * non-(-1) fd there, so anonymous mappings forward fd=-1. */
-        return freebsd_raw_syscall(SYS_mmap, a1, a2, a3, a4,
-                                   (a4 & MAP_ANON) ? -1 : a5, a6);
+        {
+            /* Only the flags whose Darwin and FreeBSD values coincide cross
+             * over. Darwin-only bits would otherwise be read as FreeBSD ones:
+             * MAP_NOCACHE 0x400 is MAP_STACK (EINVAL unless fd == -1 and
+             * PROT_READ|PROT_WRITE), MAP_JIT 0x800 is MAP_NOSYNC, and
+             * MAP_RESILIENT_CODESIGN 0x2000 is MAP_GUARD. */
+            volatile long host_flags = a4 & (MAP_SHARED | MAP_PRIVATE |
+                                             MAP_FIXED | MAP_ANON);
+            volatile long hfd = (a4 & MAP_ANON) ? -1 : a5;
+            long dr = freebsd_raw_syscall(SYS_mmap, a1, a2, a3, host_flags,
+                                          hfd, a6);
+            mldr_mmap_log("mmap-darwin-len-prot", a2, a3, a4, a5, host_flags,
+                          hfd, dr);
+            return dr;
+        }
 
     case MACOS_SYS_munmap:
         return freebsd_raw_syscall(SYS_munmap, a1, a2, 0, 0, 0, 0);
@@ -1720,8 +1755,16 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (a4 & 0x20000) freebsd_flags |= MAP_STACK;
         /* Darwin ignores fd under MAP_ANON; FreeBSD rejects a non-(-1) fd
          * with EINVAL, so anonymous mappings forward fd=-1. */
-        long mr = freebsd_raw_syscall(SYS_mmap, a1, a2, a3, freebsd_flags,
-                                      (a4 & 0x20) ? -1 : a5, a6);
+        /* Snapshot what is handed to the host: the syscall wrapper leaves
+         * r8-r10 as plain inputs and the host kernel does not preserve them,
+         * so a copy the compiler keeps in one of those registers reads back
+         * as 0 after the call. */
+        volatile long host_flags = freebsd_flags;
+        volatile long host_fd = (a4 & 0x20) ? -1 : a5;
+        long mr = freebsd_raw_syscall(SYS_mmap, a1, a2, a3, host_flags,
+                                      host_fd, a6);
+        mldr_mmap_log("mmap-linux-len-prot", a2, a3, a4, a5, host_flags,
+                      host_fd, mr);
 #if defined(__x86_64__)
         /*
          * Patch raw-syscall trampolines in every executable image dyld maps,
