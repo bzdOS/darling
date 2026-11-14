@@ -14136,123 +14136,140 @@ headless sway and draws a local page. Paths below are `$DARLING_SRC_DIR`,
 `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`. Branch `task/wayland-window`.
 
 Result: **Wayland connect and registry bind reached; the RPC hang has a proven
-cause and a verified fix; no window yet.** The next wall is a CHECK in
-`base/mac/mac_util.mm` (line 379) right after crashpad's failed spawn. No
-`xdg_toplevel`, no `swaymsg -t get_tree` entry, no screenshot, so no png and no
-success fraction: 0 of 0.
+cause and a statistically verified fix; no window yet.** The next wall is a
+SIGSEGV in `objc_msgSend` (selector `copy`) under
+`-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]`. No
+`xdg_toplevel`, no `swaymsg -t get_tree` entry, no screenshot, no png: success
+fraction 0 of 0.
 
 ### (1) The RPC hang
 
-Which call: the 16-byte `sendmsg` is `fork_wait_for_child` (call number 11; the
-16 bytes are the bare call header, number/pid/tid/arch). mldr now logs it under
+Which call: the 16-byte `sendmsg` is call 11, `fork_wait_for_child` (the 16
+bytes are the bare call header: number, pid, tid, arch). mldr logs it under
 `DARLING_TRAP_LOG` (`[traplog] sendmsg ... callnum=`), darlingserver under
-`DARLING_RPC_LOG` (`build-freebsd/patches/darlingserver-rpc-log.patch`).
+`DARLING_RPC_LOG` (`patches/darlingserver-rpc-log.patch`).
 
-What it waits for: `Process::waitForChildAfterFork()` is a semaphore down; the
+What it waits for: `Process::waitForChildAfterFork()` is a semaphore down. The
 only `up` is the check-in of a forked child (`process.cpp`, "notify the parent
-process"). Crashpad forks, mldr answers the Linux `clone` (56) with ENOSYS, no
-child exists, nobody signals.
+process"). Crashpad forks, mldr answers the Linux `clone` (56) with an error,
+no child exists, nobody signals.
 
-Why the guest asks anyway, two guest bugs (measured with a 3-call probe, forced
-fork failure, `fork rc=-78 errno=0`):
+Why the guest asks anyway (measured with a 3-call probe, forced fork failure:
+`fork rc=-78 errno=0`):
 
 - `___fork.S` (x86_64, Darling branch) tests `cmpq $0,%rax; jnb`: the carry flag
   is always clear, so the error path is never taken and the negative errno comes
   back as a pid. libc then runs the parent handlers, which include
   `_mach_fork_parent()` -> `fork_wait_for_child`.
-- even with the result tested correctly, libc's `fork()` calls the parent
-  handlers on failure too, so the wait is sent.
+- even with the result tested correctly, libc's `fork()` runs the parent
+  handlers on a failure too, so the wait is sent.
 
-Hanging run (`chrome-wl-G.log`, rc 124, 150 s, timeout 150 s, darlingserver RPC
-log on). The call arrives, nothing is ever sent to the main thread's socket
-afterwards (the socket name is `...-647513`), the other threads keep being
-served:
+Hanging run, line by line (`chrome-wl-SB1.log`, rc 124, 120 s, timeout 120 s;
+the same shape as the earlier `chrome-wl-G.log`). Thread 977391 is the main
+thread; the timestamps are darlingserver milliseconds:
 
 ```text
-[traplog] linux-unhandled tid=1009927 a=56 b=17
-[traplog] sendmsg fd=647513 callnum=11 pid=76515 tid=1009927 len=16
+[traplog] sendmsg fd=647513 callnum=11 pid=41798 tid=977391 len=16
 [traplog] recvmsg-enter fd=647513
-[dserver-rpc] 3207788954 recv num=11 pid=76515 tid=1009927 size=16 from=/tmp/darling-mldr-76515-647513
-[dserver-rpc] ... recv num=31 pid=76515 tid=1077618 ... (other threads, replied normally)
+[dserver-rpc] 3219291755 recv num=11 pid=41798 tid=977391 size=16 from=/tmp/darling-mldr-41798-647513
+   ... no further line for this tid for 116.7 s ...
+[traplog] sendmsg fd=647513 callnum=14 pid=41798 tid=977391 len=16       <- interrupt_enter
+[dserver-rpc] 3219408443 recv num=14 pid=41798 tid=977391 size=16 ...
+[traplog] recvmsg-leave fd=647513 ret=8 replynum=14 code=0
+[traplog] sendmsg fd=647513 callnum=4 ...   (kprintf)
+[traplog] sendmsg fd=647513 callnum=15 ...  (interrupt_exit)
+[traplog] recvmsg-leave fd=647513 ret=8 replynum=15 code=0
+[traplog] sendmsg fd=647513 callnum=14 pid=41798 tid=977391 len=16
+[traplog] recvmsg-leave fd=647513 ret=8 replynum=11 code=0               <- the reply to call 11
+[traplog] sendmsg fd=647513 callnum=195938833 ...                        <- protocol out of step
+WRAPPER_RC=124   WRAPPER_DURATION=120s TIMEOUT=120s
 ```
 
-`grep -c "reply-queued num=11"` is 0 and no `sent[..] to=...-647513` follows
-the recv; the server sits in `epoll_wait` with an empty outbox
-(`canRead=0 canWrite=1 outboxEmpty=1`).
+The blocked thread sits in `recvmsg` from call 11 until the harness's `timeout`
+sends SIGTERM at 120 s (3219408443 - 3219291755 = 116.7 s, plus about 3 s of
+start-up): the guest signal handler then runs `interrupt_enter` (14), which
+wakes the semaphore wait, and the reply to call 11 arrives as if it were the
+reply to the handler's second call 14. An earlier reading of `chrome-wl-G.log`
+("no reply is ever sent") was wrong: replies do arrive, but only at that final
+SIGTERM, after which the RPC stream is out of step; the server keeps serving
+the other threads the whole time (`canRead=0 canWrite=1 outboxEmpty=1` in its
+`epoll_wait`).
 
-Passing run (`chrome-wl-C.log`, rc 21 at a later wall, 8 s): same call, same
-wait, but 600 ms later another thread sends a 56-byte `mach_msg_overwrite`
-(call 38); darlingserver then sends signal 65 (the suspend signal,
-`thread_hold`) to the main thread, whose handler does `interrupt_enter` (call
-14); the blocked receive returns and `fork_wait_for_child` is answered:
+Passing run (`chrome-wl-C.log`, rc 21 at a later wall, 8 s, timeout 300 s): the
+same call, but 600 ms later another thread sends a 56-byte `mach_msg_overwrite`
+(call 38), darlingserver sends signal 65 (`thread_hold`) to the main thread, and
+the same `interrupt_enter` wakes the wait early:
 
 ```text
 [traplog] sendmsg fd=647513 callnum=11 pid=62292 tid=1002073 len=16
-[dserver-rpc] 3207274777 recv num=11 ...
 [traplog] sendmsg fd=647509 callnum=38 pid=62292 tid=1076802 len=56
 [dserver-sendsignal] pid=62292 tid=1002073 signal=65 ret=0x2f0e5b
 [traplog] sendmsg fd=647513 callnum=14 pid=62292 tid=1002073 len=16
 [traplog] recvmsg-leave fd=647513 ret=8 replynum=11 code=0
 ```
 
-So the hang is not a lost wakeup or a wrong-socket reply: the wait has no
-waker, and a passing run is one where another thread's suspend interrupts it.
-That also explains the ~50 % rate (4 of 8 runs with the log on hung).
+Mechanism: the wait has no waker; a run passes only if some signal (here the
+suspend signal from another thread's request) reaches the thread first. There
+is no lost wakeup and no wrong-socket reply. The suspend that rescues a passing
+run was not traced to its origin.
 
-Fix (verified): `build-freebsd/patches/xnu-fork-failure.patch` (the x86_64
-`___fork.S` test now matches `UNIX_SYSCALL` in `SYS.h`, with `negq` before
-`_cerror`; `sys_fork` marks the failing thread; `_mach_fork_parent` skips the
-wait for a marked thread). Built with
-`build-freebsd/relink-libsystem-kernel-objs.sh` (six objects: these three plus
-the three the sysctl relink already carried). Probe, no skip knob:
+Fix (`patches/xnu-fork-failure.patch`): `___fork.S` tests the result like
+`UNIX_SYSCALL` in `SYS.h` (with `negq` before `_cerror`); `sys_fork` marks the
+failing thread; `_mach_fork_parent` skips the wait for a marked thread. Built
+with `relink-libsystem-kernel-objs.sh` from the tree's full object set: only the
+changed objects are recompiled with their exact ninja commands.
+
+Method check, `compare-dylib.sh` (exports, binds, normalised disassembly; a
+byte compare is meaningless, the debug map carries object paths):
 
 ```text
-PROBE sysctl.proc_translated rc=-1 errno=2
-PROBE hw.optional.arm64 rc=-1 errno=2
-PROBE fork rc=-1 errno=78
-WRAPPER_RC=0
+relink of sysctl.c only  vs installed library : exports 0, binds 0, text diff only the file-name line
+fork+sysctl relink       vs installed library : exports 0, binds 0, text 22 hunks
+                                                (fork stub, mach_init, fork.c, the three sysctl objects)
 ```
 
-Chrome with the fixed library, no skip knob, 3 runs (`chrome-wl-Z.log` 62 s,
-`chrome-wl-AA.log` 142 s, `chrome-wl-AB.log` 3 s, timeout 900 s each): crashpad's
-fork fails (`linux-unhandled a=56`), `grep -c "callnum=11 "` is 0, no hang, all
-three reach the next wall (rc 133). The rebuilt library is **not installed in
-the overlay**: the overlay copy was restored after the runs. The artifact is
-`$DARLING_BUILD_DIR/backup-wl/libsystem_kernel.dylib.forkfix`; the relink is not
-byte-comparable to the installed one (it carries the same sysctl, file_handle
-and workq objects, but differs in 556 k bytes, cause not found; a first relink
-without the sysctl object trapped early, which is why those three objects are
-in the list). Installing it is a decision for the lead.
+Probe without any skip knob: `PROBE fork rc=-1 errno=78`, `WRAPPER_RC=0`
+(`chrome-wl-probe-6.log`).
 
-Temporary measure, off by default: `DARLING_SKIP_FORK_WAIT=1` makes darlingserver
-answer `fork_wait_for_child` at once
-(`patches/darlingserver-skip-fork-wait.patch`). Used for runs J-L, V only.
-No Chrome flag avoids crashpad here: `--disable-breakpad` and `CHROME_HEADLESS=1`
-were tried (runs A, H, I) and crashpad still forks.
+Statistics, RPC log on, 8 runs each, timeout 120 s (`chrome-wl-SF1..8.log`,
+`chrome-wl-SB1..8.log`; run with the same mldr, darlingserver and page):
+
+```text
+fixed library    SF1..SF8: rc 139,139,139,139,132,139,139,139   hung 0 of 8, callnum=11 sent 0 times
+original library SB1..SB8: rc 124,124,124,124,124,124,133,124   hung 7 of 8, callnum=11 sent in all 8
+```
+
+(Fisher exact p = 0.001. The earlier 4 of 8 was mixed conditions.) The library
+is installed: backup `libsystem_kernel.dylib.pre-forkfix` next to it, and
+built == installed == staged, md5 `d16995542b69bbb7a259e077ff5ca3cb`.
+
+`DARLING_SKIP_FORK_WAIT=1` (`patches/darlingserver-skip-fork-wait.patch`) stays
+in the tree, off by default, and was used only for runs J-L and V. No Chrome flag
+avoids crashpad here: `--disable-breakpad` and `CHROME_HEADLESS=1` were tried
+(runs A, H, I) and crashpad still forks.
 
 ### (2) Display path
 
 - Environment: `chrome-wl-run.sh` runs `launch-dynamic` under
-  `sudo env NAME=val ...`; launch-dynamic inherits and execs mldr, mldr hands
-  the environment to the guest. Run B of the previous step showed `(null)`
-  because none was passed. Now:
-  `[WaylandDisplay] wl_display_connect called, WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=<private dir>`.
+  `sudo env NAME=val ...`; launch-dynamic inherits and execs mldr, mldr hands the
+  environment to the guest. `[WaylandDisplay] wl_display_connect called,
+  WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=<private dir>`.
 - Argv: `DARLING_TEST_ARGS` (space separated, 30 arguments, 1023 bytes) becomes
   the guest argv; `--version` printed `Google Chrome for Testing 154.0.8029.0`
   (run E, rc 0, 2 s).
-- Socket: `wl_display_connect` runs in the host libwayland loaded by the
-  Wayland backend (no guest `connect` syscall, no path translation), so the host
-  path of the socket works as is. The guest root is the local overlay, wiped on
-  every start; `DARLING_GUEST_EXPOSE` links host directories into it (fine for
-  a socket), `DARLING_GUEST_MKDIR` and `DARLING_GUEST_COPY` create the profile
+- Socket: `wl_display_connect` runs in the host libwayland loaded by the Wayland
+  backend (no guest `connect` syscall, no path translation); the host path of
+  the socket works as is. The guest root is the local overlay, wiped on every
+  start; `DARLING_GUEST_EXPOSE` links host directories into it (fine for a
+  socket), `DARLING_GUEST_MKDIR` and `DARLING_GUEST_COPY` create the profile
   directory and copy the page and `SystemVersion.plist` for real. A link to the
-  same path is a loop for the guest (readlink returns the path, `realpath`
-  hits ELOOP) and Chromium then silently ignores `--user-data-dir`.
-- Chrome arguments used: `--no-sandbox --user-data-dir=/wlprofile --disable-gpu
+  same path is a loop for the guest (readlink returns the path, `realpath` hits
+  ELOOP) and Chromium then silently ignores `--user-data-dir`.
+- Chrome arguments: `--no-sandbox --user-data-dir=/wlprofile --disable-gpu
   --no-first-run --no-default-browser-check --disable-background-networking
   --disable-component-update --disable-sync --disable-breakpad
-  file:///wlpage/page.html` (a local page: heading "DARLING CHROMIUM OK" on a
-  blue background and a red box).
+  file:///wlpage/page.html` (a local page: "DARLING CHROMIUM OK" on a blue
+  background and a red box).
 - sway: own instance, `WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1
   WLR_RENDERER=pixman`, a private mode-0700 `XDG_RUNTIME_DIR`, run as the build
   user; the guest runs as root and reaches the socket. Stopped after the runs.
@@ -14261,19 +14278,28 @@ were tried (runs A, H, I) and crashpad still forks.
 
 | wall | evidence | fix |
 | --- | --- | --- |
-| env/socket/profile not visible | `(null)`, `--user-data-dir` ignored (readlink loop) | launch-dynamic EXPOSE/MKDIR/COPY, KEEP_LOCAL |
-| ProcessSingleton: `readlink` failed ENOSYS | `unhandled Linux syscall 267` (also 266, 264, 73) | mldr readlinkat, symlinkat, renameat, flock, unlinkat |
-| `Failed to bind() .../SingletonSocket: Address family not supported (47)` | guest passes a Linux sockaddr (2-byte family) | mldr repacks sockaddr of bind/connect |
-| `[ODSession defaultSession]` segfault in `objc_msgSend` | receiver inside the OpenDirectory image, `libobjc+0x480dd` | real root classes in the OpenDirectory stand-in (compat version 1.0.0) |
+| env/socket/profile not visible | `(null)`, `--user-data-dir` ignored | launch-dynamic EXPOSE/MKDIR/COPY, KEEP_LOCAL |
+| ProcessSingleton `readlink` ENOSYS | `unhandled Linux syscall 267` (266, 264, 73) | mldr readlinkat, symlinkat, renameat, flock, unlinkat |
+| `Failed to bind() .../SingletonSocket: Address family not supported (47)` | Linux sockaddr (2-byte family) | mldr repacks sockaddr of bind/connect |
+| `[ODSession defaultSession]` segfault | receiver inside the OpenDirectory image | real root classes in the OpenDirectory stand-in |
 | `unhandled Linux syscall 22` | pipe | mldr pipe, pipe2 |
-| fork returns `-78` | Linux ENOSYS is 38, mldr returned FreeBSD 78 | default arm returns -38 |
-| RPC hang | section (1) | patch + relink script |
+| fork returns `-78` | Linux ENOSYS is 38, mldr returned 78 | default arm returns -38 |
+| RPC hang | section (1) | xnu-fork-failure.patch |
+| `FATAL base/mac/mac_util.mm:379 ... No such file or directory (2)` | measured: the last sysctl before it is `kern.hv_vmm_present` (ENOENT); also `sysctl.proc_translated` | both exist and return 0 (`xnu-sysctl-hv-vmm-proc-translated.patch`) |
+| `FATAL message_pump_kqueue.cc:162 kevent64: Bad file descriptor` | the kqchan reply (call 28) carries the descriptor in an SCM_RIGHTS cmsg; guest and host cmsg layouts differ, and the credentials cmsg ahead of it filled the guest's one-descriptor buffer | mldr bridges control messages (receive into a larger buffer, keep SCM_RIGHTS, convert the header) |
 
-After the profile directory worked, the guest reads `/System/Library/CoreServices/SystemVersion.plist`
-(missing from the overlay); `guest-files/SystemVersion.plist` is copied there.
-It did not change the next wall.
+The sysctl measurement used a libsystem_kernel build that logged every failing
+`sysctl`/`sysctlbyname` (`[sysctl-log]`). It was not committed: `getenv` cannot
+be called there (the first sysctls run before the environment exists; the first
+gated version died with SIGSEGV at address 0), and an unconditional log does not
+belong in the library. Misses seen: `kern.bootargs`, `kern.osvariant_status`,
+`hw.ephemeral_storage`, `hw.nperflevels`, `kern.hv_vmm_present`,
+`sysctl.proc_translated`, mib 1.14.1.<pid>, mib 6.27.
 
-### (4) Wayland milestones, verbatim (run B of this step, rc 21, 8 s, timeout 900 s)
+`SystemVersion.plist` is copied into the guest root (`guest-files/`): the guest
+reads it; it was not the cause of the mac_util CHECK.
+
+### (4) Wayland milestones, verbatim (run B, rc 21, 8 s, timeout 900 s)
 
 ```text
 [WaylandDisplay] wl_display_connect called, WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/tmp/<private dir>
@@ -14284,29 +14310,36 @@ It did not change the next wall.
 ```
 
 `compositor`, `shm`, `xdg_wm_base`, `wl_output` and `wl_seat` are bound (57
-globals). `wl_display_connect` returns non-null: the socket was reached.
-Not reached: `xdg_toplevel` / surface creation, buffers, `swaymsg -t get_tree`,
-`grim`.
+globals). Since the last two fixes (mac_util, kevent64) no run has printed
+these lines again: Chromium now dies earlier, in the wall below, before AppKit
+starts. Not reached at all: `xdg_toplevel`, surface creation, buffers,
+`swaymsg -t get_tree`, `grim`.
 
 ### (5) Next wall
 
 ```text
-[...:FATAL:base/mac/mac_util.mm:379] Check failed: . : No such file or directory (2)
-[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest handler=... si_code=1
+[darling-mldr] FATAL signal 11 (code=1) at addr=0x18      (libobjc.A.dylib +0x480dd, objc_msgSend)
+rsi = selector "copy" (string in libxpc)
+stack: Foundation +0x7aebf = -[_NSNotificationObserver initWithObserver:selector:name:object:queue:block:]
+       Foundation +0x7bb9a = -[NSNotificationCenter addObserverForName:object:queue:usingBlock:]
+       Framework  +0x2e5d234 (caller)
 ```
 
-It follows crashpad's failed spawn (`unhandled Linux syscall 56`, getxattr 191 /
-setxattr 188 ENOSYS) in every run since the profile directory worked, with or
-without the fork fix. Chromium's source for that line was not read; the errno
-(2) is probably stale from the last failed lookup, so the checked value is
-unknown. Not changed by `SystemVersion.plist` (11.7.4 and 14.7 tried). The
-guest call chain is logged (`SIGTRAP-AUDIT-CHAIN`); the first frame is at
-Framework `+0xb8ba51`, called from `+0x6d9529`. Three attempts, stopped.
+The receiver of `copy` (the block argument) is not a valid object: the register
+that should hold its isa holds the bytes of a code stub (`55 48 89 e5 ...`,
+`push rbp; mov rbp,rsp; ...`, the shape of a `void X(void){}` stand-in). CoreFoundation's
+constructor creates the block classes (`NSBlock.m`), and libsystem_blocks
+exports `_NSConcreteStackBlock` and friends as data, so which pointer is the
+stub was not determined. The failure is racy in its shape (silent exit 139, a
+second segfault, or the same fault) but the fault above is the common one.
+Two attempts, stopped.
 
 ### (6) Runs
 
 All with `chrome-wl-run.sh`, `DARLING_TRAP_LOG=1`; logs
-`$DARLING_BUILD_DIR/chrome-wl-<name>.log`.
+`$DARLING_BUILD_DIR/chrome-wl-<name>.log` (AL was gzipped: a busy loop in
+darlingserver wrote 960 MB, which is why the epoll lines were removed from the
+log). Earlier runs (A to AB), same wrapper:
 
 | run | rc | duration / timeout | note |
 | --- | --- | --- | --- |
@@ -14330,13 +14363,32 @@ All with `chrome-wl-run.sh`, `DARLING_TRAP_LOG=1`; logs
 | X, Y | 133 | 28, 82 s / 900 s | with `SystemVersion.plist` (Y: version 14.7) |
 | Z, AA, AB | 133 | 62, 142, 3 s / 900 s | fork fix, no skip knob, no hang |
 
-Probe logs `chrome-wl-probe-1..6.log` (6: the fork fix, rc 0).
+Runs of this round (probe logs `chrome-wl-probe-1..6.log`, probe 6 is the fork fix, rc 0):
+
+| run | rc | duration / timeout | note |
+| --- | --- | --- | --- |
+| AC | 139 | 6 s / 900 s | getenv in the sysctl log: SIGSEGV at 0; invalid |
+| AD | 133 | 10 s / 900 s | sysctl measurement: last miss before mac_util is `kern.hv_vmm_present` |
+| AE | 133 | 24 s / 900 s | hv_vmm_present and proc_translated added: past mac_util; `kevent64: Bad file descriptor` |
+| AF | 139 | 4 s / 900 s | cmsg converted, buffer too small |
+| AG | 139 | 18 s / 900 s | silent exit 139 |
+| AH, AI | 139, 132 | 3, 10 s / 900 s | kevent64 EBADF again (credentials cmsg) |
+| AJ, AK | 132 | 18, 25 s / 900 s | same |
+| AL | 137 | 392 s / 900 s | stopped by hand: darlingserver busy loop, 960 MB log (gzipped) |
+| AM | 139 | 24 s / 900 s | kqchan descriptor arrives (`recvmsg-cmsg ... fd0=18`), then the `copy` SIGSEGV |
+| AN, AO, AP | 139 | 23, 74, 13 s / 300 s | mappings logged; wall of (5) |
+| FIN | 139 | 3 s / 300 s | final binaries; staged == installed == built libsystem_kernel |
+| SF1..8 | 139,139,139,139,132,139,139,139 | 99,70,4,5,7,11,8,6 s / 120 s | fixed library |
+| SB1..8 | 124 x7, 133 | 120 x7, 6 s / 120 s | original library |
+
+No run reached a state worth stopping deliberately; no screenshot was taken.
 
 ### (7) Not verified
 
-- Why the six-object relink differs from the installed library in 556 k bytes.
-- What the mac_util CHECK tests.
-- The sway side (`get_tree`, grim) and anything past `roundtrip1`: never reached.
-- Whether the thread suspend that rescues a passing run is Chromium's stack
-  sampler (inferred from call 38 plus signal 65, not traced).
-- posix_spawn's parent handler has the same wait and was not changed.
+- Where the suspend that rescues a passing run comes from.
+- Which pointer is the stub in the `copy` fault.
+- The sway side (`get_tree`, grim) and anything past the registry roundtrip in
+  the current binaries.
+- Whether the darlingserver busy loop (AL) is a bug of its own or a consequence
+  of the stream being out of step.
+- `posix_spawn`'s parent handler has the same wait and was not changed.
