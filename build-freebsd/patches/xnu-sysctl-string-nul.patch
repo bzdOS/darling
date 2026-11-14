@@ -1,0 +1,28 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
+index 10f39a5..0d54f3f 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
+@@ -42,11 +42,18 @@ const struct known_sysctl sysctls_root = {
+ 
+ void copyout_string(const char* str, char* out, unsigned long* out_len)
+ {
+-	unsigned long len;
+-	if (out != NULL)
+-		len = strlcpy(out, str, *out_len);
+-	else
+-		len = strlen(str);
++	// XNU's string sysctls report the length including the terminating NUL,
++	// and callers rely on it (they build a std::string of size - 1). Reporting
++	// strlen() made "11.7.4" arrive as "11.7." in a caller doing that.
++	unsigned long len = strlen(str) + 1;
++
++	if (out != NULL && out_len != NULL)
++	{
++		if (*out_len > 0)
++			strlcpy(out, str, *out_len);
++		if (len > *out_len)
++			len = *out_len;
++	}
+ 
+ 	if (out_len != NULL)
+ 		*out_len = len;
