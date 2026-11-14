@@ -279,6 +279,9 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_prlimit64    302
 #define LINUX_SYS_faccessat    269
 #define LINUX_SYS_getcpu       309
+#define LINUX_SYS_sched_yield   24
+#define LINUX_SYS_uname         63
+#define LINUX_SYS_prctl        157
 #define LINUX_SYS_getrandom    318
 
 /* Linux sigaltstack(2) ss_flags bit values (asm-generic/signal.h) — differ
@@ -2661,6 +2664,70 @@ dispatch_linux_syscall(unsigned int linux_nr,
         if (a2 != 0)
             *(unsigned int *)a2 = 0;
         return 0;
+    case LINUX_SYS_sched_yield:
+        /* Linux sched_yield() == FreeBSD sched_yield(2) (syscall 331). */
+        return freebsd_raw_syscall(SYS_sched_yield, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_uname: {
+        /* Linux struct new_utsname: six char[65] fields (sysname, nodename,
+         * release, version, machine, domainname), 390 bytes. FreeBSD's
+         * struct utsname has different field widths, so fill the Linux layout
+         * directly. The guest is a Mach-O program that sees Linux only through
+         * this bridge, so the strings only need to be plausible and stable. */
+        char *u = (char *)a1;
+        if (u == NULL)
+            return -EFAULT;
+        memset(u, 0, 6 * 65);
+        strcpy(u + 0 * 65, "Linux");
+        char host[64] = "";
+        if (gethostname(host, sizeof(host) - 1) == 0)
+            host[sizeof(host) - 1] = '\0';
+        strncpy(u + 1 * 65, host, 64);
+        strcpy(u + 2 * 65, "5.15.0");
+        strcpy(u + 3 * 65, "#1 SMP");
+#if defined(__x86_64__)
+        strcpy(u + 4 * 65, "x86_64");
+#elif defined(__aarch64__)
+        strcpy(u + 4 * 65, "aarch64");
+#endif
+        strcpy(u + 5 * 65, "(none)");
+        return 0;
+    }
+    case LINUX_SYS_prctl: {
+        /* Minimal prctl(2). The option is logged under DARLING_TRAP_LOG so
+         * the set actually used by a workload is on record. Accepted without
+         * effect (no FreeBSD counterpart worth emulating): PR_SET_PDEATHSIG,
+         * PR_SET_DUMPABLE, PR_SET_NAME, PR_SET_TIMERSLACK, PR_SET_NO_NEW_PRIVS.
+         * Anything else is EINVAL, which callers of prctl already handle,
+         * rather than ENOSYS. */
+        if (mldr_trap_log_enabled) {
+            fprintf(stderr, "[darling-mldr] prctl option=%ld arg2=0x%lx\n", a1, (unsigned long)a2);
+            fflush(stderr);
+        }
+        switch (a1) {
+        case 1:  /* PR_SET_PDEATHSIG */
+        case 4:  /* PR_SET_DUMPABLE */
+        case 15: /* PR_SET_NAME */
+        case 29: /* PR_SET_TIMERSLACK */
+        case 38: /* PR_SET_NO_NEW_PRIVS */
+            return 0;
+        case 2:  /* PR_GET_PDEATHSIG: int *arg2 */
+            if (a2 != 0) *(int *)a2 = 0;
+            return 0;
+        case 3:  /* PR_GET_DUMPABLE */
+            return 1;
+        case 16: /* PR_GET_NAME: char[16] at arg2 */
+            if (a2 == 0) return -EFAULT;
+            memset((void *)a2, 0, 16);
+            strcpy((char *)a2, "darling");
+            return 0;
+        case 30: /* PR_GET_TIMERSLACK */
+            return 50000;
+        case 39: /* PR_GET_NO_NEW_PRIVS */
+            return 0;
+        default:
+            return -EINVAL;
+        }
+    }
     case LINUX_SYS_gettid:
         /* FreeBSD has no 1:1 gettid; thr_self(2) returns the equivalent
          * lightweight-thread id via an out-pointer. */
