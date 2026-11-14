@@ -12,6 +12,9 @@
 # -undefined dynamic_lookup is required: the forwarding stubs jump to symbols
 # that a real image (libsystem_c/libsystem_platform) must provide.
 #
+# Every linked image is run through check-suppl-bodies.py; an outward pc-relative
+# call/jump/RIP-relative reference in any body fails the build (set -e).
+#
 # Usage: sh build-freebsd/build-suppl-stubs.sh [outdir]
 set -e
 
@@ -51,4 +54,6 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
         -compatibility_version 0.0.0 \
         -o "${OUT}/${name}.dylib" "${OUT}/${name}.o"
     file "${OUT}/${name}.dylib"
+    # Fail the build if any body has a pc-relative reference that leaves it.
+    python3 "${SRC}/build-freebsd/check-suppl-bodies.py" "${OUT}/${name}.dylib"
 done
