@@ -272,7 +272,26 @@ struct sat_registry_entry {
     struct linux_sigaction_wire wire;
     bool valid;
 };
-static struct sat_registry_entry sat_registry[32];
+/* Slots 1..31 are the classic signals; slots 32.. hold the real-time signals
+ * the guest names 65..126 (FreeBSD SIGRTMIN..SIGRTMAX). The guest's sigexc
+ * machinery uses LINUX_SIGRTMIN (65, from the generated rtsig.h) for
+ * thread-suspend and +1 for server-to-client calls, and darlingserver sends
+ * exactly those numbers natively with thr_kill2. */
+#define SAT_RT_FIRST 65
+#define SAT_RT_LAST  126
+#define SAT_RT_SLOT0 32
+static struct sat_registry_entry sat_registry[SAT_RT_SLOT0 + (SAT_RT_LAST - SAT_RT_FIRST) + 1];
+
+/* registry slot for a guest signal number; -1 when unsupported */
+static int
+sat_slot(int linux_signo)
+{
+    if (linux_signo >= 1 && linux_signo <= 31)
+        return linux_signo;
+    if (linux_signo >= SAT_RT_FIRST && linux_signo <= SAT_RT_LAST)
+        return SAT_RT_SLOT0 + (linux_signo - SAT_RT_FIRST);
+    return -1;
+}
 
 /* Control #148 step 26: current guest disposition for Linux SIGTRAP (5). */
 void *
@@ -306,6 +325,8 @@ mldr_sat_sigtrap_disposition(void)
 static int
 sat_freebsd_signo_to_linux(int native_signo)
 {
+    if (native_signo >= SAT_RT_FIRST && native_signo <= SAT_RT_LAST)
+        return native_signo; /* real-time signals are identical on both sides */
     for (int ls = 1; ls <= 31; ls++) {
         if (sat_linux_signo_to_freebsd(ls) == native_signo)
             return ls;
@@ -320,10 +341,11 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
                              void *native_uctx)
 {
     int linux_signo = sat_freebsd_signo_to_linux(native_signo);
-    if (linux_signo < 1 || linux_signo > 31)
+    int slot = sat_slot(linux_signo);
+    if (slot < 0)
         return;
 
-    struct sat_registry_entry *ent = &sat_registry[linux_signo];
+    struct sat_registry_entry *ent = &sat_registry[slot];
     if (!ent->valid)
         return;
 
@@ -345,6 +367,21 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
             " handler=%p (linux_signo=%d) rip=0x%llx si_code=%d si_addr=%p\n",
             handler, linux_signo, rip, si_code, si_addr);
         fflush(stderr);
+    }
+
+    /* Every guest syscall reaches mldr as SIGILL (raw-syscall ud2) or SIGSYS.
+     * A signal can interrupt mldr's own SIGILL/SIGSYS handler mid-syscall,
+     * where those two are blocked; the guest handler's first syscall would
+     * then be a blocked synchronous SIGILL, which the kernel answers by
+     * killing the process (seen as exit status 132 for a real-time signal
+     * delivered during an open()). Unblock both for the handler's duration;
+     * sigreturn restores the interrupted mask afterwards. */
+    {
+        sigset_t unb;
+        sigemptyset(&unb);
+        sigaddset(&unb, SIGILL);
+        sigaddset(&unb, SIGSYS);
+        sigprocmask(SIG_UNBLOCK, &unb, NULL);
     }
 
     struct linux_siginfo_compat linfo;
@@ -375,7 +412,8 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
      * anything outside that (including realtime signals, which this
      * 8-byte-sigset ABI cannot represent past bit 63 anyway) is rejected
      * up front rather than silently masked into range. */
-    if (linux_signo < 1 || linux_signo > 31)
+    int slot = sat_slot(linux_signo);
+    if (slot < 0)
         return -EINVAL;
 
     const struct linux_sigaction_wire *wire_act =
@@ -383,7 +421,8 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
     struct linux_sigaction_wire *wire_old =
         (struct linux_sigaction_wire *)oldact;
 
-    int native_signo = sat_linux_signo_to_freebsd(linux_signo);
+    int native_signo = (linux_signo >= SAT_RT_FIRST)
+        ? linux_signo : sat_linux_signo_to_freebsd(linux_signo);
 
     if (native_signo == 0) {
         /* SIGSTKFLT/SIGPWR: no FreeBSD counterpart at all. Quiet success,
@@ -406,7 +445,7 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
          * four. SPEC §5. This is the one deliberate "success without
          * doing the real thing" branch in this file, and it is mandatory
          * (not a placeholder) for the reason above. */
-        struct sat_registry_entry *ent = &sat_registry[linux_signo];
+        struct sat_registry_entry *ent = &sat_registry[slot];
 
         if (wire_old != NULL) {
             if (ent->valid)
@@ -428,8 +467,8 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
         /* Record the guest's request BEFORE installing: the delivery
          * trampoline reads this table, so it must never be able to run with
          * a stale entry for a signal that arrives right after sigaction. */
-        sat_registry[linux_signo].wire = *wire_act;
-        sat_registry[linux_signo].valid = true;
+        sat_registry[slot].wire = *wire_act;
+        sat_registry[slot].valid = true;
 
         memset(&native_new, 0, sizeof(native_new));
         /* sa_handler/sa_sigaction share one union slot on FreeBSD. A real
@@ -496,7 +535,7 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
          * a guest that then tries to use that as a jump target would be
          * relying on undefined behavior already (default disposition has
          * no restorer to speak of on the Linux side either). */
-        struct sat_registry_entry *ent = &sat_registry[linux_signo];
+        struct sat_registry_entry *ent = &sat_registry[slot];
         wire_old->sa_restorer = ent->valid ? ent->wire.sa_restorer : NULL;
     }
 

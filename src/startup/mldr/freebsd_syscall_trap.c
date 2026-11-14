@@ -2695,6 +2695,20 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 cb, mldr_sat_sigtrap_disposition(), newh);
             fflush(stderr);
         }
+        if (mldr_trap_log_enabled && (int)a1 >= 32) {
+            /* real-time signal audit (DARLING_TRAP_LOG): who registers a
+             * handler for a signal number above 31, and what mldr answers. */
+            void *newh = (a2 != NULL) ? *(void **)a2 : (void *)0;
+            long rr = mldr_sys_rt_sigaction((int)a1, (const void *)a2,
+                                            (void *)a3, (size_t)a4);
+            char cb[256];
+            mldr_describe_addr((uintptr_t)__builtin_return_address(0), cb, sizeof(cb));
+            fprintf(stderr,
+                "[darling-mldr] RTSIG-AUDIT: rt_sigaction(%d) handler=%p"
+                " ret=%ld from %s\n", (int)a1, newh, rr, cb);
+            fflush(stderr);
+            return rr;
+        }
         return mldr_sys_rt_sigaction((int)a1, (const void *)a2,
                                      (void *)a3, (size_t)a4);
     case LINUX_SYS_rt_sigprocmask: {

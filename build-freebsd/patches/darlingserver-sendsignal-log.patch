@@ -1,0 +1,25 @@
+diff --git a/src/thread.cpp b/src/thread.cpp
+index 61341bb..66afeb8 100644
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -39,6 +39,7 @@
+ #endif
+ 
+ #include <rtsig.h>
++#include <dlfcn.h>
+ 
+ #include <assert.h>
+ 
+@@ -1464,6 +1465,12 @@ void DarlingServer::Thread::sendSignal(int signal) const {
+ 	if (isDead()) {
+ 		return;
+ 	}
++	if (getenv("DARLING_TRAP_LOG")) {
++		// diagnostic: who sends which signal to which guest thread
++		fprintf(stderr, "[dserver-sendsignal] pid=%d tid=%d signal=%d ret=%p\n", _process ? (int)_process->id() : -1, (int)id(), signal, __builtin_return_address(0));
++		Dl_info di; if (dladdr(__builtin_return_address(0), &di)) { fprintf(stderr, "[dserver-sendsignal] ret offset=0x%lx sym=%s\n", (unsigned long)((char*)__builtin_return_address(0) - (char*)di.dli_fbase), di.dli_sname ? di.dli_sname : "?"); }
++		fflush(stderr);
++	}
+ 	if (_process) {
+ 		if (syscall(SYS_tgkill, _process->id(), id(), signal) < 0) {
+ 			int code = errno;
