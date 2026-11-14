@@ -13746,3 +13746,204 @@ probed, nothing needs a compositor yet; none was installed or started.
 - That the relinked `libsystem_kernel.dylib` is bit-identical to a tree build; it
   has equal text, exports and binds, not equal bytes.
 - Why the wall time of a run varies (2 s to 248 s).
+
+## Step 49 — real-time signal 65
+
+Question: why is the guest killed by signal 65 (status 193), and what does
+Chromium do once that is fixed? Paths below are `$DARLING_SRC_DIR`,
+`$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`. Branch `task/rt-signal-s2c`, from the
+step-48 head.
+
+Answer: **darlingserver sends the signal and the guest has no handler for it,
+because mldr rejects the guest's `rt_sigaction` for it with EINVAL.** Fixed in
+mldr; the process now survives that signal and stops 8-120 s later at a Chromium
+ICU `CHECK`, still before any display call.
+
+### (1) Who sends 65
+
+Two gated diagnostics (both on `DARLING_TRAP_LOG=1`):
+
+- mldr, `freebsd_syscall_trap.c`: `RTSIG-AUDIT` line for every guest
+  `rt_sigaction` with a signal number above 31 (number, handler, mldr's answer).
+- darlingserver, `Thread::sendSignal`: `[dserver-sendsignal]` line with the
+  target pid/tid, the signal and the return address. The submodule is dirty, so
+  the change is exported with `git -C src/external/darlingserver diff -- src/thread.cpp`
+  as `build-freebsd/patches/darlingserver-sendsignal-log.patch` (the file had no
+  earlier edits). Apply with `git -C $DARLING_SRC_DIR/src/external/darlingserver apply
+  $DARLING_SRC_DIR/build-freebsd/patches/darlingserver-sendsignal-log.patch`.
+
+Run A (mldr audit only, original darlingserver), before the kill:
+
+```text
+[darling-mldr] RTSIG-AUDIT: rt_sigaction(34) handler=0x828608680 ret=-22 from 0x223d25 <unknown>
+[darling-mldr] RTSIG-AUDIT: rt_sigaction(35) handler=0x828608680 ret=-22 from 0x223d25 <unknown>
+[darling-mldr] RTSIG-AUDIT: rt_sigaction(65) handler=0x21d89899bc00 ret=-22 from 0x223d25 <unknown>
+[darling-mldr] RTSIG-AUDIT: rt_sigaction(66) handler=0x21d89899bc00 ret=-22 from 0x223d25 <unknown>
+WRAPPER_RC=193
+```
+
+Run C (darlingserver log added), the last lines before the death:
+
+```text
+[traplog] SIGILL ENTER tid=1066121 p=0x23eb03d9cac3 b=47
+[dserver-sendsignal] pid=31460 tid=578756 signal=65 ret=0x2f067b
+[dserver-sendsignal] ret offset=0xf067b sym=?
+WRAPPER_RC=193
+```
+
+`llvm-addr2line -f -C -e darlingserver 0x2f067b` gives
+`DTapeHooks::dtape_hook_thread_send_signal(void*, int)` at
+`src/external/darlingserver/src/server.cpp:205`, the hook that duct-tape's
+`thread_hold()` calls with `LINUX_SIGRTMIN` (`duct-tape/src/thread.c:1361`):
+the thread-suspend signal, not the server-to-client one (that is `LINUX_SIGRTMIN + 1`
+= 66). Target thread in run D: the main thread (the same tid as the mldr
+`SIGILL ENTER` lines). Not measured: which guest action made darlingserver call
+`thread_hold` (the call chain above the hook was not captured).
+
+Why no handler: both numbers come from the generated `rtsig.h`, which on this
+port is `LINUX_SIGRTMIN 65` (`build-freebsd/build-darlingserver.sh`,
+`build-dtape.sh`); the guest's `sigexc_setup1()` registers `sigrt_handler` for 65 and
+66 with `rt_sigaction`. `mldr_sys_rt_sigaction` accepted only 1..31, so both
+calls returned `-EINVAL` (the audit lines), and FreeBSD's default action for
+SIGRTMIN is to terminate. FreeBSD's real-time range is 65..126, so these are
+already native numbers; darlingserver's `thr_kill2` delivers them as is. The
+34/35 registrations (handler in a different image, not the sigexc one) are also
+rejected; nothing sends those.
+
+### (2) Fix
+
+`src/startup/mldr/sigaction_translate.c`:
+
+- accept 65..126 in `mldr_sys_rt_sigaction`, identity-mapped to the native
+  number, with their own registry slots (`sat_slot`);
+- identity reverse map in the delivery trampoline for those numbers.
+
+First run with that (D) died with status 132 (SIGILL) instead: the signal landed
+while mldr was inside its own SIGILL handler for `open()` (`b=2`), where SIGILL
+is blocked, and the guest handler's first syscall is a `ud2` trap, a blocked
+synchronous SIGILL, which the kernel answers by killing the process. The trampoline
+now `SIG_UNBLOCK`s SIGILL and SIGSYS for the guest handler's duration (sigreturn
+restores the interrupted mask).
+
+```text
+chrome-rtsig-D.log (handlers installed, no unblock):
+[darling-mldr] RTSIG-AUDIT: rt_sigaction(65) handler=0x1568c899bc00 ret=0 from 0x223d25 <unknown>
+[darling-mldr] RTSIG-AUDIT: rt_sigaction(66) handler=0x1568c899bc00 ret=0 from 0x223d25 <unknown>
+[dserver-sendsignal] pid=33888 tid=958191 signal=65 ret=0x2f067b
+WRAPPER_RC=132
+```
+
+Native 65/66 are never blocked by mldr's `rt_sigprocmask` translation (a Linux
+mask cannot name them), which matches the guest RPC layer's `sigdelset` of
+`LINUX_SIGRTMIN`/`+1` around each call. The guest builds shifts like
+`1ull << (65-1)`, which is undefined for a 64-bit mask; they land on harmless
+low bits and nothing relies on them. Not changed.
+
+### (3) Extra fix: syscalls 24, 63, 157 (separate commit)
+
+`sched_yield` -> host `sched_yield`; `uname` -> Linux `char[6][65]` layout
+(`Linux`, host name, `5.15.0`, `#1 SMP`, machine, `(none)`); `prctl` logs the
+option under `DARLING_TRAP_LOG`, accepts PDEATHSIG/DUMPABLE/NAME/TIMERSLACK/
+NO_NEW_PRIVS (and the gets), `EINVAL` otherwise. Run G, the only prctl:
+
+```text
+[darling-mldr] prctl option=15 arg2=0x2be4eddece10        (PR_SET_NAME)
+```
+
+and the `unhandled Linux syscall` lines are gone (`grep -c` 0).
+
+### (4) md5 proof
+
+mldr is exec'ed in place from `$DARLING_BUILD_DIR/dserver/mldr-real/mldr` (no staged
+copy); darlingserver from `$DARLING_BUILD_DIR/dserver/darlingserver`, a symlink to
+`dserver-build/darlingserver` (the same file). `build-darlingserver.sh` wipes
+`dserver-build/`, so a backup placed there is lost; the baseline was rebuilt from
+the unchanged source and is bit-identical to the binary it replaced.
+
+```text
+                       pre-fix (backup)                   built / installed
+mldr                   53b4743f849dcc522066712ca5d8d54b   23bc34d8d09c5c94e5a312bcffbfd229
+darlingserver          582fbef348843c721ed2c453541f2344   886ee797558a97bdb9f4140d1d0158ee
+```
+
+Built `mldr` (the build script's temporary directory) == installed. Backups:
+`mldr-real/mldr.pre-rtsig` (before anything, = the pre-fix md5 above),
+`mldr-real/mldr.pre-rtsig-sigonly` (signal fix and unblock, without the three
+syscalls; `e92f5bee57e00f096bc4dc52a26fab85`; the binary of runs E and F),
+`$DARLING_BUILD_DIR/dserver/darlingserver.pre-rtsig`; the earlier `*.pre-*` are
+kept. Other mldr builds: audit only `6a959307feca7d2396b1b80fa5da9d37` (runs A, C),
+RT handlers without the unblock `9a63c5c7e45b48b5f9e8014b23026e33` (run D).
+
+### (5) Runs
+
+Wrapper: `$DARLING_BUILD_DIR/rtsig-run.sh <suffix> <timeout> [ENV=val ...]`, the
+step-48 wrapper (`WRAPPER_RC`, `WRAPPER_DURATION`, `timeout --foreground -k 5`),
+refusing to overwrite a log. All with `DARLING_TRAP_LOG=1`.
+
+| run | log (`$DARLING_BUILD_DIR/`) | binaries | WRAPPER_RC | duration | timeout |
+| --- | --- | --- | --- | --- | --- |
+| A | `chrome-rtsig-A.log` | mldr audit only | 193 | 62 s | 600 s |
+| B | `chrome-rtsig-B.log` | darlingserver was missing (build failed); invalid | 1 | 0 s | 600 s |
+| C | `chrome-rtsig-C.log` | + darlingserver send log | 193 | 43 s | 600 s |
+| D | `chrome-rtsig-D.log` | + RT handlers | 132 | 99 s | 600 s |
+| E | `chrome-rtsig-E.log` | + SIGILL/SIGSYS unblock | 133 | 18 s | 600 s |
+| F | `chrome-rtsig-F.log` | same, `MLDR_LOG_MAPPINGS=1` | 133 | 122 s | 600 s |
+| G | `chrome-rtsig-G.log` | final (+ syscalls 24/63/157) | 133 | 8 s | 600 s |
+
+No run hit its timeout. Wall time varies widely with the harness's staging.
+
+### (6) Next stop (E, F, G)
+
+Same in all three: the RT signal is delivered and handled (one
+`[dserver-sendsignal] ... signal=65` per run, execution continues), then Chromium
+logs two errors and stops at `int3` (status 133, mldr's SIGTRAP audit):
+
+```text
+[ERROR:allocator_interception_apple.mm(92)] vm_region_64: (os/kern) no space available (3)
+[1114/145125.998330:ERROR:base/i18n/icu_util.cc:182] icudtl.dat not found in bundle
+[1114/145126.000605:ERROR:base/i18n/icu_util.cc:237] Invalid file descriptor to ICU data received.
+[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest handler=0x3695ebf9c280 (linux_signo=5) rip=0x3695ee3457dc si_code=1 si_addr=0x3695ee3457dc
+[darling-mldr] exec-mapping 0x3695ec610000+0xf1a3000 fd=3 .../Google Chrome for Testing Framework
+```
+
+`0x3695ee3457dc - 0x3695ec610000` = Framework `+0x1d357dc`; disassembly
+(`llvm-objdump -d`, inside `_ChromeMain`):
+
+```text
+ 1d357d6: callq 0x6610
+ 1d357db: int3
+ 1d357dc: ud2
+```
+
+Classification: a deliberate Chromium crash (`IMMEDIATE_CRASH` after a failed
+`CHECK` in ICU initialisation), not a hardware fault, not an exit, not a missing
+symbol. Cause as far as measured: the framework bundle's `PathForResource` for
+`icudtl` returns nil. The file exists in the staged framework
+(`Versions/154.0.8029.0/Resources/icudtl.dat`, 10823536 bytes), but the guest
+never issues a path syscall for it: the only `icudtl.dat` in the log is the error
+text. The path log shows only directory probes (`Resources`, `Base.lproj`,
+`id_FEMININE.lproj`, `/etc/localtime`, `/etc/asl/.noquota`). So the next wall is
+the bundle resource lookup (CFBundle/NSBundle on the framework), not signals.
+Not investigated further.
+
+### (7) WindowServer
+
+Not reached. Runs F and G: the only guest `connect()` is the darlingserver RPC
+socket (`[gsw-bisect] connect fd=3 len=43`); no Wayland socket path is probed,
+no `NSApplication` or `_CGSDefaultConnection` activity (greps for `wayland`,
+`WindowServer`, `CGSDefault`, `NSApplication`, `wl_display`, `X11` match only the
+`0x11...` addresses of mapping lines in run F, 0 in G). No compositor was
+installed or started.
+
+### (8) Not verified
+
+- Which guest action causes `thread_hold` (the thread-suspend request); only the
+  send site was identified.
+- That the guest's `sigrt_handler` ran to completion for 65 (the thread kept
+  running and no fault followed; the handler's own steps were not traced).
+- The server-to-client signal (66) never fired in these runs, so that path is
+  untested.
+- The 34/35 registrations (EINVAL) were not attributed to a library.
+- Why `PathForResource("icudtl", "dat")` finds nothing.
+- Whether the longer runs (D, F) differ from the short ones for a reason other
+  than harness staging time.
