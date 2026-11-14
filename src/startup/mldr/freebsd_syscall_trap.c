@@ -262,6 +262,8 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_ftruncate      77
 #define LINUX_SYS_mkdirat       258
 #define LINUX_SYS_flock         73
+#define LINUX_SYS_pipe          22
+#define LINUX_SYS_pipe2         293
 #define LINUX_SYS_unlinkat      263
 #define LINUX_SYS_renameat      264
 #define LINUX_SYS_symlinkat     266
@@ -2219,6 +2221,19 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * permission half coincide — `defaults` needs this to create its
          * preferences directory. */
         return freebsd_raw_syscall(SYS_mkdirat, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_pipe:
+        /* pipe(int fds[2]): FreeBSD's pipe2 with no flags fills the array the
+         * way Linux's pipe does (the native pipe syscall returns the two
+         * descriptors in registers instead). */
+        return freebsd_raw_syscall(SYS_pipe2, a1, 0, 0, 0, 0, 0);
+    case LINUX_SYS_pipe2: {
+        /* pipe2(fds, flags): O_NONBLOCK (Linux 0x800, FreeBSD 0x4) and
+         * O_CLOEXEC (Linux 0x80000, FreeBSD 0x100000) differ. */
+        long freebsd_flags = 0;
+        if (a2 & 0x800)   freebsd_flags |= O_NONBLOCK;
+        if (a2 & 0x80000) freebsd_flags |= O_CLOEXEC;
+        return freebsd_raw_syscall(SYS_pipe2, a1, freebsd_flags, 0, 0, 0, 0);
+    }
     case LINUX_SYS_readlinkat:
         /* readlinkat(dirfd, path, buf, bufsiz): no flags, AT_FDCWD is -100
          * on both OSes. Chromium's ProcessSingleton and base::realpath need it. */
@@ -3070,7 +3085,11 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * raw-Linux syscall (times(99) in the (a) window is the target) */
         if (mldr_trap_log_enabled && mldr_trap_log_handlers)
             mldr_tlog("linux-unhandled", (long)linux_nr, (long)a1);
-        return -ENOSYS;
+        /* The guest is the Linux-ABI libsystem_kernel: it reads the result as a
+         * Linux errno. FreeBSD's ENOSYS is 78, which the guest takes for
+         * EREMCHG and, in sys_fork, for a pid (fork() returned -78 with errno 0).
+         * Linux ENOSYS is 38. */
+        return -38;
     }
 }
 /* ── raw-Linux-syscall trampoline patching (dyld load-time, #198) ─────────── */
