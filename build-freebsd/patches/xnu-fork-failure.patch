@@ -43,31 +43,10 @@ index 76b6f53..aa63c11 100644
  	else if (ret == 0)
  	{
  		// in the child
-diff --git a/libsyscall/mach/mach_init.c b/libsyscall/mach/mach_init.c
-index 74a72ee..9e6035d 100644
---- a/libsyscall/mach/mach_init.c
-+++ b/libsyscall/mach/mach_init.c
-@@ -144,9 +144,16 @@ _mach_fork_child(void)
- }
- 
- #ifdef DARLING
-+extern int __darling_fork_failed_consume(void);
-+
- int _mach_fork_parent(void) {
- 	int result;
- 
-+	// fork() failed on this thread: no child will ever check in, so waiting
-+	// for one would block this thread forever.
-+	if (__darling_fork_failed_consume())
-+		return 0;
-+
- retry:
- 	result = dserver_rpc_fork_wait_for_child();
- 	if (result < 0) {
-diff --git a/libsyscall/bsdsyscalls/___fork.S b/libsyscall/bsdsyscalls/___fork.S
+diff --git a/gen/bsdsyscalls/___fork.S b/gen/bsdsyscalls/___fork.S
 index 5dfca4b..1889c54 100644
---- a/libsyscall/bsdsyscalls/___fork.S
-+++ b/libsyscall/bsdsyscalls/___fork.S
+--- a/gen/bsdsyscalls/___fork.S
++++ b/gen/bsdsyscalls/___fork.S
 @@ -86,8 +86,11 @@ LEAF(___fork, 0)
  #ifdef DARLING
  	movl	$ SYS_fork, %eax
@@ -92,3 +71,24 @@ index 5dfca4b..1889c54 100644
  	CALL_EXTERN(_cerror)
  	movq	$-1, %rax
  	addq	$24, %rsp   // restore the stack
+diff --git a/libsyscall/mach/mach_init.c b/libsyscall/mach/mach_init.c
+index 74a72ee..9e6035d 100644
+--- a/libsyscall/mach/mach_init.c
++++ b/libsyscall/mach/mach_init.c
+@@ -144,9 +144,16 @@ _mach_fork_child(void)
+ }
+ 
+ #ifdef DARLING
++extern int __darling_fork_failed_consume(void);
++
+ int _mach_fork_parent(void) {
+ 	int result;
+ 
++	// fork() failed on this thread: no child will ever check in, so waiting
++	// for one would block this thread forever.
++	if (__darling_fork_failed_consume())
++		return 0;
++
+ retry:
+ 	result = dserver_rpc_fork_wait_for_child();
+ 	if (result < 0) {

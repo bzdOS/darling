@@ -41,49 +41,6 @@ index 9854311..81eb0d7 100644
  
  		if (ret < 0) {
  			if (errno == EAGAIN) {
-diff --git a/src/server.cpp b/src/server.cpp
-index 7fcc901..410ca50 100644
---- a/src/server.cpp
-+++ b/src/server.cpp
-@@ -37,6 +37,22 @@
- #include <sys/mman.h>
- #include <sys/stat.h>
- #include <sys/wait.h>
-+#include <time.h>
-+#include <stdio.h>
-+
-+// diagnostic (DARLING_RPC_LOG=1): one line per received call, per queued reply and per send attempt
-+static bool dserverRpcLogOn() {
-+	static const bool on = getenv("DARLING_RPC_LOG") != nullptr;
-+	return on;
-+}
-+static unsigned long dserverRpcMs() {
-+	struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-+	return (unsigned long)ts.tv_sec * 1000UL + (unsigned long)ts.tv_nsec / 1000000UL;
-+}
-+static const char* dserverRpcAddr(const struct sockaddr_un& a) {
-+	return a.sun_path[0] ? a.sun_path : (a.sun_path + 1);
-+}
-+
- 
- #include <darlingserver/logging.hpp>
- 
-@@ -578,7 +594,15 @@ void DarlingServer::Server::start() {
- 		}
- 
- 		struct epoll_event events[16];
-+		if (dserverRpcLogOn()) {
-+			fprintf(stderr, "[dserver-rpc] %lu epoll_wait canRead=%d canWrite=%d outboxEmpty=%d\n", dserverRpcMs(), (int)_canRead, (int)_canWrite, (int)_outbox.empty());
-+			fflush(stderr);
-+		}
- 		int ret = epoll_wait(_epollFD, events, 16, -1);
-+		if (dserverRpcLogOn()) {
-+			fprintf(stderr, "[dserver-rpc] %lu epoll_wait returned %d\n", dserverRpcMs(), ret);
-+			fflush(stderr);
-+		}
- 
- 		if (ret < 0) {
- 			if (errno == EINTR) {
 diff --git a/src/call.cpp b/src/call.cpp
 index fd7dd72..9d55f3a 100644
 --- a/src/call.cpp

@@ -1,0 +1,76 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
+index bd9cdc2..c52e542 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
+@@ -46,6 +46,11 @@ static sysctl_handler(handle_usrstack64);
+ static sysctl_handler(handle_sysv_semmns);
+ static sysctl_handler(handle_osproductversion);
+ static sysctl_handler(handle_osrevision);
++static sysctl_handler(handle_hv_vmm_present);
++
++enum {
++	_KERN_HV_VMM_PRESENT = 9000,
++};
+ 
+ extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
+ extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
+@@ -77,6 +82,7 @@ const struct known_sysctl sysctls_kern[] = {
+ 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
+ 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
+ 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
++	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
+ 	{ .oid = -1 }
+ };
+ 
+@@ -335,6 +341,15 @@ static sysctl_handler(handle_osproductversion) {
+ // https://lists.apple.com/archives/darwin-dev/2005/Jul/msg00029.html
+ #define EMULATED_OSREVISION 199506
+ 
++// 0: bare metal (the emulated machine is not a hypervisor guest).
++static sysctl_handler(handle_hv_vmm_present) {
++	int* ovalue = (int*)old;
++	if (ovalue)
++		*ovalue = 0;
++	*oldlen = sizeof(*ovalue);
++	return 0;
++}
++
+ static sysctl_handler(handle_osrevision) {
+ 	int* ovalue = (int*)old;
+ 	if (ovalue)
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
+index 5a49882..5ffe3fe 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
+@@ -7,15 +7,31 @@
+ 
+ enum {
+ 	_PROC_CPUTYPE = 1000,
++	_PROC_TRANSLATED = 1001,
+ };
+ 
+ static sysctl_handler(handle_proc_cputype);
++static sysctl_handler(handle_proc_translated);
+ 
+ const struct known_sysctl sysctls_sysctl[] = {
+ 	{ .oid = _PROC_CPUTYPE, .type = CTLTYPE_INT, .exttype = "I", .name = "proc_cputype", .handler = handle_proc_cputype },
++	{ .oid = _PROC_TRANSLATED, .type = CTLTYPE_INT, .exttype = "I", .name = "proc_translated", .handler = handle_proc_translated },
+ 	{ .oid = -1 }
+ };
+ 
++// 0: not running under Rosetta. The name exists on every macOS 11+ and Chromium
++// treats a missing name as an unexpected failure.
++sysctl_handler(handle_proc_translated)
++{
++	if (old != NULL) {
++		if (*oldlen < sizeof(int))
++			return -EINVAL;
++		*((int*) old) = 0;
++	}
++	*oldlen = sizeof(int);
++	return 0;
++}
++
+ sysctl_handler(handle_proc_cputype)
+ {
+ 	if (nlen < 3)
