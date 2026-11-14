@@ -11,10 +11,13 @@
 #                      socket; passed to the guest unchanged
 #   WAYLAND_DISPLAY    socket name inside XDG_RUNTIME_DIR
 # Optional:
-#   DARLING_GUEST_EXPOSE  colon separated host directories shown to the guest at
-#                      the same path (launch-dynamic links them into the guest
-#                      root). Must cover XDG_RUNTIME_DIR and every path in
-#                      CHROME_ARGS (profile, local page).
+#   DARLING_GUEST_EXPOSE  colon separated host directories linked into the guest
+#                      root at the same path. Must cover XDG_RUNTIME_DIR (the
+#                      socket is only connect()ed, so a link is enough).
+#   DARLING_GUEST_MKDIR   colon separated guest directories created for real in
+#                      the guest root (the profile directory).
+#   DARLING_GUEST_COPY    colon separated host=guest file pairs copied into the
+#                      guest root (the local page).
 #   CHROME_ARGS        space separated argv for Chrome (launch-dynamic splits
 #                      DARLING_TEST_ARGS on spaces: no quoting, so no spaces
 #                      inside one argument, at most 30 arguments, 1023 bytes)
@@ -45,6 +48,7 @@ echo "WRAPPER_START=$START timeout=$T" > "$LOG"
   XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
   DARLING_TEST_ARGS="$CHROME_ARGS" \
   DARLING_GUEST_EXPOSE="$DARLING_GUEST_EXPOSE" \
+  DARLING_GUEST_MKDIR="$DARLING_GUEST_MKDIR" DARLING_GUEST_COPY="$DARLING_GUEST_COPY" \
   "$@" CHROME_APP="$CHROME_APP" \
   timeout --foreground -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" >> "$LOG" 2>&1
 echo "WRAPPER_RC=$?" >> "$LOG"

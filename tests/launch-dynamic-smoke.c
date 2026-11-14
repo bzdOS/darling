@@ -851,8 +851,10 @@ int main(void) {
      * (guest paths are rewritten to <overlay><path>), which cleanup() wipes on
      * every start, so nothing can be pre-placed there. For each entry a
      * symlink <overlay><dir> -> <dir> is created after staging; the kernel
-     * follows it to the real directory. Used for the compositor socket
-     * directory (XDG_RUNTIME_DIR), the profile directory and local pages.
+     * follows it to the real directory. Meant for the compositor socket
+     * directory (XDG_RUNTIME_DIR): the guest only connect()s through it. Do not
+     * use it for a directory the guest walks (realpath): the guest reads the
+     * link's target as a guest path, which is the link itself.
      */
     {
         const char *expose = getenv("DARLING_GUEST_EXPOSE");
@@ -880,6 +882,50 @@ int main(void) {
                     fprintf(stderr, "expose: symlink %s -> %s: %s\n", link, dir, strerror(errno));
                 else
                     printf("exposed to guest: %s -> %s\n", link, dir);
+            }
+        }
+    }
+
+    /*
+     * DARLING_GUEST_MKDIR: colon-separated guest paths created as real
+     * directories in the local overlay (a profile directory). DARLING_GUEST_COPY:
+     * colon-separated host=guest pairs; the host file is copied to the guest
+     * path (a local page). Real files, not links: the guest resolves a link's
+     * target as a guest path, so a link to the same path loops (readlink gives
+     * the path back, realpath() runs into ELOOP, and Chromium then ignores
+     * --user-data-dir). Links are fine for a socket, which is only connect()ed.
+     */
+    {
+        const char *mk = getenv("DARLING_GUEST_MKDIR");
+        if (mk && mk[0]) {
+            char list[2048];
+            snprintf(list, sizeof(list), "%s", mk);
+            char *sp = NULL;
+            for (char *dir = strtok_r(list, ":", &sp); dir != NULL;
+                 dir = strtok_r(NULL, ":", &sp)) {
+                char cmd[1400];
+                snprintf(cmd, sizeof(cmd), "mkdir -p '%s%s' && chmod 0700 '%s%s'",
+                         LOCAL_OVERLAY, dir, LOCAL_OVERLAY, dir);
+                (void)system(cmd);
+                printf("guest directory: %s\n", dir);
+            }
+        }
+        const char *cp = getenv("DARLING_GUEST_COPY");
+        if (cp && cp[0]) {
+            char list[2048];
+            snprintf(list, sizeof(list), "%s", cp);
+            char *sp = NULL;
+            for (char *pair = strtok_r(list, ":", &sp); pair != NULL;
+                 pair = strtok_r(NULL, ":", &sp)) {
+                char *eq = strchr(pair, '=');
+                if (!eq) continue;
+                *eq = '\0';
+                char cmd[2400];
+                snprintf(cmd, sizeof(cmd),
+                         "mkdir -p \"$(dirname '%s%s')\" && cp '%s' '%s%s'",
+                         LOCAL_OVERLAY, eq + 1, pair, LOCAL_OVERLAY, eq + 1);
+                (void)system(cmd);
+                printf("guest file: %s <- %s\n", eq + 1, pair);
             }
         }
     }
