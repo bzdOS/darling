@@ -1,0 +1,18 @@
+diff --git a/src/call.cpp b/src/call.cpp
+index 9d55f3a..02aeac4 100644
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -748,7 +748,12 @@ void DarlingServer::Call::ForkWaitForChild::processCall() {
+ 
+ 	if (auto thread = _thread.lock()) {
+ 		if (auto process = thread->process()) {
+-			process->waitForChildAfterFork();
++			// Workaround, off by default (DARLING_SKIP_FORK_WAIT=1): the guest's fork()
++			// runs this wait in the parent handler even when clone failed (ENOSYS in
++			// mldr), and no child will ever check in to release the semaphore.
++			if (getenv("DARLING_SKIP_FORK_WAIT") == nullptr) {
++				process->waitForChildAfterFork();
++			}
+ 		} else {
+ 			code = -ESRCH;
+ 		}

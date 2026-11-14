@@ -1,0 +1,141 @@
+diff --git a/src/message.cpp b/src/message.cpp
+index 9854311..81eb0d7 100644
+--- a/src/message.cpp
++++ b/src/message.cpp
+@@ -24,6 +24,23 @@
+ #include <new>
+ #include <mutex>
+ #include <system_error>
++#include <time.h>
++#include <sys/un.h>
++#include <stdio.h>
++
++// diagnostic (DARLING_RPC_LOG=1): one line per received call, per queued reply and per send attempt
++static bool dserverRpcLogOn() {
++	static const bool on = getenv("DARLING_RPC_LOG") != nullptr;
++	return on;
++}
++static unsigned long dserverRpcMs() {
++	struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (unsigned long)ts.tv_sec * 1000UL + (unsigned long)ts.tv_nsec / 1000000UL;
++}
++static const char* dserverRpcAddr(const struct sockaddr_un& a) {
++	return a.sun_path[0] ? a.sun_path : (a.sun_path + 1);
++}
++
+ 
+ /* msg_ucred_t: the credential type used in socket control messages.
+  * On FreeBSD we use bsdos_ucred (our Linux-compat {pid,uid,gid} struct) since
+@@ -626,6 +643,14 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+ 		}
+ 
+ 		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT);
++		if (dserverRpcLogOn()) {
++			fprintf(stderr, "[dserver-rpc] %lu sendmmsg tried=%zu queued=%zu ret=%d errno=%d\n", dserverRpcMs(), len, _messages.size(), ret, ret < 0 ? errno : 0);
++			for (int k = 0; k < ret && k < (int)len; ++k) {
++				auto addr = reinterpret_cast<sockaddr_un*>(mmsgs[k].msg_hdr.msg_name);
++				fprintf(stderr, "[dserver-rpc] %lu   sent[%d] len=%u to=%s\n", dserverRpcMs(), k, (unsigned)mmsgs[k].msg_len, addr ? dserverRpcAddr(*addr) : "(none)");
++			}
++			fflush(stderr);
++		}
+ 
+ 		if (ret < 0) {
+ 			if (errno == EAGAIN) {
+diff --git a/src/server.cpp b/src/server.cpp
+index 7fcc901..410ca50 100644
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -37,6 +37,22 @@
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/wait.h>
++#include <time.h>
++#include <stdio.h>
++
++// diagnostic (DARLING_RPC_LOG=1): one line per received call, per queued reply and per send attempt
++static bool dserverRpcLogOn() {
++	static const bool on = getenv("DARLING_RPC_LOG") != nullptr;
++	return on;
++}
++static unsigned long dserverRpcMs() {
++	struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (unsigned long)ts.tv_sec * 1000UL + (unsigned long)ts.tv_nsec / 1000000UL;
++}
++static const char* dserverRpcAddr(const struct sockaddr_un& a) {
++	return a.sun_path[0] ? a.sun_path : (a.sun_path + 1);
++}
++
+ 
+ #include <darlingserver/logging.hpp>
+ 
+@@ -578,7 +594,15 @@ void DarlingServer::Server::start() {
+ 		}
+ 
+ 		struct epoll_event events[16];
++		if (dserverRpcLogOn()) {
++			fprintf(stderr, "[dserver-rpc] %lu epoll_wait canRead=%d canWrite=%d outboxEmpty=%d\n", dserverRpcMs(), (int)_canRead, (int)_canWrite, (int)_outbox.empty());
++			fflush(stderr);
++		}
+ 		int ret = epoll_wait(_epollFD, events, 16, -1);
++		if (dserverRpcLogOn()) {
++			fprintf(stderr, "[dserver-rpc] %lu epoll_wait returned %d\n", dserverRpcMs(), ret);
++			fflush(stderr);
++		}
+ 
+ 		if (ret < 0) {
+ 			if (errno == EINTR) {
+diff --git a/src/call.cpp b/src/call.cpp
+index fd7dd72..9d55f3a 100644
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -31,6 +31,22 @@
+ 
+ static DarlingServer::Log callLog("calls");
+ 
++// diagnostic (DARLING_RPC_LOG=1): one line per received call, per queued reply and per send attempt
++static bool dserverRpcLogOn() {
++	static const bool on = getenv("DARLING_RPC_LOG") != nullptr;
++	return on;
++}
++static unsigned long dserverRpcMs() {
++	struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (unsigned long)ts.tv_sec * 1000UL + (unsigned long)ts.tv_nsec / 1000000UL;
++}
++static const char* dserverRpcAddr(const struct sockaddr_un& a) {
++	return a.sun_path[0] ? a.sun_path : (a.sun_path + 1);
++}
++#include <time.h>
++#include <sys/un.h>
++
++
+ /*
+  * Reply codes travel to the guest in the LINUX errno space. The client half of
+  * this protocol is Darling's libsystem_kernel, which is a Linux build and
+@@ -62,6 +78,11 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
+ 	std::shared_ptr<Process> process = nullptr;
+ 	std::shared_ptr<Thread> thread = nullptr;
+ 
++	if (dserverRpcLogOn()) {
++		fprintf(stderr, "[dserver-rpc] %lu recv num=%d pid=%d tid=%d size=%zu from=%s\n", dserverRpcMs(), (int)header->number, (int)header->pid, (int)header->tid, requestMessage.data().size(), dserverRpcAddr(requestMessage.address().raw()));
++		fflush(stderr);
++	}
++
+ 	// first, make sure we know this call number
+ 	switch (header->number) {
+ 		case dserver_callnum_s2c:
+@@ -273,6 +294,15 @@ bool DarlingServer::Call::isBSDTrap() const {
+ };
+ 
+ void DarlingServer::Call::sendReply(Message&& reply) {
++	if (dserverRpcLogOn()) {
++		int num = -1, code = 0;
++		if (reply.data().size() >= sizeof(dserver_rpc_replyhdr_t)) {
++			auto rh = reinterpret_cast<dserver_rpc_replyhdr_t*>(reply.data().data());
++			num = (int)rh->number; code = rh->code;
++		}
++		fprintf(stderr, "[dserver-rpc] %lu reply-queued num=%d code=%d size=%zu to=%s\n", dserverRpcMs(), num, code, reply.data().size(), dserverRpcAddr(reply.address().raw()));
++		fflush(stderr);
++	}
+ 	Server::sharedInstance().sendMessage(std::move(reply));
+ };
+ 
