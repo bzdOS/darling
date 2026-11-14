@@ -1,0 +1,94 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
+index 76b6f53..aa63c11 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
+@@ -18,6 +18,29 @@
+ 
+ extern _libkernel_functions_t _libkernel_functions;
+ 
++/* Threads whose fork() failed, keyed by their RPC socket (+1). The parent
++ * handler of a failed fork must not wait for a child that does not exist
++ * (see _mach_fork_parent). Consumed by exactly that call on the same thread. */
++#define FORK_FAILED_SLOTS 16
++static volatile int fork_failed_sockets[FORK_FAILED_SLOTS];
++
++static void fork_failed_mark(void)
++{
++	int key = __dserver_per_thread_socket() + 1;
++	for (int i = 0; i < FORK_FAILED_SLOTS; i++)
++		if (__sync_bool_compare_and_swap(&fork_failed_sockets[i], 0, key))
++			return;
++}
++
++int __darling_fork_failed_consume(void)
++{
++	int key = __dserver_per_thread_socket() + 1;
++	for (int i = 0; i < FORK_FAILED_SLOTS; i++)
++		if (__sync_bool_compare_and_swap(&fork_failed_sockets[i], key, 0))
++			return 1;
++	return 0;
++}
++
+ long sys_fork(void)
+ {
+ 	int ret;
+@@ -29,7 +52,10 @@ long sys_fork(void)
+ 	ret = LINUX_SYSCALL(__NR_clone, LINUX_SIGCHLD, 0);
+ #endif
+ 	if (ret < 0)
++	{
+ 		ret = errno_linux_to_bsd(ret);
++		fork_failed_mark();
++	}
+ 	else if (ret == 0)
+ 	{
+ 		// in the child
+diff --git a/libsyscall/mach/mach_init.c b/libsyscall/mach/mach_init.c
+index 74a72ee..9e6035d 100644
+--- a/libsyscall/mach/mach_init.c
++++ b/libsyscall/mach/mach_init.c
+@@ -144,9 +144,16 @@ _mach_fork_child(void)
+ }
+ 
+ #ifdef DARLING
++extern int __darling_fork_failed_consume(void);
++
+ int _mach_fork_parent(void) {
+ 	int result;
+ 
++	// fork() failed on this thread: no child will ever check in, so waiting
++	// for one would block this thread forever.
++	if (__darling_fork_failed_consume())
++		return 0;
++
+ retry:
+ 	result = dserver_rpc_fork_wait_for_child();
+ 	if (result < 0) {
+diff --git a/libsyscall/bsdsyscalls/___fork.S b/libsyscall/bsdsyscalls/___fork.S
+index 5dfca4b..1889c54 100644
+--- a/libsyscall/bsdsyscalls/___fork.S
++++ b/libsyscall/bsdsyscalls/___fork.S
+@@ -86,8 +86,11 @@ LEAF(___fork, 0)
+ #ifdef DARLING
+ 	movl	$ SYS_fork, %eax
+ 	call	__darling_bsd_syscall
+-	cmpq	$0, %rax
+-	jnb L1
++	// the Darling syscall layer returns -errno (same test as UNIX_SYSCALL in
++	// SYS.h); `cmpq $0` / `jnb` never took the error path, so a failed fork
++	// returned its negative errno as if it were a pid.
++	cmpq	$-4095, %rax
++	jb L1
+ #else
+ 	movl 	$ SYSCALL_CONSTRUCT_UNIX(SYS_fork),%eax; // code for fork -> rax
+ 	UNIX_SYSCALL_TRAP		// do the system call
+@@ -95,6 +98,9 @@ LEAF(___fork, 0)
+ #endif
+ 
+ 	movq	%rax, %rdi
++#ifdef DARLING
++	negq	%rdi
++#endif
+ 	CALL_EXTERN(_cerror)
+ 	movq	$-1, %rax
+ 	addq	$24, %rsp   // restore the stack
