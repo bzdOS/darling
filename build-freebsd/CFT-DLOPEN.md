@@ -12861,3 +12861,140 @@ as provider bodies, `LC_REEXPORT_DYLIB ×4`). Baseline copies kept as
 `overlay/usr/lib/cg-supl.dylib.baseline-step43` and `build/suppl-stubs/backup-*/`
 for inspection; the branch artefacts (`build/suppl-stubs/*.dylib`, `*.s`, `*.names.txt`)
 match the overlay.
+
+## Step 45 — exit attribution
+
+Question: how does the `chrome-macho` guest end ~1–2 s after `ChromeMain`?
+Step 44 claimed `_exit`; that claim is **refuted**. The guest never calls
+`exit`/`_exit`/`exit_group`/`abort_with_payload`/`kill`: it is killed by an
+unhandled **SIGILL** (shell status 132) inside the `suppl.dylib` provider body
+for `__platform_bzero`, which jumps into the middle of an instruction.
+Not Chromes own early exit, not a harness timeout.
+## Step 45 — exit attribution
+
+Question: how does the `chrome-macho` guest end ~1–2 s after `ChromeMain`?
+Step 44 claimed `_exit`; that claim is **refuted**. The guest never calls
+`exit`/`_exit`/`exit_group`/`abort_with_payload`/`kill`: it is killed by an
+unhandled **SIGILL** (shell status 132) inside the `suppl.dylib` provider body
+for `__platform_bzero`, which jumps into the middle of an instruction.
+Not Chrome's own early exit, not a harness timeout.
+
+### (1) Measurement setup
+
+The harness (`tests/launch-dynamic-smoke.c`) `execv`s mldr, so mldr's status
+is the guest's status; stdout and stderr both go into the one log, so nothing
+is swallowed. Wrapper (exit code recorded as the last log line):
+
+```sh
+/usr/local/bin/sudo -n env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY \
+  DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=chrome-macho \
+  DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
+  DARLING_SMOKE_REFRESH=1 DARLING_TRAP_LOG=1 \
+  CHROME_APP="<chrome-for-testing-dir>/chrome-mac-x64/Google Chrome for Testing.app" \
+  timeout --foreground -k 5 3000 $DARLING_BUILD_DIR/launch-dynamic > $LOG 2>&1
+echo WRAPPER_RC=$? >> $LOG
+```
+
+Practical note: with `DARLING_SMOKE_REFRESH=1` the framework staging (`pax` of
+the Chrome frameworks) takes about 10 minutes on this VM. A `timeout 60` or
+`150` therefore kills `launch-dynamic` during staging, leaves an orphan `pax`,
+and the log stays empty. Use a long timeout, or drop REFRESH once staged.
+
+`DARLING_TRAP_LOG=1` already existed in mldr (traplog slice). Raw-Linux
+syscalls that mldr emulates via SIGILL show as `SIGILL ENTER/LEAVE`; the exit
+syscalls were not logged. Diagnostic patch (gated by `DARLING_TRAP_LOG`, no
+effect otherwise), `src/startup/mldr/freebsd_syscall_trap.c`:
+
+- ring of the last 32 SIGSYS-handled guest syscalls (raw eax, trapping rip,
+  return address at `[rsp]`), dumped as `EXIT-SYSCALL` before BSD
+  `exit`(1)/`kill`(37)/`abort_with_payload`(521);
+- on a SIGILL that is not an mldr trap ("not-ours"): rip, rax, rsp, rbp, rcx,
+  rdi, rsi, rdx, 16 stack words and the ring, before the existing re-raise.
+
+### (2) Termination (verbatim, `$DARLING_BUILD_DIR/chrome-exit-attr-E-1.log`)
+
+```text
+[traplog] SIGILL ENTER tid=264666 p=0x3a567f09c686 b=-117
+[traplog] SIGILL-FAULT rip tid=264666 p=0x3a567f09c686 b=-117
+[traplog] SIGILL-FAULT rsp tid=264666 p=0x7fffffdfda98 b=0
+[traplog] SIGILL-FAULT rdi tid=264666 p=0x3a567ee76948 b=0
+[traplog] SIGILL-FAULT rsi tid=264666 p=0x0 b=0
+[traplog] SIGILL-FAULT rdx tid=264666 p=0x14f9 b=0
+[traplog] SIGILL-FAULT stack tid=264666 p=0x3a567f09c6f1 b=0
+[traplog] SIGILL-FAULT stack tid=264666 p=0x3a5670f3aaa2 b=4
+[traplog] SIGILL RE-RAISE(not-ours) tid=264666 p=0x3a567f09c686 b=-117
+WRAPPER_RC=132
+```
+
+The first run (`$DARLING_BUILD_DIR/chrome-exit-attr-D-1.log`, before the fault
+dump was added) ends identically: `SIGILL RE-RAISE(not-ours) ... p=0x7512969c686`,
+`WRAPPER_RC=132`. 132 = 128 + SIGILL. No `EXIT-SYSCALL` line, no
+`FATAL signal`, no `Symbol not found`. No `[pid:...:ERROR:...]` Chrome line
+appears: Chrome has not got past the first lines of `ChromeMain`.
+
+Address resolution (image bases from the `[dyld-trace]` image list of the same run):
+
+```text
+0x3a567f09c686 -> suppl.dylib + 0x686                               (fault pc)
+0x3a5670f3aaa2 -> Google Chrome for Testing Framework + 0x212aaa2   (return address)
+```
+
+Framework `+0x212aa98: movl $0x14f9,%esi` / `+0x212aa9d: callq <stub>` is the
+call, i.e. `bzero(rdi, 0x14f9)`; hence rdx=0x14f9 in the fault.
+
+### (3) Root cause: pc-relative call in a verbatim-copied provider body
+
+Step 44 copied `__platform_bzero` byte-for-byte from libsystem_platform into
+`suppl.dylib`. The body contains `callq __platform_memset` (rel32):
+
+```text
+libsystem_platform  6c8a: e8 91 ff ff ff   callq __platform_memset
+suppl.dylib          6ec: e8 91 ff ff ff   callq 0x682      <- lands inside ___atomic_load
+suppl.dylib          685: 8b 06            movl (%rsi),%eax  ; 0x686 = byte 06, invalid in 64-bit mode
+```
+
+The same rel32 now points at suppl+0x682, the middle of the `movl` at 0x685
+inside `___atomic_load` (0x662..0x6d2). Byte `0x06` is an invalid opcode in
+64-bit mode, so the CPU raises #UD. mldr's SIGILL handler only knows its own
+`ud2` traps, so it restores SIG_DFL and re-raises: the process dies with signal 4.
+The two atomic bodies have the same defect (`___atomic_load: callq 0x7ce`,
+`___atomic_store: callq 0x6de`, the non-lock-free size fallback; `0x6de` is
+inside `__platform_bzero`). They are not hit yet.
+
+Fix direction (not done here): `gen-cg-supl.py` must not copy bodies with
+relative calls verbatim. Options: rebase the rel32 targets when slicing, give
+`__platform_bzero` a body that tail-jumps through an imported `_memset`, or
+implement the three bodies in C in the supplement.
+
+### (4) Last guest activity before the fault
+
+The ring is empty (no SIGSYS-class syscalls in the window), so the tail is the
+SIGILL-emulated raw-Linux syscalls, collapsed (`uniq -c` style):
+
+```text
+2154 SIGILL ENTER p=<libsystem_kernel>+..cae3 b=309   (getcpu)
+  25 SIGILL ENTER p=<chrome-macho>+0xd86749 b=228     (clock_gettime)
+   1 SIGILL ENTER p=<libsystem_kernel>+..cae3 b=309
+  28 SIGILL ENTER p=<chrome-macho>+0xd86749 b=228
+   3 SIGILL ENTER ... b=309
+ 105 SIGILL ENTER p=<chrome-macho>+0xd86749 b=228
+   1 SIGILL ENTER p=suppl.dylib+0x686 b=-117          <- the fault
+```
+
+### (5) Classification
+
+(c) other: neither (a) Chrome's own exit nor (b) a harness exit/timeout. The
+process is killed by SIGILL in guest code: a defect in the step-44 supplement.
+The Chrome path is `ChromeMain -> bzero(0x14f9 bytes)` (Framework+0x212aa9d).
+Display, WindowServer, singleton, sandbox and command-line code have not been
+reached.
+
+Next blocker: fix the relocation of `__platform_bzero` (and the two atomic
+fallbacks) in the supplement generator, rebuild `suppl.dylib`, re-run, and see
+what `ChromeMain` does next (the first WindowServer call is further on).
+
+### (6) Not verified
+
+- The fix itself (no re-run with a corrected `__platform_bzero`).
+- That nothing else faults behind this call; only the first fault is known.
+- Whether any exit path exists after the fix; this run never reached one.

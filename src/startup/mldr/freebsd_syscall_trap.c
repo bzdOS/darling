@@ -2957,6 +2957,26 @@ mldr_patch_linux_raw_syscalls(void *base, size_t size)
  * sideEffects: executes the translated syscall or Mach RPC; may write to
  *              stderr; terminates process only for truly unrecognised classes.
  */
+/* exit-attribution diagnostic (DARLING_TRAP_LOG only): ring of the last
+ * guest syscalls seen by the SIGSYS handler (raw eax, trapping rip, the
+ * return address at [rsp]). Dumped just before exit/kill/abort_with_payload
+ * so the caller of the guest's termination is named. Racy by design. */
+#define MLDR_SYSRING_N 32
+static struct { unsigned int eax; unsigned long rip, ret; } mldr_sysring[MLDR_SYSRING_N];
+static unsigned long mldr_sysring_n;
+
+static void
+mldr_sysring_dump(const char *why, unsigned int eax, long a1)
+{
+    mldr_tlog(why, (long)eax, a1);
+    unsigned long n = mldr_sysring_n;
+    for (unsigned long i = n > MLDR_SYSRING_N ? n - MLDR_SYSRING_N : 0; i < n; i++) {
+        unsigned long k = i % MLDR_SYSRING_N;
+        mldr_tlogx("ring-rip", (const void *)mldr_sysring[k].rip, (long)mldr_sysring[k].eax);
+        mldr_tlogx("ring-ret", (const void *)mldr_sysring[k].ret, (long)mldr_sysring[k].eax);
+    }
+}
+
 static void
 sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
 {
@@ -3015,6 +3035,17 @@ sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
 
     long ret;
     bool linux_abi_retval = false;
+
+    if (mldr_trap_log_enabled && mldr_trap_log_handlers) {
+        unsigned long k = mldr_sysring_n++ % MLDR_SYSRING_N;
+        mldr_sysring[k].eax = raw_eax;
+        mldr_sysring[k].rip = (unsigned long)mc->mc_rip;
+        mldr_sysring[k].ret = *(const unsigned long *)(uintptr_t)mc->mc_rsp;
+        unsigned int nr = raw_eax & 0x00FFFFFFu;
+        if ((raw_eax & MACOS_BSD_CLASS_MASK) == MACOS_BSD_CLASS &&
+            (nr == 1 || nr == 37 || nr == 521))
+            mldr_sysring_dump("EXIT-SYSCALL", raw_eax, a1);
+    }
 
     if ((raw_eax & MACOS_BSD_CLASS_MASK) == MACOS_BSD_CLASS) {
         /* ── macOS BSD syscall (class 0x02000000) ──────────────────── */
@@ -3202,6 +3233,21 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
          * Restore default disposition and re-raise so the process gets the
          * normal SIGILL termination/core dump. */
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
+        if (mldr_trap_log_enabled && mldr_trap_log_handlers) {
+            /* exit-attribution diagnostic: registers, a stack window and
+             * the recent SIGSYS ring, so the faulting site is attributable. */
+            mldr_tlogx("SIGILL-FAULT rip", pc, (long)mc->mc_rax);
+            mldr_tlogx("SIGILL-FAULT rsp", (const void *)(uintptr_t)mc->mc_rsp, 0);
+            mldr_tlogx("SIGILL-FAULT rbp", (const void *)(uintptr_t)mc->mc_rbp, 0);
+            mldr_tlogx("SIGILL-FAULT rcx", (const void *)(uintptr_t)mc->mc_rcx, 0);
+            mldr_tlogx("SIGILL-FAULT rdi", (const void *)(uintptr_t)mc->mc_rdi, 0);
+            mldr_tlogx("SIGILL-FAULT rsi", (const void *)(uintptr_t)mc->mc_rsi, 0);
+            mldr_tlogx("SIGILL-FAULT rdx", (const void *)(uintptr_t)mc->mc_rdx, 0);
+            for (int sw = 0; sw < 16; sw++)
+                mldr_tlogx("SIGILL-FAULT stack", (const void *)(uintptr_t)
+                           ((const uint64_t *)(uintptr_t)mc->mc_rsp)[sw], sw);
+            mldr_sysring_dump("SIGILL-FAULT sysring", 0, 0);
+        }
         if (mldr_trap_log_enabled && mldr_trap_log_handlers)
             mldr_tlogx("SIGILL RE-RAISE(not-ours)", pc, (long)mc->mc_rax);
         sigaction(signo, &sa_dfl, NULL);
