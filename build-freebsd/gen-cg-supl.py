@@ -10,8 +10,9 @@ are data).
 
 Usage: gen-cg-supl.py <missing.txt> <out.s> [install_name] [overlay_root]
 The bodies are written in assembly, not copied from a provider image. With an
-overlay_root, the export tries of the four provider dylibs are read (see
-SHADOW_PROVIDERS) and a name any of them already defines is not emitted at all.
+overlay_root, the export tries of every dylib libSystem.B.dylib re-exports are
+read and a name any of them already defines is not emitted at all.
+`gen-cg-supl.py --providers <overlay_root>` prints that dylib list.
 The optional install_name (default /usr/lib/supl.dylib) is echoed in the
 header and in the link recipe printed after generation.
 """
@@ -158,31 +159,48 @@ DATA_VALUES = {
 }
 DEF_INSTALL = "/usr/lib/suppl.dylib"
 
-# The four dylibs build-suppl-stubs.sh re-exports from the supplement. The framework
-# binds many imports (mmap, munmap, vm_allocate, getpid, fopen, abort, ...) two-level
-# to the supplement image. dyld looks the name up in the supplement first and follows
-# the re-exports only when the supplement does not define it, so a stub emitted under
-# a name a provider already defines SHADOWS the real function: `_mmap` came back as
-# `xorl %eax,%eax; ret`, i.e. NULL, and the allocator's address-space reservation
-# "failed" without the guest ever issuing the system call. A stub is only right for a
-# name no provider defines.
-SHADOW_PROVIDERS = ("libsystem_c", "libsystem_kernel", "libsystem_m",
-                    "libsystem_platform")
+# The dylibs build-suppl-stubs.sh re-exports from the supplement: every image that
+# libSystem.B.dylib itself re-exports (see closure_providers). The framework binds
+# many imports (mmap, munmap, vm_allocate, getpid, malloc, pthread_*, dispatch_*,
+# fopen, abort, ...) two-level to the supplement image. dyld looks the name up in
+# the supplement first and follows the re-exports only when the supplement does not
+# define it, so a stub emitted under a name a provider already defines SHADOWS the
+# real function: `_mmap` came back as `xorl %eax,%eax; ret`, i.e. NULL, and the
+# allocator's address-space reservation "failed" without the guest ever issuing the
+# system call; `_malloc_get_all_zones` reported success with zero zones. A stub is
+# only right for a name no provider defines.
+
+
+def closure_providers(overlay_root):
+    """Paths of the dylibs libSystem.B.dylib re-exports, in load-command order."""
+    libsys = f"{overlay_root}/usr/lib/libSystem.B.dylib"
+    r = subprocess.run(["llvm-objdump", "--macho", "--dylibs-used", libsys],
+                       capture_output=True, text=True)
+    paths = []
+    for l in r.stdout.splitlines():
+        l = l.strip()
+        if l.endswith("reexport)") and l.startswith("/"):
+            paths.append(overlay_root + l.split(" (")[0])
+    if r.returncode != 0 or not paths:
+        sys.exit(f"gen-cg-supl: cannot read the re-exports of {libsys}")
+    return paths
 
 
 def provider_exports(overlay_root):
-    """Names defined in the export trie of any SHADOW_PROVIDERS dylib."""
+    """Names defined in the export trie of any closure provider."""
     defined = set()
-    for prov in SHADOW_PROVIDERS:
-        path = f"{overlay_root}/usr/lib/system/{prov}.dylib"
+    for path in closure_providers(overlay_root):
         r = subprocess.run(["llvm-objdump", "--macho", "--exports-trie", path],
                            capture_output=True, text=True)
-        got = {l.split()[1] for l in r.stdout.splitlines()
-               if len(l.split()) > 1 and l.split()[0].startswith("0x")}
-        if r.returncode != 0 or not got:
-            sys.exit(f"gen-cg-supl: cannot read exports of {path}")
-        defined |= got
+        defined |= {l.split()[1] for l in r.stdout.splitlines()
+                    if len(l.split()) > 1 and l.split()[0].startswith("0x")}
     return defined
+
+
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--providers":
+    # build-suppl-stubs.sh: print the -reexport_library list, one path per line
+    print("\n".join(closure_providers(sys.argv[2])))
+    sys.exit(0)
 
 
 def explicit_names():

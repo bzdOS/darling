@@ -41,15 +41,19 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
     python3 "${SRC}/build-freebsd/gen-cg-supl.py" \
         "${OUT}/${name}.names.txt" "${OUT}/${name}.s" "$install" "${OVERLAY}"
     clang -target x86_64-apple-macos10.12 -c "${OUT}/${name}.s" -o "${OUT}/${name}.o"
-    # The four providers are re-exported so that the names SKIP_NAMES omits are
+    # The providers are re-exported so that the names the generator omits are
     # still found in this image: the framework's imports are two-level and name
-    # suppl, so dyld looks them up here and follows the re-exports (step 43/2).
+    # suppl, so dyld looks them up here and follows the re-exports.
+    # The re-exported set is every dylib libSystem.B.dylib re-exports: the
+    # generator drops a stub for any name one of them defines, so each of them
+    # must be reachable from here.
+    REEXPORTS=""
+    for prov in $(python3 "${SRC}/build-freebsd/gen-cg-supl.py" --providers "${OVERLAY}"); do
+        REEXPORTS="${REEXPORTS} -reexport_library ${prov}"
+    done
     ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
         -undefined dynamic_lookup \
-        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_c.dylib" \
-        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_kernel.dylib" \
-        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_m.dylib" \
-        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_platform.dylib" \
+        ${REEXPORTS} \
         -install_name "$install" -current_version 0.0.0 \
         -compatibility_version 0.0.0 \
         -o "${OUT}/${name}.dylib" "${OUT}/${name}.o"
