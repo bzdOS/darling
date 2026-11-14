@@ -388,6 +388,48 @@ static socklen_t mldr_sockaddr_linux_to_freebsd(const void *in, socklen_t len,
     return len;
 }
 
+
+/* Ancillary data bridge (SCM_RIGHTS). Linux: struct cmsghdr { size_t len; int
+ * level; int type; } and SOL_SOCKET == 1. FreeBSD: { socklen_t len; int level;
+ * int type; } and SOL_SOCKET == 0xffff. CMSG_LEN is 16 + data in both (the
+ * FreeBSD header is padded to 16) and the data starts at +16 in both, so the
+ * header is rewritten in place. Without this a descriptor that darlingserver
+ * sends (the kqchan reply) arrives as garbage and the guest's kevent64 fails
+ * with EBADF. `to_bsd` selects the direction; a block that does not parse
+ * (length out of range) is left untouched. */
+static void mldr_cmsg_convert(void *ctl, size_t total, int to_bsd)
+{
+    unsigned char *p = (unsigned char *)ctl;
+    size_t off = 0;
+    while (ctl != NULL && off + 16 <= total) {
+        unsigned char *h = p + off;
+        uint64_t len;
+        int level, type;
+        if (to_bsd) {
+            len = *(uint64_t *)h;
+            level = *(int *)(h + 8);
+            type = *(int *)(h + 12);
+        } else {
+            len = *(uint32_t *)h;
+            level = *(int *)(h + 4);
+            type = *(int *)(h + 8);
+        }
+        if (len < 16 || off + len > total)
+            return;
+        if (to_bsd) {
+            *(uint32_t *)h = (uint32_t)len;
+            *(int *)(h + 4) = (level == 1) ? 0xffff : level;
+            *(int *)(h + 8) = type;
+            *(int *)(h + 12) = 0;
+        } else {
+            *(uint64_t *)h = len;
+            *(int *)(h + 8) = (level == 0xffff) ? 1 : level;
+            *(int *)(h + 12) = type;
+        }
+        off += (len + 7) & ~(size_t)7;
+    }
+}
+
 static long
 mldr_open_flags_linux_to_freebsd(long linux_flags)
 {
@@ -1957,7 +1999,10 @@ dispatch_linux_syscall(unsigned int linux_nr,
                     (long)a1, hd[0], hd[1], hd[2], (size_t)mh->msg_iov[0].iov_len);
             fflush(stderr);
         }
+        mldr_cmsg_convert(mh->msg_control, (size_t)mh->msg_controllen, 1);
         long r = freebsd_raw_syscall(SYS_sendmsg, a1, a2, a3, 0, 0, 0);
+        /* sendmsg leaves the control buffer as it was; put the guest's layout back */
+        mldr_cmsg_convert(mh->msg_control, (size_t)mh->msg_controllen, 0);
 
         mh->msg_name = orig_name;
         mh->msg_namelen = orig_namelen;
@@ -1986,6 +2031,17 @@ dispatch_linux_syscall(unsigned int linux_nr,
             mh->msg_namelen = sizeof(native_addr);
         }
 
+        /* The kernel truncates ancillary data to the buffer it is given, and the
+         * server's message carries a credentials cmsg ahead of the SCM_RIGHTS one;
+         * a buffer sized for one descriptor (what the guest passes) then loses the
+         * descriptor. Receive into a larger buffer, keep only SCM_RIGHTS, copy back. */
+        void *orig_ctl = mh->msg_control;
+        socklen_t orig_ctllen = mh->msg_controllen;
+        unsigned char big_ctl[512];
+        if (orig_ctl != NULL && orig_ctllen > 0) {
+            mh->msg_control = big_ctl;
+            mh->msg_controllen = sizeof(big_ctl);
+        }
         if (mldr_trap_log_enabled) {
             fprintf(stderr, "[traplog] recvmsg-enter fd=%ld\n", (long)a1);
             fflush(stderr);
@@ -2000,6 +2056,46 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld\n", (long)a1, r);
             }
             fflush(stderr);
+        }
+
+        if (orig_ctl != NULL && orig_ctllen > 0) {
+            size_t outlen = 0;
+            if (r >= 0) {
+                /* keep only SCM_RIGHTS (Linux would not deliver credentials without
+                 * SO_PASSCRED, and the guest client reads the FIRST cmsg and insists
+                 * it is SCM_RIGHTS), compacting in place */
+                unsigned char *c = big_ctl;
+                size_t total = mh->msg_controllen, off = 0;
+                while (off + 12 <= total) {
+                    unsigned char *h = c + off;
+                    uint32_t len = *(uint32_t *)h;
+                    int level = *(int *)(h + 4), type = *(int *)(h + 8);
+                    if (len < 12 || off + len > total)
+                        break;
+                    size_t step = (len + 7) & ~(size_t)7;
+                    if (level == 0xffff && type == 1 /* SCM_RIGHTS */) {
+                        if (outlen != off)
+                            memmove(c + outlen, h, len);
+                        outlen += step;
+                    }
+                    off += step;
+                }
+                if (outlen > total)
+                    outlen = total;
+                mldr_cmsg_convert(big_ctl, outlen, 0);
+                if (outlen > orig_ctllen)
+                    outlen = orig_ctllen;
+                memcpy(orig_ctl, big_ctl, outlen);
+                if (mldr_trap_log_enabled && outlen >= 20) {
+                    fprintf(stderr, "[traplog] recvmsg-cmsg controllen=%zu len=%llu level=%d type=%d fd0=%d\n",
+                            outlen, (unsigned long long)*(const uint64_t *)big_ctl,
+                            *(const int *)(big_ctl + 8), *(const int *)(big_ctl + 12),
+                            *(const int *)(big_ctl + 16));
+                    fflush(stderr);
+                }
+            }
+            mh->msg_control = orig_ctl;
+            mh->msg_controllen = (socklen_t)outlen;
         }
 
         if (orig_name != NULL && orig_namelen > 0) {
