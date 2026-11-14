@@ -142,6 +142,18 @@ ASM_BODIES = {
     rep stosb
     retq""",
 }
+# Data symbols whose value matters. The generic rules above type a name by its prefix,
+# so these three (no kCG-style prefix) used to come out as `xorl %eax,%eax; ret`, i.e.
+# three bytes of code read as data. The framework reads the 8-byte value at
+# _vm_page_size through a two-level import that names this image, and its page-size
+# check (`cmpq $0x1000` / `cmpq $0x4000`, trap otherwise) saw 0xc331 and hit int3.
+# The real definitions live in libsystem_kernel (__DATA,__common); a constant here is
+# independent of whether that image has run its initialiser.
+DATA_VALUES = {
+    "_vm_page_size": 4096,
+    "_vm_page_mask": 4095,
+    "_vm_page_shift": 12,
+}
 DEF_INSTALL = "/usr/lib/suppl.dylib"
 
 
@@ -161,6 +173,11 @@ def main():
         if name in ASM_BODIES:
             out += [f".text", f".globl {name}", f"{name}:", ASM_BODIES[name]]
             n_body += 1
+            continue
+        if name in DATA_VALUES:
+            out += [f".data", f".p2align 3", f".globl {name}", f"{name}:",
+                    f".quad {DATA_VALUES[name]}"]
+            n_data += 1
             continue
         if name in SKIP_NAMES:
             n_skip += 1
