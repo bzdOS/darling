@@ -353,6 +353,39 @@ static char _sigsys_altstack[SIGSYS_ALTSTACK_SIZE] __attribute__((aligned(16)));
  * sideEffects: none.
  */
 
+/* sockaddr bridge for bind(2) and connect(2). The guest hands over a Linux
+ * layout address (2-byte family, then the payload); FreeBSD wants a 1-byte
+ * length, a 1-byte family and the same payload. Passed through unchanged,
+ * byte 1 (0) is read as the family and the call fails with EAFNOSUPPORT.
+ * Repack AF_UNIX/AF_INET/AF_INET6 (the payload offsets match from byte 2 on)
+ * into `out`; return the length to pass, or 0 if the family is not handled
+ * (the caller then passes the address through as before). */
+static socklen_t mldr_sockaddr_linux_to_freebsd(const void *in, socklen_t len,
+                                                void *out, size_t outsz)
+{
+    const unsigned char *src = (const unsigned char *)in;
+    unsigned char *dst = (unsigned char *)out;
+    unsigned fam;
+    if (in == NULL || len <= 2 || len > outsz - 1)
+        return 0;
+    fam = src[0] | ((unsigned)src[1] << 8);
+    if (fam != 1 /* AF_UNIX */ && fam != 2 /* AF_INET */ && fam != 10 /* AF_INET6 */)
+        return 0;
+    memset(dst, 0, outsz);
+    memcpy(dst + 2, src + 2, len - 2);
+    if (fam == 1) {
+        /* FreeBSD sun_path is 104 bytes; clamp like the sendmsg path does. */
+        socklen_t plen = len - 2;
+        if (plen > 103) plen = 103;
+        dst[0] = (unsigned char)(2 + plen);
+        dst[1] = AF_UNIX;
+        return 2 + plen;
+    }
+    dst[0] = (unsigned char)len;
+    dst[1] = (fam == 2) ? AF_INET : AF_INET6;
+    return len;
+}
+
 static long
 mldr_open_flags_linux_to_freebsd(long linux_flags)
 {
@@ -2499,6 +2532,13 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 ((long)a3 >= 2 && sb != NULL) ? sb[1] : 0,
                 ((long)a3 >= 3 && sb != NULL) ? sb[2] : 0,
                 ((long)a3 >= 4 && sb != NULL) ? sb[3] : 0);
+        {
+            unsigned char native[128];
+            socklen_t nl = mldr_sockaddr_linux_to_freebsd((const void *)(long)a2,
+                                                          (socklen_t)a3, native, sizeof(native));
+            if (nl != 0)
+                return freebsd_raw_syscall(SYS_connect, a1, (long)native, nl, 0, 0, 0);
+        }
         return freebsd_raw_syscall(SYS_connect, a1, a2, a3, 0, 0, 0);
     }
     case LINUX_SYS_bind: {
@@ -2517,6 +2557,13 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 ((long)a3 >= 2 && sb != NULL) ? sb[1] : 0,
                 ((long)a3 >= 3 && sb != NULL) ? sb[2] : 0,
                 ((long)a3 >= 4 && sb != NULL) ? sb[3] : 0);
+        {
+            unsigned char native[128];
+            socklen_t nl = mldr_sockaddr_linux_to_freebsd((const void *)(long)a2,
+                                                          (socklen_t)a3, native, sizeof(native));
+            if (nl != 0)
+                return freebsd_raw_syscall(SYS_bind, a1, (long)native, nl, 0, 0, 0);
+        }
         return freebsd_raw_syscall(SYS_bind, a1, a2, a3, 0, 0, 0);
     }
     case LINUX_SYS_listen:
