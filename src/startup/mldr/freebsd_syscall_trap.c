@@ -1452,6 +1452,63 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
             (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx,
             (unsigned long long)mc->mc_rax);
 
+    /* MLDR_TRAP_STR=rdi|rsi|rdx|rcx: print the NUL-terminated guest string
+     * that register points to (up to 255 bytes, guarded reads). Lets a trap
+     * at a call taking a C string show the argument, which the register
+     * line alone cannot. */
+    {
+        const char *sreg = getenv("MLDR_TRAP_STR");
+
+        if (sreg != NULL) {
+            uint64_t base = 0;
+            char sb[256];
+            int n = 0;
+
+            int deref = 0;
+
+            /* "*reg": the register points to a std::string; show its three
+             * words, then follow the first one (the data pointer when the
+             * string is in its long form). */
+            if (sreg[0] == '*') {
+                deref = 1;
+                sreg++;
+            }
+            if (strcmp(sreg, "rdi") == 0) base = mc->mc_rdi;
+            else if (strcmp(sreg, "rsi") == 0) base = mc->mc_rsi;
+            else if (strcmp(sreg, "rdx") == 0) base = mc->mc_rdx;
+            else if (strcmp(sreg, "rcx") == 0) base = mc->mc_rcx;
+            if (deref && base != 0) {
+                uint64_t sw[3] = {0, 0, 0};
+
+                for (int k = 0; k < 3; k++)
+                    (void)mldr_dump_read_guarded((uintptr_t)base + 8u * k, &sw[k]);
+                fprintf(stderr, "  MLDR_TRAP_STR struct @0x%llx: %016llx %016llx %016llx\n",
+                        (unsigned long long)base, (unsigned long long)sw[0],
+                        (unsigned long long)sw[1], (unsigned long long)sw[2]);
+                base = sw[0];
+            }
+            for (; base != 0 && n < 255; n++) {
+                uint64_t w = 0;
+
+                if (!mldr_dump_read_guarded((uintptr_t)base + (uintptr_t)n, &w)
+                    || (char)w == 0)
+                    break;
+                sb[n] = ((char)w >= 0x20 && (char)w < 0x7f) ? (char)w : '?';
+            }
+            sb[n] = 0;
+            fprintf(stderr, "  MLDR_TRAP_STR %s -> \"%s\" (len %d)\n", sreg, sb, n);
+            fprintf(stderr, "  MLDR_TRAP_STR hex:");
+            for (int k = 0; base != 0 && k < 64; k++) {
+                uint64_t w = 0;
+
+                if (!mldr_dump_read_guarded((uintptr_t)base + (uintptr_t)k, &w))
+                    break;
+                fprintf(stderr, " %02x", (unsigned)(w & 0xff));
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
     /* Control #103/#107: host thr_self names the thread; the TSD id is the one
      * the lock uses (the abort's rdi is exactly this TSD id, #104). */
     fprintf(stderr, "  guest tid = 0x%lx\n", (unsigned long)host_tid);
@@ -3236,6 +3293,60 @@ static void crash_debug_handler(int signo, siginfo_t *info, void *uctx_void);
 #include "crash_dump.h"
 
 /*
+ * purpose:  DARLING_TRAP_LOG diagnostic: for a trapped Linux syscall that takes
+ *           a path, print the path the guest passed ("[traplog] path nr=<n>
+ *           <string>"). The ENTER/LEAVE lines carry the number and result but
+ *           no arguments, so a failing lookup could not be told from a missing
+ *           file. Up to 200 bytes; the read is guarded, so a bad pointer ends
+ *           the string instead of faulting inside the handler.
+ * input:    nr — Linux syscall number; a1, a2 — the first two arguments.
+ * sideEffects: write(2) on stderr when DARLING_TRAP_LOG is set; nothing else.
+ */
+static void
+mldr_path_log(unsigned int nr, long a1, long a2)
+{
+    char buf[256];
+    long path;
+    int o;
+
+    if (!mldr_trap_log_enabled || !mldr_trap_log_handlers)
+        return;
+    switch (nr) {
+    case 2: case 4: case 6: case 21: case 89:       /* open stat lstat access readlink */
+        path = a1;
+        break;
+    case 257: case 262: case 267: case 269:         /* openat newfstatat readlinkat faccessat */
+        path = a2;
+        break;
+    default:
+        return;
+    }
+    memcpy(buf, "[traplog] path nr=", 18);
+    o = 18;
+    {
+        char d[8];
+        int n = 0;
+        unsigned int v = nr;
+
+        do { d[n++] = (char)('0' + v % 10); v /= 10; } while (v != 0 && n < 8);
+        while (n > 0)
+            buf[o++] = d[--n];
+    }
+    buf[o++] = ' ';
+    for (int i = 0; i < 200; i++) {
+        uint64_t w = 0;
+
+        if (!mldr_dump_read_guarded((uintptr_t)path + (uintptr_t)i, &w))
+            break;
+        if ((char)w == 0)
+            break;
+        buf[o++] = ((char)w >= 0x20 && (char)w < 0x7f) ? (char)w : '?';
+    }
+    buf[o++] = '\n';
+    (void)!write(2, buf, (size_t)o);
+}
+
+/*
  * purpose:  SA_SIGINFO SIGILL handler — catches the `ud2` we wrote into
  *           dyld's raw-Linux-syscall trampolines (see
  *           mldr_patch_linux_raw_syscalls) and dispatches them, since the
@@ -3270,6 +3381,8 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
     /* exit-caller logging slice: handler entry with the faulting pc */
     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
         mldr_tlogx("SIGILL ENTER", pc, (long)mc->mc_rax);
+    if (pc[0] == 0x0f && pc[1] == 0x0b)
+        mldr_path_log((unsigned int)mc->mc_rax, (long)mc->mc_rdi, (long)mc->mc_rsi);
 
     if (pc[0] != 0x0f || pc[1] != 0x0b) {
         /* Not one of ours — a genuine illegal instruction elsewhere.
