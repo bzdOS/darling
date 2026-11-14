@@ -14392,3 +14392,892 @@ No run reached a state worth stopping deliberately; no screenshot was taken.
 - Whether the darlingserver busy loop (AL) is a bug of its own or a consequence
   of the stream being out of step.
 - `posix_spawn`'s parent handler has the same wait and was not changed.
+
+## Step 52 — data-as-code check and window
+
+Goal of the step: make "data exported as a code stub" impossible to ship (third
+occurrence after `_vm_page_size` and the OpenDirectory classes), then reach "window
+created". Paths are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`.
+Branch `task/data-as-code`.
+
+Result: **the check and the fix are done and proven; "window created" is not reached.**
+The previous wall (`copy` sent to a block with code bytes as its isa, under
+`addObserverForName:object:queue:usingBlock:`) no longer occurs in any of the nine runs;
+two further walls were passed (below); the run now stops at a deterministic trap in the
+Chrome framework (+0x2e5d832, an `_Unwind_Resume` landing pad), before the Wayland
+backend creates a surface. No `xdg_toplevel`, no `get_tree` entry. The png files in
+`$DARLING_BUILD_DIR/screens/` are grim captures of an empty sway output (all eight have
+the same sha256 `7efdbbfeb59ec43fc9584c5027bfb5a906d7980f68ffa20f617083617c6cf574`);
+they are **not** evidence of a window.
+
+It was not shown which of the fixes removed the `copy` fault; the receiver was never
+identified. What is shown: the run gets past that point with all data typed as data.
+
+### (1) The check
+
+`build-freebsd/check-data-as-code.py` (rules in `build-freebsd/stub_data_rules.py`,
+shared with every generator). A symbol exported from `__TEXT,__text` of a generated stub
+image is an offender if it is really data:
+
+- a: `_OBJC_CLASS_$_*`, `_OBJC_METACLASS_$_*`, `_OBJC_IVAR_$_*`, `_OBJC_EHTYPE_$_*`;
+- b: `_NSConcrete*` / `__NSConcrete*`, the constant prefixes (`_kCG _kCM _kCA _kCV _kCI _kMT
+  _kOD _kSec _kCF ...`), `_vm_page_*`, `_environ` and similar;
+- c: every consuming image that binds the name binds it only through non-lazy pointers
+  (`__got`, `__data`, `__const`, `__objc_*`; a `__stubs` entry or a lazy pointer counts as a
+  call). Chained-fixups images (the Chrome framework) are parsed directly: the fixup
+  chains, the import table, and the `__stubs` slots; opcode-based images go through
+  `llvm-objdump --bind --lazy-bind`;
+- d: a provider dylib on disk (what the stub re-exports or loads, transitively, plus the
+  libSystem re-export closure) defines the same name in a `__DATA*` section;
+- e: the name is in `stub-data-names.txt` (measured data against a consumer earlier; a
+  name that is data in one stub image is data in all of them).
+
+A provider that defines the name in `__TEXT,__text` suppresses a, b, c (a real function
+with an unlucky name). `data-as-code-allow.txt` lists the one measured false positive of
+rule c (`_IOBluetoothPreferenceSetControllerPowerState`, a function bound weakly through
+`__got`). Consumers: the Chrome framework and launcher from `CHROME_APP`, plus every
+overlay image that loads a stub. A consumer names its provider by load path (dyld ignores
+the install id; suppl.dylib and cg-supl.dylib carry each other's names).
+
+Stubs: every Mach-O dylib under `usr/lib` and `System/Library/{Frameworks,PrivateFrameworks}`
+at most 256 KiB whose exported code averages at most 48 bytes per symbol, plus the
+generated wrappers (`*Extras.dylib`, suppl, cg-supl) whatever their size. (The first
+version missed the Extras wrappers: their root classes raise the average. It was
+widened after the first run; the output below is from the final checker run against the
+pre-fix images.)
+
+Wired into the build with `set -e`: `build-suppl-stubs.sh` (classification pass before
+generation, gate on each linked image), `build-opendirectory-stub.sh`, and the new
+`build-stub-data.sh` (stub frameworks and wrappers; `--install` makes the backups and
+runs the gate over the installed state).
+
+Fix, in the generators (not on the installed files):
+
+- `gen-cg-supl.py` (suppl, cg-supl): data names become 64-byte zero objects (the largest
+  constant read is a 24-byte struct); ObjC classes are emitted into `<out>.s.m` as real
+  root classes; a name a provider defines is still dropped, never shadowed (that is how
+  `_NSConcrete*` and the other block isa objects come from libsystem_blocks).
+- `rebuild-stub-data.py` (new): re-emits a stub image from its own export list and load
+  commands, with install name, versions (`n/a` from llvm-otool is 0xffffffff = 65535.255.255
+  and must be kept: the first rebuild wrote 0.0.0 and dyld refused the image), re-exports
+  and dependencies kept. Data as zero objects, classes as real root classes (the
+  OpenDirectory stand-in's way), a name a provider defines as data dropped with a
+  re-export of the provider.
+- `build-extras-objc-classes.py`: did not parse in the tree (a stray unclosed line);
+  fixed, and it no longer turns data into functions.
+- `usr/lib/system/*` is never rewritten (a first attempt rebuilt two real system libraries
+  because they look stub shaped; they were restored from the backups at once).
+
+Commands:
+
+```text
+DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... CHROME_APP=... \
+  python3 build-freebsd/check-data-as-code.py --overlay $DARLING_OVERLAY
+sh build-freebsd/build-suppl-stubs.sh $DARLING_BUILD_DIR/suppl-stubs-dc     # then install with a backup
+sh build-freebsd/build-stub-data.sh --install                               # backups: *.pre-dataascode
+```
+
+### (2) Check output BEFORE the fix (final checker, run against the `*.pre-dataascode` images)
+
+635 offenders in 36 stub images. Full output:
+
+```text
+check-data-as-code: 45 stub images, 13 consumer images, overlay $DARLING_OVERLAY
+  System/Library/Frameworks/AVFAudio.framework/Versions/A/AVFAudio.pre-dataascode
+    OFFENDER _AVSpeechUtteranceDefaultSpeechRate  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVSpeechUtteranceMaximumSpeechRate  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_AVSpeechSynthesisVoice  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_AVSpeechSynthesizer  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_AVSpeechUtterance  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/Accessibility.framework/Versions/A/Accessibility.pre-dataascode
+    OFFENDER _AXPrefersNonBlinkingTextInsertionIndicatorDidChangeNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_AXCustomContent  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork.pre-dataascode
+    OFFENDER _kCFProxyHostNameKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyPortNumberKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeAutoConfigurationJavaScript  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeAutoConfigurationURL  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeHTTP  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeHTTPS  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeNone  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCFProxyTypeSOCKS  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/Carbon.framework/Versions/A/Carbon.pre-dataascode
+    OFFENDER _kTISPropertyInputSourceID  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kTISPropertyUnicodeKeyLayoutData  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreHaptics.framework/Versions/A/CoreHaptics.pre-dataascode
+    OFFENDER _CHHapticDynamicParameterIDHapticIntensityControl  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CHHapticDynamicParameterIDHapticSharpnessControl  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CHHapticEventParameterIDHapticIntensity  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CHHapticEventParameterIDHapticSharpness  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CHHapticEventTypeHapticContinuous  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_CHHapticDynamicParameter  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_CHHapticEvent  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_CHHapticEventParameter  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_CHHapticPattern  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage.pre-dataascode
+    OFFENDER _CIDetectorAccuracy  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CIDetectorAccuracyHigh  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CIDetectorAccuracyLow  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CIDetectorTypeFace  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CIDetectorTypeText  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_CIDetector  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_CIImage  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreLocation.framework/Versions/A/CoreLocation.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_CLLocationManager  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _kCLLocationAccuracyBest  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCLLocationAccuracyHundredMeters  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreMIDI.framework/Versions/A/CoreMIDI.pre-dataascode
+    OFFENDER _kMIDIPropertyDisplayName  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kMIDIPropertyDriverVersion  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kMIDIPropertyManufacturer  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kMIDIPropertyUniqueID  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreML.framework/Versions/A/CoreML.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_MLCPUComputeDevice  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLComputePlan  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLFeatureValue  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLGPUComputeDevice  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLModel  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLModelConfiguration  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLMultiArray  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLNeuralEngineComputeDevice  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _OBJC_CLASS_$_MLPredictionOptions  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia.pre-dataascode
+    OFFENDER _kCMFormatDescriptionColorPrimaries_DCI_P3  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionColorPrimaries_ITU_R_2020  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionColorPrimaries_P3_D65  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionExtension_ContentLightLevelInfo  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionExtension_Depth  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionExtension_FormatName  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionExtension_FullRangeVideo  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionExtension_MasteringDisplayColorVolume  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionTransferFunction_ITU_R_2020  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionTransferFunction_Linear  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionTransferFunction_SMPTE_ST_428_1  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionTransferFunction_sRGB  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMFormatDescriptionYCbCrMatrix_ITU_R_2020  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMSampleAttachmentKey_DisplayImmediately  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMSampleAttachmentKey_IsDependedOnByOthers  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMSampleAttachmentKey_NotSync  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMTimeInvalid  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCMTimeZero  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices.pre-dataascode
+    OFFENDER __kLSOpenOptionBackgroundLaunchKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSQuarantineDataURLKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSQuarantineOriginURLKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSQuarantineTypeKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSQuarantineTypeOtherDownload  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSQuarantineTypeWebDownload  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSSharedFileListItemLast  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSSharedFileListLoginItemHidden  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kLSSharedFileListSessionLoginItems  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kMDItemWhereFroms  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo.pre-dataascode
+    OFFENDER _kCVImageBufferAmbientViewingEnvironmentKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferCleanApertureHeightKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferCleanApertureHorizontalOffsetKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferCleanApertureKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferCleanApertureVerticalOffsetKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferCleanApertureWidthKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimariesKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimaries_DCI_P3  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimaries_EBU_3213  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimaries_ITU_R_2020  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimaries_ITU_R_709_2  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimaries_P3_D65  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferColorPrimaries_SMPTE_C  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferContentLightLevelInfoKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferGammaLevelKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferMasteringDisplayColorVolumeKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunctionKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_ITU_R_2020  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_ITU_R_2100_HLG  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_ITU_R_709_2  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_Linear  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_SMPTE_240M_1995  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_SMPTE_ST_428_1  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_UseGamma  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferTransferFunction_sRGB  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferYCbCrMatrixKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferYCbCrMatrix_ITU_R_2020  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferYCbCrMatrix_ITU_R_601_4  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferYCbCrMatrix_ITU_R_709_2  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVImageBufferYCbCrMatrix_SMPTE_240M_1995  [b: known data name; c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelBufferHeightKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelBufferIOSurfacePropertiesKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelBufferPixelFormatTypeKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelBufferPoolAllocationThresholdKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelBufferWidthKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelFormatComponentRange  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCVPixelFormatComponentRange_FullRange  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CoreWLAN.framework/Versions/A/CoreWLAN.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_CWWiFiClient  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/CryptoTokenKit.framework/Versions/A/CryptoTokenKit.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_TKTokenWatcher  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/DiskArbitration.framework/Versions/A/DiskArbitration.pre-dataascode
+    OFFENDER _kDADiskDescriptionDeviceModelKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionDeviceRevisionKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionDeviceVendorKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionMatchVolumeMountable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionMediaBSDNameKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionMediaRemovableKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionMediaSizeKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionVolumeNameKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionVolumePathKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionVolumeUUIDKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kDADiskDescriptionWatchVolumePath  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/IOBluetooth.framework/Versions/A/IOBluetooth.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_IOBluetoothDevice  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_IOBluetoothDeviceInquiry  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_IOBluetoothHostController  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_IOBluetoothL2CAPChannel  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_IOBluetoothRFCOMMChannel  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_IOBluetoothSDPServiceRecord  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_IOBluetoothSDPUUID  [a: ObjC class/ivar/ehtype symbol]
+  System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface.pre-dataascode
+    OFFENDER _kIOSurfaceAllocSize  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfaceBytesPerElement  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfaceBytesPerRow  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfaceHeight  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePixelFormat  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneBytesPerElement  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneBytesPerRow  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneHeight  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneInfo  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneOffset  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneSize  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfacePlaneWidth  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kIOSurfaceWidth  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/LocalAuthentication.framework/Versions/A/LocalAuthentication.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_LAContext  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework/Versions/A/LocalAuthenticationEmbeddedUI.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_LAAuthenticationView  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/MediaAccessibility.framework/Versions/A/MediaAccessibility.pre-dataascode
+    OFFENDER _kMACaptionAppearanceSettingsChangedNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/Network.framework/Versions/A/Network.pre-dataascode
+    OFFENDER __nw_parameters_configure_protocol_default_configuration  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER __nw_parameters_configure_protocol_disable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/SafariServices.framework/Versions/A/SafariServices.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_SFUniversalLink  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/Security.framework/Versions/A/Security.pre-dataascode
+    OFFENDER _kSecAttrAccessControl  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccessGroup  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccessible  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccessibleAfterFirstUnlock  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccessibleWhenUnlocked  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccessibleWhenUnlockedThisDeviceOnly  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrAccount  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrApplicationLabel  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrApplicationTag  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrCanSign  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrCreationDate  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrIsPermanent  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrKeySizeInBits  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrKeyType  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrKeyTypeECSECPrimeRandom  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrLabel  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrModificationDate  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrService  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrSynchronizable  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrTokenID  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrTokenIDSecureEnclave  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecAttrType  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCFErrorResourceAltered  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCFErrorResourceMissing  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecClass  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecClassCertificate  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecClassGenericPassword  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecClassIdentity  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecClassKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeInfoCertificates  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeInfoFlags  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeInfoMainExecutable  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeInfoPList  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeInfoUnique  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeSignerEntitlements  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeSignerFlags  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecCodeSignerIdentity  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecGuestAttributeAudit  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecGuestAttributeDynamicCode  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecGuestAttributeDynamicCodeInfoPlist  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecGuestAttributePid  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA1  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA256  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA384  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA512  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureMessageX962SHA256  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPSSSHA256  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPSSSHA384  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPSSSHA512  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecKeyAlgorithmRSASignatureRaw  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecMatchLimit  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecMatchLimitAll  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecMatchLimitOne  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecPolicyAppleSSL  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecPolicyOid  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecPrivateKeyAttrs  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecReturnAttributes  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecReturnData  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecReturnRef  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecUseAuthenticationContext  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecUseDataProtectionKeychain  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecValueData  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSecValueRef  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/SecurityInterface.framework/Versions/A/SecurityInterface.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_SFCertificatePanel  [a: ObjC class/ivar/ehtype symbol; c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+  System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications.pre-dataascode
+    OFFENDER _OBJC_CLASS_$_UNMutableNotificationContent  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNNotificationAction  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNNotificationAttachment  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNNotificationCategory  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNNotificationRequest  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNTextInputNotificationAction  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNTextInputNotificationResponse  [a: ObjC class/ivar/ehtype symbol]
+    OFFENDER _OBJC_CLASS_$_UNUserNotificationCenter  [a: ObjC class/ivar/ehtype symbol]
+  System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox.pre-dataascode
+    OFFENDER _kVTCompressionPropertyKey_AllowFrameReordering  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_AverageBitRate  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_BaseLayerFrameRateFraction  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_CalculateMeanSquaredError  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_ColorPrimaries  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_ContentLightLevelInfo  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_EncoderID  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_ExpectedFrameRate  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_HDRMetadataInsertionMode  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_MasteringDisplayColorVolume  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_MaxFrameDelayCount  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_MaxKeyFrameInterval  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_OutputBitDepth  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_PixelTransferProperties  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_ProfileLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_RealTime  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_ReferenceBufferCount  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_TransferFunction  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTCompressionPropertyKey_YCbCrMatrix  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTEncodeFrameOptionKey_BaseFrameQP  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTEncodeFrameOptionKey_ForceKeyFrame  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTHDRMetadataInsertionMode_Auto  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTPixelTransferPropertyKey_ScalingMode  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTProfileLevel_H264_Baseline_AutoLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTProfileLevel_H264_High_AutoLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTProfileLevel_H264_Main_AutoLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTProfileLevel_HEVC_Main10_AutoLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTProfileLevel_HEVC_Main42210_AutoLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTProfileLevel_HEVC_Main_AutoLevel  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTSampleAttachmentKey_QualityMetrics  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTSampleAttachmentQualityMetricsKey_ChromaBlueMeanSquaredError  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTSampleAttachmentQualityMetricsKey_ChromaRedMeanSquaredError  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTScalingMode_CropSourceToCleanAperture  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTVideoEncoderSpecification_EnableLowLatencyRateControl  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/AppKitExtras.dylib.pre-dataascode
+    OFFENDER _NSAccessibilityChildrenInNavigationOrderAttribute  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilityRequiredAttribute  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchCurrentElementKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchDirectionKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchDirectionNext  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchDirectionPrevious  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchIdentifiersKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchResultsLimitKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilitySearchTextKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSAccessibilityTabButtonSubrole  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSTouchBarItemIdentifierCandidateList  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/CoreFoundationExtras.dylib.pre-dataascode
+    OFFENDER _NSURLContentTypeKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER ___NSArray0__struct  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER ___NSDictionary0__struct  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/CoreGraphicsExtras.dylib.pre-dataascode
+    OFFENDER _kCGColorSpaceExtendedLinearITUR_2020  [b: known data name]
+    OFFENDER _kCGColorSpaceITUR_2100_HLG  [b: known data name]
+    OFFENDER _kCGColorSpaceITUR_2100_PQ  [b: known data name]
+    OFFENDER _kCGDisplayStreamColorSpace  [b: known data name]
+    OFFENDER _kCGDisplayStreamDestinationRect  [b: known data name]
+    OFFENDER _kCGDisplayStreamMinimumFrameTime  [b: known data name]
+    OFFENDER _kCGDisplayStreamPreserveAspectRatio  [b: known data name]
+  usr/lib/FoundationExtras.dylib.pre-dataascode
+    OFFENDER _NSCocoaErrorDomain  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSDebugDescriptionErrorKey  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSOSStatusErrorDomain  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSProcessInfoThermalStateDidChangeNotification  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSURLSessionTaskPriorityHigh  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _NSUserActivityTypeBrowsingWeb  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/IOKitExtras.dylib.pre-dataascode
+    OFFENDER _kIOMainPortDefault  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/QuartzCoreExtras.dylib.pre-dataascode
+    OFFENDER _CADynamicRangeHigh  [c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _CADynamicRangeStandard  [c: bound only non-lazily (data/got) by Google Chrome for Testing Framework]
+    OFFENDER _CATransform3DIdentity  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCAFilterLinear  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCAFilterNearest  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCAGravityTopLeft  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCATransactionDisableActions  [b: known data name; c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/UserNotificationsExtras.dylib.pre-dataascode
+    OFFENDER _UNNotificationAttachmentOptionsTypeHintKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UNNotificationDefaultActionIdentifier  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UNNotificationDismissActionIdentifier  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+  usr/lib/cg-supl.dylib.pre-dataascode
+    OFFENDER _NSAccessibilityChildrenInNavigationOrderAttribute  [b: known data name]
+    OFFENDER _NSAccessibilityRequiredAttribute  [b: known data name]
+    OFFENDER _NSAccessibilitySearchCurrentElementKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchDirectionKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchIdentifiersKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchResultsLimitKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchTextKey  [b: known data name]
+    OFFENDER _NSDebugDescriptionErrorKey  [b: known data name]
+    OFFENDER _NSProcessInfoThermalStateDidChangeNotification  [b: known data name]
+    OFFENDER _NSURLContentTypeKey  [b: known data name]
+  usr/lib/darling-extras.dylib.pre-dataascode
+    OFFENDER _NSAccessibilityChildrenInNavigationOrderAttribute  [b: known data name]
+    OFFENDER _NSAccessibilityRequiredAttribute  [b: known data name]
+    OFFENDER _NSAccessibilitySearchCurrentElementKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchDirectionKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchIdentifiersKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchResultsLimitKey  [b: known data name]
+    OFFENDER _NSAccessibilitySearchTextKey  [b: known data name]
+    OFFENDER _NSProcessInfoThermalStateDidChangeNotification  [b: known data name]
+    OFFENDER _NSURLContentTypeKey  [b: known data name]
+    OFFENDER _kCAFilterLinear  [b: known data name]
+    OFFENDER _kCAFilterNearest  [b: known data name]
+    OFFENDER _kCAGravityTopLeft  [b: known data name]
+    OFFENDER _kCATransactionDisableActions  [b: known data name]
+    OFFENDER _kCFProxyHostNameKey  [b: known data name]
+    OFFENDER _kCFProxyPortNumberKey  [b: known data name]
+    OFFENDER _kCFProxyTypeAutoConfigurationJavaScript  [b: known data name]
+    OFFENDER _kCFProxyTypeAutoConfigurationURL  [b: known data name]
+    OFFENDER _kCFProxyTypeHTTP  [b: known data name]
+    OFFENDER _kCFProxyTypeHTTPS  [b: known data name]
+    OFFENDER _kCFProxyTypeKey  [b: known data name]
+    OFFENDER _kCFProxyTypeNone  [b: known data name]
+    OFFENDER _kCFProxyTypeSOCKS  [b: known data name]
+    OFFENDER _kCGColorSpaceExtendedLinearITUR_2020  [b: known data name]
+    OFFENDER _kCGColorSpaceITUR_2100_HLG  [b: known data name]
+    OFFENDER _kCGColorSpaceITUR_2100_PQ  [b: known data name]
+    OFFENDER _kCGDisplayStreamColorSpace  [b: known data name]
+    OFFENDER _kCGDisplayStreamDestinationRect  [b: known data name]
+    OFFENDER _kCGDisplayStreamMinimumFrameTime  [b: known data name]
+    OFFENDER _kCGDisplayStreamPreserveAspectRatio  [b: known data name]
+    OFFENDER _kCMFormatDescriptionColorPrimaries_DCI_P3  [b: known data name]
+    OFFENDER _kCMFormatDescriptionColorPrimaries_ITU_R_2020  [b: known data name]
+    OFFENDER _kCMFormatDescriptionColorPrimaries_P3_D65  [b: known data name]
+    OFFENDER _kCMFormatDescriptionExtension_ContentLightLevelInfo  [b: known data name]
+    OFFENDER _kCMFormatDescriptionExtension_Depth  [b: known data name]
+    OFFENDER _kCMFormatDescriptionExtension_FormatName  [b: known data name]
+    OFFENDER _kCMFormatDescriptionExtension_FullRangeVideo  [b: known data name]
+    OFFENDER _kCMFormatDescriptionExtension_MasteringDisplayColorVolume  [b: known data name]
+    OFFENDER _kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms  [b: known data name]
+    OFFENDER _kCMFormatDescriptionTransferFunction_ITU_R_2020  [b: known data name]
+    OFFENDER _kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG  [b: known data name]
+    OFFENDER _kCMFormatDescriptionTransferFunction_Linear  [b: known data name]
+    OFFENDER _kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ  [b: known data name]
+    OFFENDER _kCMFormatDescriptionTransferFunction_SMPTE_ST_428_1  [b: known data name]
+    OFFENDER _kCMFormatDescriptionTransferFunction_sRGB  [b: known data name]
+    OFFENDER _kCMFormatDescriptionYCbCrMatrix_ITU_R_2020  [b: known data name]
+    OFFENDER _kCMSampleAttachmentKey_DisplayImmediately  [b: known data name]
+    OFFENDER _kCMSampleAttachmentKey_IsDependedOnByOthers  [b: known data name]
+    OFFENDER _kCMSampleAttachmentKey_NotSync  [b: known data name]
+    OFFENDER _kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding  [b: known data name]
+    OFFENDER _kCMTimeInvalid  [b: known data name]
+    OFFENDER _kCMTimeZero  [b: known data name]
+    OFFENDER _kCVImageBufferAmbientViewingEnvironmentKey  [b: known data name]
+    OFFENDER _kCVImageBufferCleanApertureHeightKey  [b: known data name]
+    OFFENDER _kCVImageBufferCleanApertureHorizontalOffsetKey  [b: known data name]
+    OFFENDER _kCVImageBufferCleanApertureKey  [b: known data name]
+    OFFENDER _kCVImageBufferCleanApertureVerticalOffsetKey  [b: known data name]
+    OFFENDER _kCVImageBufferCleanApertureWidthKey  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimariesKey  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimaries_DCI_P3  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimaries_EBU_3213  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimaries_ITU_R_2020  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimaries_ITU_R_709_2  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimaries_P3_D65  [b: known data name]
+    OFFENDER _kCVImageBufferColorPrimaries_SMPTE_C  [b: known data name]
+    OFFENDER _kCVImageBufferContentLightLevelInfoKey  [b: known data name]
+    OFFENDER _kCVImageBufferGammaLevelKey  [b: known data name]
+    OFFENDER _kCVImageBufferMasteringDisplayColorVolumeKey  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunctionKey  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_ITU_R_2020  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_ITU_R_2100_HLG  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_ITU_R_709_2  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_Linear  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_SMPTE_240M_1995  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_SMPTE_ST_428_1  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_UseGamma  [b: known data name]
+    OFFENDER _kCVImageBufferTransferFunction_sRGB  [b: known data name]
+    OFFENDER _kCVImageBufferYCbCrMatrixKey  [b: known data name]
+    OFFENDER _kCVImageBufferYCbCrMatrix_ITU_R_2020  [b: known data name]
+    OFFENDER _kCVImageBufferYCbCrMatrix_ITU_R_601_4  [b: known data name]
+    OFFENDER _kCVImageBufferYCbCrMatrix_ITU_R_709_2  [b: known data name]
+    OFFENDER _kCVImageBufferYCbCrMatrix_SMPTE_240M_1995  [b: known data name]
+    OFFENDER _kCVPixelBufferHeightKey  [b: known data name]
+    OFFENDER _kCVPixelBufferIOSurfacePropertiesKey  [b: known data name]
+    OFFENDER _kCVPixelBufferPixelFormatTypeKey  [b: known data name]
+    OFFENDER _kCVPixelBufferPoolAllocationThresholdKey  [b: known data name]
+    OFFENDER _kCVPixelBufferWidthKey  [b: known data name]
+    OFFENDER _kCVPixelFormatComponentRange  [b: known data name]
+    OFFENDER _kCVPixelFormatComponentRange_FullRange  [b: known data name]
+    OFFENDER _kIOMainPortDefault  [b: known data name]
+    OFFENDER _kIOSurfaceAllocSize  [b: known data name]
+    OFFENDER _kIOSurfaceBytesPerElement  [b: known data name]
+    OFFENDER _kIOSurfaceBytesPerRow  [b: known data name]
+    OFFENDER _kIOSurfaceHeight  [b: known data name]
+    OFFENDER _kIOSurfacePixelFormat  [b: known data name]
+    OFFENDER _kIOSurfacePlaneBytesPerElement  [b: known data name]
+    OFFENDER _kIOSurfacePlaneBytesPerRow  [b: known data name]
+    OFFENDER _kIOSurfacePlaneHeight  [b: known data name]
+    OFFENDER _kIOSurfacePlaneInfo  [b: known data name]
+    OFFENDER _kIOSurfacePlaneOffset  [b: known data name]
+    OFFENDER _kIOSurfacePlaneSize  [b: known data name]
+    OFFENDER _kIOSurfacePlaneWidth  [b: known data name]
+    OFFENDER _kIOSurfaceWidth  [b: known data name]
+    OFFENDER _kLSQuarantineDataURLKey  [b: known data name]
+    OFFENDER _kLSQuarantineOriginURLKey  [b: known data name]
+    OFFENDER _kLSQuarantineTypeKey  [b: known data name]
+    OFFENDER _kLSQuarantineTypeOtherDownload  [b: known data name]
+    OFFENDER _kLSQuarantineTypeWebDownload  [b: known data name]
+    OFFENDER _kLSSharedFileListItemLast  [b: known data name]
+    OFFENDER _kLSSharedFileListLoginItemHidden  [b: known data name]
+    OFFENDER _kLSSharedFileListSessionLoginItems  [b: known data name]
+    OFFENDER _kODAttributeTypeAllAttributes  [b: known data name]
+    OFFENDER _kODAttributeTypeAltSecurityIdentities  [b: known data name]
+    OFFENDER _kODAttributeTypeMetaRecordName  [b: known data name]
+    OFFENDER _kODAttributeTypeRecordName  [b: known data name]
+    OFFENDER _kODRecordTypeUsers  [b: known data name]
+    OFFENDER _kSecAttrAccessControl  [b: known data name]
+    OFFENDER _kSecAttrAccessGroup  [b: known data name]
+    OFFENDER _kSecAttrAccessible  [b: known data name]
+    OFFENDER _kSecAttrAccessibleAfterFirstUnlock  [b: known data name]
+    OFFENDER _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly  [b: known data name]
+    OFFENDER _kSecAttrAccessibleWhenUnlocked  [b: known data name]
+    OFFENDER _kSecAttrAccessibleWhenUnlockedThisDeviceOnly  [b: known data name]
+    OFFENDER _kSecAttrAccount  [b: known data name]
+    OFFENDER _kSecAttrApplicationLabel  [b: known data name]
+    OFFENDER _kSecAttrApplicationTag  [b: known data name]
+    OFFENDER _kSecAttrCanSign  [b: known data name]
+    OFFENDER _kSecAttrCreationDate  [b: known data name]
+    OFFENDER _kSecAttrIsPermanent  [b: known data name]
+    OFFENDER _kSecAttrKeySizeInBits  [b: known data name]
+    OFFENDER _kSecAttrKeyType  [b: known data name]
+    OFFENDER _kSecAttrKeyTypeECSECPrimeRandom  [b: known data name]
+    OFFENDER _kSecAttrLabel  [b: known data name]
+    OFFENDER _kSecAttrModificationDate  [b: known data name]
+    OFFENDER _kSecAttrService  [b: known data name]
+    OFFENDER _kSecAttrSynchronizable  [b: known data name]
+    OFFENDER _kSecAttrTokenID  [b: known data name]
+    OFFENDER _kSecAttrTokenIDSecureEnclave  [b: known data name]
+    OFFENDER _kSecAttrType  [b: known data name]
+    OFFENDER _kSecCFErrorResourceAltered  [b: known data name]
+    OFFENDER _kSecCFErrorResourceMissing  [b: known data name]
+    OFFENDER _kSecClass  [b: known data name]
+    OFFENDER _kSecClassCertificate  [b: known data name]
+    OFFENDER _kSecClassGenericPassword  [b: known data name]
+    OFFENDER _kSecClassIdentity  [b: known data name]
+    OFFENDER _kSecClassKey  [b: known data name]
+    OFFENDER _kSecCodeInfoCertificates  [b: known data name]
+    OFFENDER _kSecCodeInfoFlags  [b: known data name]
+    OFFENDER _kSecCodeInfoMainExecutable  [b: known data name]
+    OFFENDER _kSecCodeInfoPList  [b: known data name]
+    OFFENDER _kSecCodeInfoUnique  [b: known data name]
+    OFFENDER _kSecCodeSignerEntitlements  [b: known data name]
+    OFFENDER _kSecCodeSignerFlags  [b: known data name]
+    OFFENDER _kSecCodeSignerIdentity  [b: known data name]
+    OFFENDER _kSecGuestAttributeAudit  [b: known data name]
+    OFFENDER _kSecGuestAttributeDynamicCode  [b: known data name]
+    OFFENDER _kSecGuestAttributeDynamicCodeInfoPlist  [b: known data name]
+    OFFENDER _kSecGuestAttributePid  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA1  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA256  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA384  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureDigestX962SHA512  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmECDSASignatureMessageX962SHA256  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPSSSHA256  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPSSSHA384  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureDigestPSSSHA512  [b: known data name]
+    OFFENDER _kSecKeyAlgorithmRSASignatureRaw  [b: known data name]
+    OFFENDER _kSecMatchLimit  [b: known data name]
+    OFFENDER _kSecMatchLimitAll  [b: known data name]
+    OFFENDER _kSecMatchLimitOne  [b: known data name]
+    OFFENDER _kSecPolicyAppleSSL  [b: known data name]
+    OFFENDER _kSecPolicyOid  [b: known data name]
+    OFFENDER _kSecPrivateKeyAttrs  [b: known data name]
+    OFFENDER _kSecReturnAttributes  [b: known data name]
+    OFFENDER _kSecReturnData  [b: known data name]
+    OFFENDER _kSecReturnRef  [b: known data name]
+    OFFENDER _kSecUseAuthenticationContext  [b: known data name]
+    OFFENDER _kSecUseDataProtectionKeychain  [b: known data name]
+    OFFENDER _kSecValueData  [b: known data name]
+    OFFENDER _kSecValueRef  [b: known data name]
+  usr/lib/suppl.dylib.pre-dataascode
+    OFFENDER _ASAuthorizationErrorDomain  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _ASAuthorizationPublicKeyCredentialAttestationKindNone  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _ASAuthorizationPublicKeyCredentialUserVerificationPreferenceDiscouraged  [c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _ASAuthorizationPublicKeyCredentialUserVerificationPreferencePreferred  [c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _ASAuthorizationPublicKeyCredentialUserVerificationPreferenceRequired  [c: bound only non-lazily (data) by Google Chrome for Testing Framework]
+    OFFENDER _ASWebAuthenticationSessionErrorDomain  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceTypeBuiltInWideAngleCamera  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceTypeContinuityCamera  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceTypeExternal  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceTypeExternalUnknown  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceTypeMicrophone  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceWasConnectedNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureDeviceWasDisconnectedNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureSessionErrorKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVCaptureSessionRuntimeErrorNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVLayerVideoGravityResize  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVMediaTypeAudio  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVMediaTypeMuxed  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVMediaTypeVideo  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVVideoCodecKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVVideoCodecTypeJPEG  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVVideoScalingModeKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _AVVideoScalingModeResizeAspectFill  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBAdvertisementDataLocalNameKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBAdvertisementDataManufacturerDataKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBAdvertisementDataOverflowServiceUUIDsKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBAdvertisementDataServiceDataKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBAdvertisementDataServiceUUIDsKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBAdvertisementDataTxPowerLevelKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _CBCentralManagerScanOptionAllowDuplicatesKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCControllerDidConnectNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCControllerDidDisconnectNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCHapticDurationInfinite  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCHapticsLocalityDefault  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCHapticsLocalityLeftHandle  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCHapticsLocalityLeftTrigger  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCHapticsLocalityRightHandle  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _GCHapticsLocalityRightTrigger  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPMediaItemPropertyAlbumTitle  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPMediaItemPropertyArtist  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPMediaItemPropertyArtwork  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPMediaItemPropertyPlaybackDuration  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPMediaItemPropertyTitle  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPNowPlayingInfoPropertyCurrentPlaybackDate  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPNowPlayingInfoPropertyElapsedPlaybackTime  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MPNowPlayingInfoPropertyPlaybackRate  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MTLCommonCounterSetTimestamp  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MTLCommonCounterTimestamp  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MTLDeviceRemovalRequestedNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _MTLDeviceWasRemovedNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoBoundingRect  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoContentRect  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoContentScale  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoDirtyRects  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoPresenterOverlayContentRect  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoScaleFactor  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _SCStreamFrameInfoStatus  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTagClassFilenameExtension  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTagClassMIMEType  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeContent  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeHTML  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeImage  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeInternetLocation  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeInternetShortcut  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypePNG  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeSVG  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _UTTypeUTF8PlainText  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyAztec  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode128  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode39  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode39Checksum  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode39FullASCII  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode39FullASCIIChecksum  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode93  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyCode93i  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyDataMatrix  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyEAN13  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyEAN8  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyI2of5  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyI2of5Checksum  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyITF14  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyPDF417  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyQR  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _VNBarcodeSymbologyUPCE  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontCascadeListAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontCollectionRemoveDuplicatesOption  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontDisplayNameAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontFamilyNameAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontFamilyNameKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontFormatAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontManagerRegisteredFontsChangedNotification  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontNameAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontSlantTrait  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontStyleNameAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontSymbolicTrait  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontTraitsAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontVariationAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontVariationAxesAttribute  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontVariationAxisDefaultValueKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontVariationAxisIdentifierKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontVariationAxisMaximumValueKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontVariationAxisMinimumValueKey  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontWeightTrait  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kCTFontWidthTrait  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCDynamicStoreDomainState  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCDynamicStorePropNetPrimaryInterface  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCEntNetIPv4  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCEntNetIPv6  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCEntNetInterface  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesExceptionsList  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesExcludeSimpleHostnames  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesFTPEnable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesFTPPort  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesFTPProxy  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesHTTPEnable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesHTTPPort  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesHTTPProxy  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesHTTPSEnable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesHTTPSPort  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesHTTPSProxy  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesProxyAutoConfigEnable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesProxyAutoConfigURLString  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesProxyAutoDiscoveryEnable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesSOCKSEnable  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesSOCKSPort  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+    OFFENDER _kSCPropNetProxiesSOCKSProxy  [c: bound only non-lazily (got) by Google Chrome for Testing Framework]
+check-data-as-code: FAIL (635 offenders in 36 stub images)
+check rc=1 seconds=4
+```
+
+(An earlier run of a narrower version of the checker on the untouched overlay found 608
+offenders in 32 images; the Extras wrappers were not in its stub set.)
+
+### (3) Check output AFTER the fix (installed overlay)
+
+```text
+check-data-as-code: 60 stub images, 14 consumer images, overlay $DARLING_OVERLAY
+check-data-as-code: OK (0 offenders in 0 stub images)
+check rc=0 seconds=5
+```
+
+`check-suppl-bodies.py` still passes on both suppl images (build-suppl-stubs.sh runs it
+before the data gate; "0 outward", `check-suppl-bodies: OK`).
+
+### (4) md5 proof, built == installed == staged
+
+45 replaced images (each has `<name>.pre-dataascode` next to it), staged copy taken after
+the last run (the harness restages from the overlay at every start). Columns: md5 of the
+installed file; `built` and `staged` were equal to it for all 45 (0 mismatches):
+
+```text
+40bd9a056e72dca5e7bff3e24a28e667 System/Library/Frameworks/AVFAudio.framework/Versions/A/AVFAudio
+7f44c53807868efe5db442a0d115aa36 System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation
+2f04c8ba4ee981c2008d53e5e8f09a02 System/Library/Frameworks/Accessibility.framework/Versions/A/Accessibility
+28524fe271c0c03f3082fdebb5df10bd System/Library/Frameworks/AuthenticationServices.framework/Versions/A/AuthenticationServices
+a3ceb3bce37e14d76e4bbcc56110fbce System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork
+8cc05b35c5b8560a98cdf871b5802ecb System/Library/Frameworks/Carbon.framework/Versions/A/Carbon
+6475fdb4bb862dbb1fa4beb65f083708 System/Library/Frameworks/CoreBluetooth.framework/Versions/A/CoreBluetooth
+f6acd1e80d8d6dc3ad2f80ed81cd21e5 System/Library/Frameworks/CoreHaptics.framework/Versions/A/CoreHaptics
+5877c452c8d94dd1d12c763a8307ba32 System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage
+5b1633e642dc44716cc7cf445b0644a8 System/Library/Frameworks/CoreLocation.framework/Versions/A/CoreLocation
+a4b4ab2f5ec71508464202ebf65c77af System/Library/Frameworks/CoreMIDI.framework/Versions/A/CoreMIDI
+3c911e7a6f113e2133e2319be297d6f8 System/Library/Frameworks/CoreML.framework/Versions/A/CoreML
+064667ff5d9944bce2d708f12a40f2b7 System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia
+f73a6cc33af479d482a90c2f764d0ca4 System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+0074de7b0250f7e48588d9232dec1cf8 System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
+dc942f954ff399dbc97b0e64c2444a78 System/Library/Frameworks/CoreWLAN.framework/Versions/A/CoreWLAN
+84d06ad65b96154eb8b9359c1728ad57 System/Library/Frameworks/CryptoTokenKit.framework/Versions/A/CryptoTokenKit
+da96350950cb1515216a53602e96e446 System/Library/Frameworks/DiskArbitration.framework/Versions/A/DiskArbitration
+cf0c2ad13b5543840f1594e5e8689699 System/Library/Frameworks/GameController.framework/Versions/A/GameController
+695d1544daa84cba2dc2de43ca0a4c79 System/Library/Frameworks/IOBluetooth.framework/Versions/A/IOBluetooth
+8b27abd263fcb46c18dc39f476a3bf08 System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface
+acfda340b5e3e8eb699001b22d218435 System/Library/Frameworks/LocalAuthentication.framework/Versions/A/LocalAuthentication
+54c48513470a2429cfbb333cba543d21 System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework/Versions/A/LocalAuthenticationEmbeddedUI
+8db9c9280002a05ddf0920eac65046e8 System/Library/Frameworks/MediaAccessibility.framework/Versions/A/MediaAccessibility
+493345a5cf88b3b0cb8d72624e3346ea System/Library/Frameworks/MediaPlayer.framework/Versions/A/MediaPlayer
+0b1d5864b291c9dbe38e4b8c7f2b844c System/Library/Frameworks/Metal.framework/Versions/A/Metal
+4b0474c8344da760ed9a59f9778b2ced System/Library/Frameworks/Network.framework/Versions/A/Network
+8d5d1259d3bec520865b5ad0da30d844 System/Library/Frameworks/SafariServices.framework/Versions/A/SafariServices
+8f0816051a5fb3f572ddcbfab661a233 System/Library/Frameworks/Security.framework/Versions/A/Security
+43c24bc5cada671f7b0d958830b887fc System/Library/Frameworks/SecurityInterface.framework/Versions/A/SecurityInterface
+f16b045f70121916232fdd0e5e85b5ea System/Library/Frameworks/UniformTypeIdentifiers.framework/Versions/A/UniformTypeIdentifiers
+91bd074f6f77adbbb6e3c320f3d45faf System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications
+1d1ca7d66e292d10f8bd0b764c0436b6 System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox
+0a5af7f88050f6e8814577686177a966 System/Library/Frameworks/Vision.framework/Versions/A/Vision
+18a366cd8ff76ece4e55529fea1e19b9 usr/lib/AppKitExtras.dylib
+3352c65d8fc8209f55054cc9ef413108 usr/lib/CoreFoundationExtras.dylib
+fad73160cdd5c89caad0ed4202e440fb usr/lib/CoreGraphicsExtras.dylib
+8a6543eba23d76726db1192dfb10d2d0 usr/lib/CoreTextExtras.dylib
+79e931873e67ce4e2cb7b606093a35e8 usr/lib/FoundationExtras.dylib
+8ef25cf7cd1dd773e27ef360d69818b6 usr/lib/IOKitExtras.dylib
+9718fdfde2863bac2686a5febb2b804d usr/lib/QuartzCoreExtras.dylib
+9d90a5dcc4aefae47990c71f8851dae6 usr/lib/UserNotificationsExtras.dylib
+9380e2f2f358ff68f8b19ddaf5e179bb usr/lib/cg-supl.dylib
+f86e5fa64f17a2a7d01fea7876c7920d usr/lib/darling-extras.dylib
+5678796f80a23dd17de5790e82b94e10 usr/lib/suppl.dylib
+files=45 mismatches=0
+```
+
+### (5) Walls passed on the way to the window (each a separate commit)
+
+| wall | evidence | fix |
+| --- | --- | --- |
+| framework refuses the rebuilt wrapper | `Incompatible library version: ... requires version 150.0.0 or later, but CoreFoundationExtras.dylib provides version 0.0.0` (run r1, rc 134) | `rebuild-stub-data.py` keeps 65535.255.255 |
+| `FATAL signal 11 at addr=0x8`, `CFRunLoopAddSource+0x6d`, called from framework +0x2e5cdef | the second argument is `IONotificationPortGetRunLoopSource(NULL)`: the stubs returned 0 for `IORegisterForSystemPower` and for the source (run r2, rc 139) | behaviour source `stub-frameworks/behaviors/IOKitExtras.dylib/iokit-power.c`: registration succeeds, a dummy port, a real never-signalled `CFRunLoopSource` |
+| `Symbol not found: _CFRunLoopSourceCreate ... Expected in: IOKit` | the linker attributes a CoreFoundation symbol to IOKit, which only re-exports it on paper (runs r3, r4) | the behaviour resolves CoreFoundation with `dlsym(RTLD_DEFAULT)` and the image links with `-undefined dynamic_lookup -bind_at_load` |
+
+### (6) Runs
+
+All with `chrome-wl-run.sh` (new `CHROME_LOG_PREFIX=chrome-dc`, logs
+`$DARLING_BUILD_DIR/chrome-dc-<name>.log`), a private mode-0700 runtime directory, own
+headless sway (`WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman`) per run,
+stopped after it, the local page only. No run was stopped deliberately: every rc is the
+program's own exit, none is a timeout.
+
+| run | rc | duration / timeout | note |
+| --- | --- | --- | --- |
+| r1 | 134 | 2 s / 120 s | dylib version refused (0.0.0) |
+| r2 | 139 | 6 s / 120 s | `CFRunLoopAddSource` with a NULL source; `copy` wall not seen; Wayland connect and roundtrip reached |
+| r3 | 134 | 3 s / 120 s | `Symbol not found: _CFRunLoopSourceCreate` |
+| r4 | 134 | 14 s / 120 s | same |
+| r5 | 132 | 3 s / 120 s | past it; silent SIGILL on a thread (not a patched trap; raised from libsystem_kernel after a thread-name prctl), seat capabilities seen, no surface |
+| r6 | 132 | 3 s / 120 s | `--enable-logging=stderr` added, no message |
+| r7 | 139 | 7 s / 150 s | `--single-process --in-process-gpu` tried: dies earlier, silent 139, no Wayland lines |
+| r8 | 133 | 8 s / 150 s | without those flags; SIGTRAP at framework +0x2e5d832 (the instruction after a `_Unwind_Resume` call), chain +0x2e5d345, +0x2e5cf75, +0x3fccdc7, +0x24e3386, +0x4217 |
+| r9 | 133 | 41 s / 150 s | `OBJC_PRINT_EXCEPTIONS` set: same trap, same chain, no exception line printed |
+
+Success fraction (window created): 0 of 9. No "page drawn" attempt.
+
+### (7) Next wall
+
+The trap at framework +0x2e5d832 is deterministic (r8, r9 identical chains). It is the
+`ud2` after `callq _Unwind_Resume` in a cleanup landing pad, so a C++/ObjC exception is in
+flight (or unwinding was entered) and no handler is found; the thrower was not identified
+(the throw site is not in the chain, and `OBJC_PRINT_EXCEPTIONS` printed nothing, so it is
+perhaps not an Objective-C exception). The enclosing function registers a
+`notify_register_dispatch` block, just after the power source of (5). Suggested next
+measurement: log `__cxa_throw`/`objc_exception_throw` callers in mldr or give the
+SIGTRAP handler the callee of `_Unwind_Resume`'s caller. Not attempted: stubs that raise
+`unrecognized selector` for the new root classes (their `+alloc` returns nil).
+
+### (8) Not verified
+
+- Which fix removed the `copy` fault, and what the receiver was.
+- That zero-filled data is *sufficient* for every constant (a NULL `CFStringRef`
+  used as a dictionary key will fail later); `___NSArray0__struct` and
+  `___NSDictionary0__struct` are zero data, not objects with a valid isa.
+- Data-by-name stubs that no consumer binds are only caught through
+  `stub-data-names.txt` and the name rules (rule e), not by evidence.
+- `build-extras-objc-classes.py` was run only on a scratch copy of the wrappers.
+- Rule c treats a function whose address is only taken (`__got`) as data; the allow list
+  has the one such case measured.
+- Anything past the registry roundtrip: surfaces, buffers, `get_tree`, grim of a window.
