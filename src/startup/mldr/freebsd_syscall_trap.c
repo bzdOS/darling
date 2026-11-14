@@ -1907,6 +1907,15 @@ dispatch_linux_syscall(unsigned int linux_nr,
             mh->msg_namelen = fixed_addr.sun_len;
         }
 
+        if (mldr_trap_log_enabled && mh->msg_iov != NULL && mh->msg_iovlen >= 1 &&
+            mh->msg_iov[0].iov_len >= 16) {
+            /* RPC diagnostic: the 16-byte header of a darlingserver call is
+             * {callnum, pid, tid, arch}; print which call this is. */
+            const int *hd = (const int *)mh->msg_iov[0].iov_base;
+            fprintf(stderr, "[traplog] sendmsg fd=%ld callnum=%d pid=%d tid=%d len=%zu\n",
+                    (long)a1, hd[0], hd[1], hd[2], (size_t)mh->msg_iov[0].iov_len);
+            fflush(stderr);
+        }
         long r = freebsd_raw_syscall(SYS_sendmsg, a1, a2, a3, 0, 0, 0);
 
         mh->msg_name = orig_name;
@@ -1936,7 +1945,21 @@ dispatch_linux_syscall(unsigned int linux_nr,
             mh->msg_namelen = sizeof(native_addr);
         }
 
+        if (mldr_trap_log_enabled) {
+            fprintf(stderr, "[traplog] recvmsg-enter fd=%ld\n", (long)a1);
+            fflush(stderr);
+        }
         long r = freebsd_raw_syscall(SYS_recvmsg, a1, a2, a3, 0, 0, 0);
+        if (mldr_trap_log_enabled) {
+            if (r >= 8 && mh->msg_iov != NULL && mh->msg_iovlen >= 1) {
+                const int *hd = (const int *)mh->msg_iov[0].iov_base;
+                fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld replynum=%d code=%d\n",
+                        (long)a1, r, hd[0], hd[1]);
+            } else {
+                fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld\n", (long)a1, r);
+            }
+            fflush(stderr);
+        }
 
         if (orig_name != NULL && orig_namelen > 0) {
             if (r >= 0 && mh->msg_namelen >= offsetof(struct sockaddr_un, sun_path)) {
