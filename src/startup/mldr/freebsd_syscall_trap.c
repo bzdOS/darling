@@ -244,6 +244,7 @@ int mldr_trap_log_handlers = 1;
  * this case used 134 from a table read and a measurement corrected it. */
 #define LINUX_SYS_socketpair    53
 #define LINUX_SYS_sendto        44
+#define LINUX_SYS_shutdown      48
 #define LINUX_SYS_recvfrom      45
 #define LINUX_SYS_sendmsg       46
 #define LINUX_SYS_recvmsg       47
@@ -1971,6 +1972,12 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * numeric values on Linux and FreeBSD (both trace back to 4.4BSD),
          * same as MACOS_SYS_socket above — plain passthrough. */
         return freebsd_raw_syscall(SYS_socket, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_shutdown:
+        /* shutdown(fd, how): SHUT_RD/SHUT_WR/SHUT_RDWR are 0/1/2 on both
+         * Linux and FreeBSD, plain passthrough. Crashpad's child-port
+         * handshake shuts down the read side of its socketpair end and
+         * CHECKs the result. */
+        return freebsd_raw_syscall(SYS_shutdown, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_setsockopt:
         /* SOL_SOCKET and the common SO_ / IPPROTO_TCP option numbers this
          * codebase actually uses also share values with FreeBSD, same
