@@ -261,6 +261,11 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_fdatasync      75
 #define LINUX_SYS_ftruncate      77
 #define LINUX_SYS_mkdirat       258
+#define LINUX_SYS_flock         73
+#define LINUX_SYS_unlinkat      263
+#define LINUX_SYS_renameat      264
+#define LINUX_SYS_symlinkat     266
+#define LINUX_SYS_readlinkat    267
 #define LINUX_SYS_fchmodat      268
 #define LINUX_SYS_statfs        137
 #define LINUX_SYS_fstatfs       138
@@ -347,6 +352,7 @@ static char _sigsys_altstack[SIGSYS_ALTSTACK_SIZE] __attribute__((aligned(16)));
  * output:   the corresponding FreeBSD flag word.
  * sideEffects: none.
  */
+
 static long
 mldr_open_flags_linux_to_freebsd(long linux_flags)
 {
@@ -2180,6 +2186,25 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * permission half coincide — `defaults` needs this to create its
          * preferences directory. */
         return freebsd_raw_syscall(SYS_mkdirat, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_readlinkat:
+        /* readlinkat(dirfd, path, buf, bufsiz): no flags, AT_FDCWD is -100
+         * on both OSes. Chromium's ProcessSingleton and base::realpath need it. */
+        return freebsd_raw_syscall(SYS_readlinkat, a1, a2, a3, a4, 0, 0);
+    case LINUX_SYS_symlinkat:
+        /* symlinkat(target, newdirfd, linkpath): same order and meaning. */
+        return freebsd_raw_syscall(SYS_symlinkat, a1, a2, a3, 0, 0, 0);
+    case LINUX_SYS_renameat:
+        /* renameat(olddirfd, old, newdirfd, new): same order, no flags. */
+        return freebsd_raw_syscall(SYS_renameat, a1, a2, a3, a4, 0, 0);
+    case LINUX_SYS_flock:
+        /* flock(fd, op): LOCK_SH/EX/NB/UN are 1/2/4/8 on both OSes. */
+        return freebsd_raw_syscall(SYS_flock, a1, a2, 0, 0, 0, 0);
+    case LINUX_SYS_unlinkat: {
+        /* unlinkat(dirfd, path, flags): only AT_REMOVEDIR is defined, and its
+         * value differs (Linux 0x200, FreeBSD 0x800). */
+        long freebsd_flags = (a3 & 0x200) ? AT_REMOVEDIR : 0;
+        return freebsd_raw_syscall(SYS_unlinkat, a1, a2, freebsd_flags, 0, 0, 0);
+    }
     case LINUX_SYS_fchmodat: {
         /* The AT_* flag values do NOT coincide: Linux AT_SYMLINK_NOFOLLOW is
          * 0x100 (which is FreeBSD's AT_EACCESS) and FreeBSD's is 0x200 — the
