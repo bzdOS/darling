@@ -17,6 +17,8 @@ really data, by any of these rules:
   c  consumer evidence: every consuming image (a Mach-O that loads the stub)
      binds the symbol only through non-lazy pointers (__got, __data, __const,
      __objc_* ... : no __stubs entry and no lazy pointer calls it)
+  e  the name is listed in stub-data-names.txt: measured to be data against some
+     consumer earlier (a name that is data in one stub image is data in all of them)
   d  a provider dylib on disk (a library the stub re-exports or loads, plus
      the libSystem re-export closure) defines the same name in a __DATA section
 Rules a and b are suppressed when a provider defines the name in __TEXT,__text
@@ -49,7 +51,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stub_data_rules import OBJC, BLOCKS, DATA_NAMES  # noqa: E402
+from stub_data_rules import OBJC, BLOCKS, DATA_NAMES, LISTED  # noqa: E402
 
 MH_MAGIC_64 = 0xFEEDFACF
 LC_SEGMENT_64 = 0x19
@@ -416,6 +418,8 @@ def main():
             if BLOCKS.match(sym) or DATA_NAMES.match(sym):
                 if not OBJC.match(sym):
                     why.append("b: known data name")
+            if sym in LISTED and sym not in allow and not why:
+                why.append("e: listed in stub-data-names.txt (measured data elsewhere)")
             ev = evidence.get((stub, sym))
             if ev and sym not in allow:
                 kinds = set().union(*ev.values())

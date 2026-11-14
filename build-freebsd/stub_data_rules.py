@@ -36,13 +36,27 @@ __objc_empty_cache:
 """
 
 
+def _load_listed():
+    import os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub-data-names.txt")
+    try:
+        return {l.strip() for l in open(path) if l.strip() and not l.startswith("#")}
+    except OSError:
+        return set()
+
+
+# names measured to be data (build-freebsd/stub-data-names.txt): data in every stub image
+LISTED = _load_listed()
+
+
 def is_objc_symbol(name):
     return bool(OBJC.match(name))
 
 
 def is_known_data(name):
     """Rules a and b of check-data-as-code.py."""
-    return bool(OBJC.match(name) or BLOCKS.match(name) or DATA_NAMES.match(name))
+    return bool(OBJC.match(name) or BLOCKS.match(name) or DATA_NAMES.match(name)
+                or name in LISTED)
 
 
 def class_names(names):
