@@ -192,8 +192,16 @@ def provider_exports(overlay_root):
     for path in closure_providers(overlay_root):
         r = subprocess.run(["llvm-objdump", "--macho", "--exports-trie", path],
                            capture_output=True, text=True)
-        defined |= {l.split()[1] for l in r.stdout.splitlines()
-                    if len(l.split()) > 1 and l.split()[0].startswith("0x")}
+        # Two line shapes define a name: "0x<addr> <name>" and, for an alias
+        # the provider re-exports from another image, "[re-export] <name>
+        # (<target> from <image>)". libsystem_c defines _memmove, _memcpy,
+        # _memchr, _memset, _strlen and _strchr only in the second form. Taking
+        # only the first form left a stub (xorl %eax,%eax; ret) shadowing them:
+        # the framework's std::string appends copied nothing.
+        for l in r.stdout.splitlines():
+            f = l.split()
+            if len(f) > 1 and (f[0].startswith("0x") or f[0] == "[re-export]"):
+                defined.add(f[1])
     return defined
 
 
