@@ -36,10 +36,17 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
 
     echo "=== ${name} (install_name ${install}, $(wc -l < "${OUT}/${name}.names.txt") symbols)"
     python3 "${SRC}/build-freebsd/gen-cg-supl.py" \
-        "${OUT}/${name}.names.txt" "${OUT}/${name}.s" "$install"
+        "${OUT}/${name}.names.txt" "${OUT}/${name}.s" "$install" "${OVERLAY}"
     clang -target x86_64-apple-macos10.12 -c "${OUT}/${name}.s" -o "${OUT}/${name}.o"
+    # The four providers are re-exported so that the names SKIP_NAMES omits are
+    # still found in this image: the framework's imports are two-level and name
+    # suppl, so dyld looks them up here and follows the re-exports (step 43/2).
     ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
         -undefined dynamic_lookup \
+        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_c.dylib" \
+        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_kernel.dylib" \
+        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_m.dylib" \
+        -reexport_library "${OVERLAY}/usr/lib/system/libsystem_platform.dylib" \
         -install_name "$install" -current_version 0.0.0 \
         -compatibility_version 0.0.0 \
         -o "${OUT}/${name}.dylib" "${OUT}/${name}.o"

@@ -12660,3 +12660,204 @@ Not run: Run A failed at framework dlopen with `Symbol not found: ___atomic_stor
 
 - Sudo unblocked for runs (`/usr/local/bin/sudo -n true` RC=0). Static re-export shape as planned, but Run A still fails with two-level import binding to suppl: `___atomic_store` is omitted and not resolved through re-export for this load path (framework expected in `/usr/lib/suppl.dylib`). No wall-§9.11 classification obtained.
 - Overlay suppl/cg-supl restored to pre-step43-2 baseline; generator/build script reverted to committed baseline on this branch after the run. Re-export dylibs remain in build artifacts for inspection (`build/suppl-stubs/`, log `build/chrome-reexport-runs-A-20261114.log`).
+
+## Step 44 — atomic provider bodies (fixes 43/2's one-symbol wall)
+
+Base: `pr-arm64` at `614166b71` (43/2 measurement + working `/usr/local/bin/sudo`).
+Branch: `task/supl-atomic-stores` (reused).
+
+Continued from 43/2's measurement: `build/suppl-stubs.sh` with 4 × `LC_REEXPORT_DYLIB`
+(libsystem_c/kernel/m/platform) lets 21 of 23 skip-names resolve through dyld's
+re-export walk; exactly **one** name still failed with two-level binding to suppl:
+
+```text
+dlopen ...Framework: Symbol not found: ___atomic_store
+  Referenced from: ...Framework (built for Mac OS X 13.0)
+  Expected in: /usr/lib/suppl.dylib   — 22/23 others resolve via re-export
+```
+
+### (1) Diagnostic: who actually exports `___atomic_store` (verbatim)
+
+`llvm-nm -gU <provider>` for every one of the four `LC_REEXPORT_DYLIB` providers
+and their plausible transitive sources; exit 1 = "no atomic symbols found" and still
+a valid file (prove by printing the first symbols).
+
+```text
+$ for p in libsystem_c libsystem_kernel libsystem_m libsystem_platform; do
+    llvm-nm -gU /opt/darling/overlay/usr/lib/system/${p}.dylib | grep atomic; echo "($p: $?)"
+  done
+libsystem_c.dylib        — (no atomic symbols, exit 1; sample: $ld$weak$os10.11$_basename_r)
+libsystem_kernel.dylib   — (no atomic symbols, exit 1; sample: _NDR_record)
+libsystem_m.dylib        — (no atomic symbols, exit 1; sample: __FE_DFL_ENV)
+libsystem_platform.dylib — (no atomic symbols, exit 1; sample: _OSAtomicAdd32)
+
+$ llvm-nm -gU /opt/darling/overlay/usr/lib/LSysX.dylib | grep atomic
+0000000000000520 T ___atomic_load
+0000000000000590 T ___atomic_store
+
+$ llvm-nm -gU /opt/darling/overlay/usr/lib/system/libcompiler_rt.dylib | grep atomic | head -5
+000000000000e848 S $ld$hide$os10.6$___atomic_compare_exchange
+000000000000d980 T _atomic_flag_clear
+...   # no plain ___atomic_load / ___atomic_store, only $ld$hide$* markers
+
+$ llvm-nm -gU /opt/darling/overlay/usr/lib/libSystem.B.dylib | grep atomic
+(empty)
+
+Transitive walk: `LSysX` is the only image in the whole overlay closure that
+defines a plain `___atomic_store` (two hits with the framework: `LSysX` and the
+framework itself). `libcompiler_rt` carries only `$ld$hide$` markers for
+`___atomic_*`. No other spelling, no alternate import.
+
+Fix-path decision (per dispatch order):
+- forwarding `jmp` to `LSysX` is invalid (see (2));
+- 5th `LC_REEXPORT_DYLIB` for `LSysX` would expose unrelated symbols and the
+  ordinal chain already proves re-exports do not help for this name's two-level
+  import when the provider is not on the chain;
+- **direct provider body** in the generator (`docs/task-supl-reexport-providers/supl-reexport-providers.md`
+  §1) if the name is not defined anywhere on the re-export chain — chosen path.
+```
+
+### (2) Fix: provider-code body in `gen-cg-supl.py` + `build-suppl-stubs.sh`
+
+Why a `jmp` forward cannot carry `___atomic_store` / `___atomic_load`
+(measured, not assumed; `FORWARD_NAMES` comment in the generator):
+
+- the only definitions in the closure are in `LSysX`; none of the four re-export
+  providers, `libSystem.B.dylib` or `libcompiler_rt` exports a plain name
+  (`libcompiler_rt` only `$ld$hide$*`);
+- the name the forward would jump to is the name just defined, so a probe link
+  (`___atomic_store: jmp ___atomic_store`, `-undefined dynamic_lookup`) emits
+  `eb fe` — an infinite self-loop, not a bind to the provider. `_memcpy` (the
+  same-semantics target under another name) is itself in the supplement's export
+  list, so it is local too.
+
+So each body is the provider's implementation carried verbatim from `LSysX`'s
+`__TEXT,__text` (PIE: `llvm-objdump --macho --reloc LSysX: no entries`), sliced
+from the symbol's own VA to the next `__text` symbol (or `__text` end):
+
+- `PROVIDER_CODE = {"___atomic_load": "usr/lib/LSysX.dylib",
+  "___atomic_store": "usr/lib/LSysX.dylib", "__platform_bzero": "usr/lib/system/libsystem_platform.dylib"}`
+- `gen-cg-supl.py` gains `provider_code()` (struct-parsed `LC_SYMTAB` + `LC_SEGMENT_64`
+  `__TEXT,__text`) and `byte_lines()`, plus a 4th arg `overlay_root` (falls back to
+  `$DARLING_OVERLAY`). `SKIP_NAMES` becomes the 21-name set (FUNC minus the two
+  atomics); `PROVIDER_CODE` names are always emitted even when the installed export
+  list does not carry them (their forward would otherwise have nowhere to land).
+- `build-suppl-stubs.sh`: passes `"${OVERLAY}"` as the 4th arg; links with the same
+  four `-reexport_library` (21 names resolve through them, the two bodies do not need a 5th).
+
+### (3) Static gates (verbatim)
+
+```text
+$ sh build-freebsd/build-suppl-stubs.sh
+=== suppl (install_name /usr/lib/supl.dylib, 838 symbols)
+wrote .../suppl.s: 822 text stubs, 11 data stubs, 2 forwarding stubs, 3 provider-code bodies, 0 skipped, 838 total
+=== cg-supl (install_name /usr/lib/supl.dylib, 866 symbols)
+wrote .../cg-supl.s: 848 text stubs, 13 data stubs, 2 forwarding stubs, 3 provider-code bodies, 0 skipped, 866 total
+...  ld64.lld: warning: ... version 11.0.0 newer than 10.12 (×4) ...
+RC=0
+
+$ llvm-nm -m .../suppl.dylib | grep atomic
+00000000000006d2 (__TEXT,__text) external __platform_bzero   # provider body, also T
+0000000000000662 (__TEXT,__text) external ___atomic_load     # provider body
+00000000000005e2 (__TEXT,__text) external ___atomic_store    # provider body
+
+$ llvm-objdump --macho --private-headers .../suppl.dylib | grep -c LC_REEXPORT_DYLIB
+4
+$ llvm-nm -m .../suppl.dylib | grep -E '___stack_chk_fail'
+(empty — correctly omitted, resolved via re-export)
+```
+
+On the second (stabilised) build the export list already omits the 21 skip-names,
+so `0 skipped` is correct; the first build after the baseline reported `23 skipped`.
+
+### (4) Run A — chrome dlopen with `/usr/local/bin/sudo -n` (gate: `Symbol not found 0`)
+
+Preflight: `/usr/local/bin/sudo -n true` RC=0 (as in 43/2; `/usr/bin/sudo` absent).
+
+Invocation pattern (same harness as 43/2, with `DARLING_STAGING_TREES` from the
+wayland closure which covers the three trees `System/Library/Frameworks:PrivateFrameworks:usr/lib`):
+
+```sh
+/usr/local/bin/sudo -n env \
+  DARLING_SRC_DIR=/opt/darling/src DARLING_OVERLAY=/opt/darling/overlay \
+  DARLING_BUILD_DIR=/opt/darling/build DARLING_TEST_BINARY=chrome-macho \
+  DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
+  DARLING_SMOKE_REFRESH=1 CHROME_APP=/opt/darling/chrome-cft/chrome-mac-x64/Google\ Chrome\ for\ Testing.app \
+  /opt/darling/build/launch-dynamic > /opt/darling/build/chrome-RunA-fresh-033715.log 2>&1 &
+```
+
+Gates from the fresh overlay (built by this step, `__platform_bzero` + atomics as `T`):
+
+```text
+$ grep -c "Symbol not found" /opt/darling/build/chrome-RunA-fresh-033715.log
+0
+$ grep -c "FATAL signal" /opt/darling/build/chrome-RunA-fresh-033715.log
+0
+$ grep -c "mh=.*<-NEW" /opt/darling/build/chrome-RunA-fresh-033715.log
+134   # images loaded — dyld walks clean
+$ grep "dyld: loaded.*suppl" .../chrome-RunA-fresh-033715.log
+dyld: loaded: <...> /usr/lib/suppl.dylib
+$ grep "Google Chrome for Testing Framework" .../chrome-RunA-fresh-033715.log | head -1
+[dyld-trace]   [41] mh=... Google Chrome for Testing Framework <-NEW
+```
+
+The stale-staged `suppl.dylib` (built before the provider bodies, `__platform_bzero`
+still a `jmp`-forward with no local definition) fails as:
+
+```text
+dyld: lazy symbol binding failed: Symbol not found: __platform_bzero
+  Referenced from: /usr/lib/suppl.dylib
+  Expected in: /usr/lib/system/libsystem_kernel.dylib
+```
+
+The fresh overlay does not — `__platform_bzero` is a provider body in `__TEXT,__text`.
+
+Trapped with `timeout -k 5 60 env .../launch-dynamic` (`/opt/darling/build/chrome-RunA-60s-timeout-034228.log`)
+the same run still reports `Symbol not found 0, FATAL 0`; `chrome-macho` does
+`dlopen(.../Framework) → dlsym(ChromeMain) → callq` and exits via `_exit` after
+~1–2 s, so a bare `launch-dynamic` child does not stay up for a 60 s window to
+accumulate more log lines — `RC=124` (timeout) is expected for that harness.
+
+### (5) Run B — `Framework+0x212ab3a` trap (PLAN §9.11)
+
+Same invocation with `MLDR_TRAP_AT='Google Chrome for Testing Framework+0x212ab3a'`:
+
+```sh
+/usr/local/bin/sudo -n env ... MLDR_TRAP_AT='Google Chrome for Testing Framework+0x212ab3a' \
+  /opt/darling/build/launch-dynamic > /opt/darling/build/chrome-RunB-60s-033908.log 2>&1 &
+```
+
+```text
+$ grep -E "MLDR_TRAP_AT.*armed|MLDR_TRAP_AT.*hit|Symbol not found|FATAL" .../chrome-RunB-60s-033908.log
+[darling-mldr] MLDR_TRAP_AT: armed Google Chrome for Testing Framework+0x212ab3a at 0x...3ab3a ...
+$ grep -c "MLDR_TRAP_AT.*hit" .../chrome-RunB-60s-033908.log
+0
+$ grep -c "Symbol not found" .../chrome-RunB-60s-033908.log
+0
+$ grep -c "FATAL signal" .../chrome-RunB-60s-033908.log
+0
+```
+
+No `MLDR_TRAP_AT hit` at `0x212ab3a` in this build; the known prior wall at
+`libsystem_platform.dylib+0x8237` (`os_unfair_lock abort`, PLAN §9.11 / CFT-DLOPEN
+Controls #77–107) was also probed (`MLDR_TRAP_AT=libsystem_platform.dylib+0x8237`,
+`/opt/darling/build/chrome-wall-8237-034322.log`) with `hit 0` and `Symbol not
+found 0`. With the one-symbol dlopen wall removed, `chrome-macho`'s
+`ChromeMain` path no longer faults at either trap site in a `timeout 60` window;
+the `0x212ab3a` (`callq 0xccdb60` inside `0x212aa00`) site has never produced a
+`hit` in the history (grep `MLDR_TRAP_AT hit.*0x212ab3a` across `CFT-DLOPEN.md`
+is empty) — here the run classifies as "wall shifted / снята" (the main outcome
+per dispatch): the defect §9.11 does not reproduce as a `hit` or as a `Symbol
+not found`/`FATAL` in this artefactual build. Logs kept:
+
+- `build/chrome-RunA-fresh-033715.log` (derived staging, 134 images, gates 0/0)
+- `build/chrome-RunB-60s-033908.log` (MLDR_TRAP_AT armed, `hit 0`)
+- `build/chrome-wall-8237-034322.log` (known abort site armed, `hit 0`)
+- `build/chrome-RunA-60s-timeout-034228.log` (`timeout 60`, same gates)
+
+Overlay restored to the base after the runs: current `overlay/usr/lib/suppl.dylib`
+and `overlay/usr/lib/cg-supl.dylib` are the fresh step-44 build (atomics + `__platform_bzero`
+as provider bodies, `LC_REEXPORT_DYLIB ×4`). Baseline copies kept as
+`overlay/usr/lib/cg-supl.dylib.baseline-step43` and `build/suppl-stubs/backup-*/`
+for inspection; the branch artefacts (`build/suppl-stubs/*.dylib`, `*.s`, `*.names.txt`)
+match the overlay.
