@@ -12998,3 +12998,239 @@ what `ChromeMain` does next (the first WindowServer call is further on).
 - The fix itself (no re-run with a corrected `__platform_bzero`).
 - That nothing else faults behind this call; only the first fault is known.
 - Whether any exit path exists after the fix; this run never reached one.
+
+## Step 46 — pc-relative body fix
+
+Question: step 45 attributed the guest's death to a rel32 `callq` inside a
+verbatim-copied provider body (`__platform_bzero`, and the same defect in
+`___atomic_load` / `___atomic_store`). Fix the generator for the whole class,
+fail the build on any recurrence, re-run, and say what the guest does next.
+
+Paths below are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`.
+Branch `task/suppl-pcrel-fix`, from the step-45 commit.
+
+### (1) Generator change
+
+`build-freebsd/gen-cg-supl.py` no longer copies machine code out of a provider
+image. The three bodies are assembly in the generator (`ASM_BODIES`):
+
+- `__platform_bzero`: `movq %rsi,%rcx; xorl %eax,%eax; rep stosb; retq`
+- `___atomic_load` / `___atomic_store`: compare-chain for sizes 1/2/4/8, any
+  other size `rep movsb`, `mfence` on every path. No jump table, no call.
+
+Shipping the bodies first with an import (`jmp __platform_memset`,
+`callq __platform_memmove`) was tried and rejected by a run (run A below):
+the linker attributes the import to one of the four re-exported providers and
+dyld answered `Symbol not found: __platform_memset ... Expected in:
+/usr/lib/system/libsystem_kernel.dylib`. The self-contained form needs no
+import at all, so the result does not depend on the re-export walk.
+
+### (2) The check
+
+`build-freebsd/check-suppl-bodies.py <dylib>...` disassembles every `__text`
+symbol of a linked image (`llvm-objdump --macho -d`), takes the range from the
+symbol to the next symbol, resolves every direct call/jmp/jcc target and every
+`disp(%rip)` operand, and fails if the target is outside the body. Allowed
+outward targets: the linker's own `__stubs`/`__stub_helper`/`__got`/
+`__la_symbol_ptr`, and the generator's two forwarding stubs (`___bzero ->
+_bzero`, `_bzero -> __platform_bzero`). `build-suppl-stubs.sh` runs it after
+each link, under `set -e`, so an outward reference fails the build.
+
+New dylibs (the build's own output, `$DARLING_BUILD_DIR` shortened):
+
+```text
+$DARLING_BUILD_DIR/suppl-stubs/suppl.dylib: 825 bodies, 1702 insns, 16 pc-relative refs, 0 outward
+check-suppl-bodies: OK
+$DARLING_BUILD_DIR/suppl-stubs/cg-supl.dylib: 851 bodies, 1754 insns, 16 pc-relative refs, 0 outward
+check-suppl-bodies: OK
+```
+
+Negative control, on the step-44 images (md5 `ee6bb154...` / `a9bee367...`,
+kept as `*.baseline-step45`):
+
+```text
+step44-suppl.dylib: 828 bodies, 1744 insns, 18 pc-relative refs, 6 outward
+  OUTWARD ___atomic_store+0x48: 'callq\t0x6de' -> 0x6de (body 0x5e2..0x662, lands in mid-symbol/unknown)
+  OUTWARD ___atomic_store+0x5c: 'callq\t0xffffffffd3000642' -> ...   (jump-table bytes read as code)
+  OUTWARD ___atomic_store+0x64: 'callq\t0xffffffffe900064a' -> ...   (jump-table bytes read as code)
+  OUTWARD ___atomic_store+0x6c: 'callq\t0xffffffffe1000652' -> ...   (jump-table bytes read as code)
+  OUTWARD ___atomic_load+0x42: 'callq\t0x7ce' -> 0x7ce (body 0x662..0x6d2, lands in mid-symbol/unknown)
+  OUTWARD __platform_bzero+0x1a: 'callq\t0x682' -> 0x682 (body 0x6d2..0x702, lands in mid-symbol/unknown)
+step44-cg-supl.dylib: 854 bodies, 1796 insns, 18 pc-relative refs, 6 outward
+  (same six, at 0x76a / 0x6a6 targets)
+check-suppl-bodies: FAIL        # exit status 1
+```
+
+Three of the six hits are the atomics' jump table decoded as instructions; they
+do not matter, the three real ones are the three the step-45 text named.
+
+Fixed bodies (suppl.dylib):
+
+```text
+___atomic_load:   ... 764: movslq %edi,%rcx ; 76a: rep movsb (%rsi),%es:(%rdi) ; 76c: mfence ; 770: retq
+___atomic_store:  ... 71f: movslq %edi,%rcx ; 728: rep movsb (%rsi),%es:(%rdi) ; 72a: mfence ; 72e: retq
+__platform_bzero: 7a9: movq %rsi,%rcx ; 7ac: xorl %eax,%eax ; 7ae: rep stosb ; 7b0: retq
+```
+
+### (3) Which dylib the guest loads
+
+The harness runs `cleanup()` on every start, which `rm -rf`s the local overlay
+(`/tmp/darling-local-overlay`) before staging, so `DARLING_SMOKE_REFRESH` is not
+needed for a new `usr/lib` file to be picked up. Measured, with the new dylibs
+installed in `$DARLING_OVERLAY/usr/lib` and the old ones still sitting in the
+staged tree from the previous run:
+
+```text
+before the run (stale stage)  staged suppl.dylib      ee6bb1548e2ff5ff43c5043b7f910ca6  (53072 bytes)
+during the run (restaged,     staged suppl.dylib      348680c7c3c65de06c38c85e71f7e332  (57416 bytes)
+ run A, no REFRESH)           overlay suppl.dylib     348680c7c3c65de06c38c85e71f7e332
+                              staged cg-supl.dylib    f5ed7202299d8e288975af901ebae3a5
+                              overlay cg-supl.dylib   f5ed7202299d8e288975af901ebae3a5
+```
+
+(Those are the run-A images. The final images are in (6).) Restaging takes
+the same ~7-27 minutes as with REFRESH here, because the whole local overlay is
+removed and copied again either way.
+
+### (4) Runs
+
+Wrapper (same shape as step 45, without `DARLING_SMOKE_REFRESH`; the exit code
+and `date +%s` before/after are appended to the log):
+
+```sh
+/usr/local/bin/sudo -n env DARLING_SRC_DIR=$DARLING_SRC_DIR DARLING_OVERLAY=$DARLING_OVERLAY \
+  DARLING_BUILD_DIR=$DARLING_BUILD_DIR DARLING_TEST_BINARY=chrome-macho \
+  DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
+  DARLING_TRAP_LOG=1 CHROME_APP=<chrome-for-testing-dir>/chrome-mac-x64/"Google Chrome for Testing.app" \
+  timeout --foreground -k 5 $TO $DARLING_BUILD_DIR/launch-dynamic >> $LOG 2>&1
+echo WRAPPER_RC=$? >> $LOG
+```
+
+| run | log (`$DARLING_BUILD_DIR/`) | images | WRAPPER_RC | duration | timeout |
+| --- | --- | --- | --- | --- | --- |
+| A | `chrome-pcrel-A-norefresh.log` | bodies with imported memset/memmove | 132 | 1617 s | 2400 s |
+| B | `chrome-pcrel-B-selfcontained.log` | self-contained bodies | 133 | 397 s | 3600 s |
+| C | `chrome-pcrel-C-vmpage.log` | + `_vm_page_*` data (see (5)) | 133 | 1935 s | 3600 s |
+
+Durations include staging (the long ones are disk-bound; no run was cut off by
+its timeout). All three reached `ChromeMain`; the step-45 SIGILL is gone in B and C.
+
+Run A, verbatim end of log:
+
+```text
+abort_with_payload: reason: Symbol not found: __platform_memset
+  Referenced from: /usr/lib/suppl.dylib
+  Expected in: /usr/lib/system/libsystem_kernel.dylib
+; code: 4
+WRAPPER_RC=132
+```
+
+Run B, verbatim end of log:
+
+```text
+[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest handler=0x15b18bb9c2a0 (linux_signo=5) rip=0x15b18da72e43 si_code=1 si_addr=0x15b18da72e43
+[darling-mldr] SIGTRAP-AUDIT: rt_sigaction(5) from 0x2236fa <unknown> old=0x15b18bb9c2a0 new=0x0
+WRAPPER_RC=133
+```
+
+The framework image base is `0x15b18c210000`, so rip = Framework + `0x1862e43`
+(the byte after an `int3`). The code is the head of a function that loads a
+global through the GOT and checks it:
+
+```text
+1862837: movq 0xd9408da(%rip),%rax     ; GOT slot -> _vm_page_size
+186283e: movq (%rax),%rax
+1862841: cmpq $0x1000,%rax ; je ok
+1862849: cmpq $0x4000,%rax ; jne 0x1862e42        ; 1862e42: int3 ; ud2
+```
+
+### (5) Second fix, same class: `_vm_page_size` was code, not data
+
+`llvm-nm -m` on the step-44 `suppl.dylib`: `_vm_page_size`, `_vm_page_mask`,
+`_vm_page_shift` were `(__TEXT,__text)`, i.e. the generic rule typed them as the
+`xorl %eax,%eax; ret` stub (bytes `31 c0 c3`). The framework binds the symbol
+two-level to this image, so `cmpq $0x1000` compared against `0x...c331`. The real
+definitions are in libsystem_kernel (`__DATA,__common`). The generator now has
+`DATA_VALUES` and emits them as 8-byte data (4096 / 4095 / 12):
+
+```text
+0000000000001068 (__DATA,__data) external _vm_page_size      # suppl.dylib
+```
+
+This is the one extra fix allowed for this step; it is a separate commit. Other
+names with the same defect probably remain (see (7)).
+
+### (6) Next stop (run C), and the display question
+
+Run C, verbatim end of log, md5 of the images at that point
+(`suppl.dylib` `efafb09c17fe1a4438c7fd8276469ee5`, `cg-supl.dylib`
+`98754386217dc7eec6984b0e641d7691`; staged and overlay copies compared before
+the run):
+
+```text
+[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest handler=0xdacf859c2a0 (linux_signo=5) rip=0xdad021e07c1 si_code=1 si_addr=0xdad021e07c1
+[darling-mldr] SIGTRAP-AUDIT: rt_sigaction(5) from 0x2236fa <unknown> old=0xdacf859c2a0 new=0x0
+WRAPPER_RC=133
+```
+
+Framework base `0xdacf8c10000`, so rip = Framework + `0x95d07c1`, again after an
+`int3` (a Chromium `IMMEDIATE_CRASH`, not a Darling fault). There is no
+`EXIT-SYSCALL`, no `FATAL signal`, no `Symbol not found`, and no
+`[pid:...:ERROR:...]` line. The function:
+
+```text
+95d0780: ... movl $0x3f,(%rdi) ; callq 0x6610 (empty function: base::debug::Alias)
+         callq 0x95d0760 ; ... "error" crash key ... ; callq 0x6610
+95d07c0: int3 ; ud2
+```
+
+Its only caller is at Framework + `0x18633e3`, in a routine at `0x1863180` that
+reserves address space:
+
+```text
+1863267: movabsq $0x800000000,%rdx          ; 32 GiB
+1863271: xorl %edi,%edi ; movq %rdx,%rsi ; xorl %ecx,%ecx ; xorl %r8d,%r8d ; movl $0xfd,%r9d
+1863281: callq 0x16e3f60                    ; page-allocator wrapper around mmap (tag 0xfd, fd -1 on the stack)
+186328d: testq %rax,%rax ; je 0x18633e3     ; 18633e3: callq 0x95d0780 ; int3
+```
+
+Classification: a Chromium fatal in the allocator's address-space reservation
+(a 32 GiB, then a second `0x400000000`, `PROT_NONE` mapping returned NULL).
+Hypothesis, not verified in the guest: the tagged `mmap` (Darwin passes the VM
+tag in the `fd` argument) is forwarded with the tag intact. A native check on
+the same VM: `mmap(0, 32 GiB, PROT_NONE, MAP_ANON|MAP_PRIVATE, -1, 0)` succeeds,
+the same call with `fd = 0xfd << 24` fails with `EINVAL`. The guest's BSD-level
+`mmap` is not in the trap log, so the actual return value was not seen.
+
+The last Linux-emulated traffic before the trap is a long run of `getcpu`
+(309) and `clock_gettime` (228); `a=-63` (ENAMETOOLONG) appears 62 times as the
+result of `stat`-class calls earlier in the run and is unrelated to the crash.
+
+Display / WindowServer: the display path of this build is the AppKit
+`Wayland.backend` bundle (`WaylandDisplay -init` calls `wl_display_connect`
+through an overlay `libwayland-client.dylib`; PLAN.md), plus CGS stubs from the
+supplement. The first display event would be a `connect()` to a compositor
+socket (`$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`) from the guest, or an
+`NSApplication` / `_CGSDefaultConnection` call, after `ChromeMain` has finished
+its allocator and process setup. None of that happened: the only guest
+`connect()` in the three logs is `[gsw-bisect] connect fd=3 len=43` with
+sockaddr bytes `01 00 2f 74` (AF_UNIX, path `/t...`), once per run, before
+`ChromeMain`; the staged prefix contains only `.darlingserver.sock`, so it is
+the darlingserver RPC socket. The logs contain no `wayland`, `WindowServer`,
+`CGS`, `NSApplication` or X11 string, and no compositor was provided to these
+runs (`WAYLAND_DISPLAY` unset). The first WindowServer call has not happened.
+
+### (7) Not verified
+
+- The mmap hypothesis in (6): no trace of the guest's BSD `mmap` return value.
+- That nothing else faults behind the allocator reservation.
+- Other names in the supplement typed by the generic rule that are really data
+  (for example `_mach_task_self_`, `_NDR_record`, `_environ`, `_tzname`,
+  `_in6addr_any`, `_kCT*`, `_kSC*`) were not audited; only `_vm_page_*` was fixed.
+- The effect of the new dylibs on `cg-supl.dylib` consumers: it is built and
+  checked statically, never loaded in a run (the guest loads `suppl.dylib`).
+- Behaviour of `rep stosb`/`rep movsb` bodies beyond the sizes Chrome used so far.
+- The build toolchain on the VM was unreadable for a while (disk stall); the two
+  dylibs of the first build were linked with a Linux-host lld, and the VM build
+  of the same generator output later produced byte-identical `suppl.dylib`
+  (md5 `348680c7...`), which is how the stall was ruled out as a variable.
