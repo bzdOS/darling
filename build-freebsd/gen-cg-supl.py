@@ -16,11 +16,18 @@ read and a name any of them already defines is not emitted at all.
 The optional install_name (default /usr/lib/supl.dylib) is echoed in the
 header and in the link recipe printed after generation.
 """
+import os
 import subprocess
 import sys
 
-DATA_PREFIXES = ("_kCG", "_kCM", "_kCA", "_kCV", "_kCI", "_kMT",
-                 "_OBJC_CLASS_", "_OBJC_METACLASS_", "___")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import stub_data_rules as R  # noqa: E402
+
+# Typing is shared with check-data-as-code.py through stub_data_rules.py: a name the
+# gate calls data is emitted as a zero-filled object here (never as code), ObjC classes
+# as real root classes in <out>.m, and names in the --data-list file (consumer
+# evidence from `check-data-as-code.py --emit-data`) as data as well.
+DATA_PREFIXES = ("_kCG", "_kCM", "_kCA", "_kCV", "_kCI", "_kMT", "___")
 
 # Symbols the supplement must NOT answer with a data slot or a no-op return:
 # the real provider spells them differently, so the stub forwards. A `.quad 0`
@@ -221,9 +228,17 @@ def explicit_names():
 
 
 def main():
-    src, dst = sys.argv[1], sys.argv[2]
-    install = sys.argv[3] if len(sys.argv) > 3 else DEF_INSTALL
-    overlay = sys.argv[4] if len(sys.argv) > 4 else None
+    argv = sys.argv[1:]
+    datalist = set()
+    if "--data-list" in argv:
+        i = argv.index("--data-list")
+        if os.path.exists(argv[i + 1]):
+            datalist = {l.strip() for l in open(argv[i + 1]) if l.strip()}
+        del argv[i:i + 2]
+    src, dst = argv[0], argv[1]
+    install = argv[2] if len(argv) > 2 else DEF_INSTALL
+    overlay = argv[3] if len(argv) > 3 else None
+    classes = []
     names = [l.strip() for l in open(src) if l.strip()]
     shadow = set()
     if overlay:
@@ -256,13 +271,21 @@ def main():
             out += [f".text", f".globl {name}", f"{name}:",
                     f"    jmp {FORWARD_NAMES[name]}"]
             n_fwd += 1
-        elif name.startswith(DATA_PREFIXES):
-            out += [f".data", f".globl {name}", f"{name}:", ".quad 0"]
+        elif name.startswith(("_OBJC_CLASS_$_", "_OBJC_METACLASS_$_")):
+            classes.append(name)
+        elif name.startswith(DATA_PREFIXES) or R.is_known_data(name) or name in datalist:
+            out += R.data_asm(name)
             n_data += 1
         else:
             out += [f".text", f".globl {name}", f"{name}:",
                     "    xorl %eax, %eax", "    ret"]
             n_text += 1
+    if classes:
+        out.append(R.EMPTY_CACHE_S)
+        open(dst + ".m", "w").write(R.classes_m(R.class_names(classes)))
+        n_data += len(classes)
+    elif os.path.exists(dst + ".m"):
+        os.remove(dst + ".m")
     open(dst, "w").write("\n".join(out) + "\n")
     print(f"wrote {dst}: {n_text} text stubs, {n_data} data stubs, "
           f"{n_fwd} forwarding stubs, {n_body} asm bodies, "

@@ -1,0 +1,3 @@
+# check-data-as-code.py allow list: `symbol  reason`. Rule c only (a consumer that binds a
+# function through a non-lazy pointer, e.g. for a weak "is it there" test, is not evidence of data).
+_IOBluetoothPreferenceSetControllerPowerState  function, bound weakly through __got to test for presence

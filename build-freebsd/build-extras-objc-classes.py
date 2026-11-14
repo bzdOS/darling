@@ -21,6 +21,10 @@ Environment:
 import os
 import re
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import stub_data_rules as R  # noqa: E402
 
 OD = os.environ["DARLING_OVERLAY"]
 BUILD = os.environ["DARLING_BUILD_DIR"] + "/extras-objc-classes"
@@ -33,6 +37,9 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+kinds = {}   # symbol -> nm type letter, filled by exports()
+
+
 def exports(path):
     out = run(["llvm-nm", "-gU", path]).stdout
     syms = []
@@ -40,6 +47,7 @@ def exports(path):
         parts = line.split()
         if len(parts) >= 3 and parts[1] in TYPES:
             syms.append(parts[2])
+            kinds[parts[2]] = parts[1]
     return syms
 
 
@@ -80,30 +88,28 @@ def main():
             print("SKIP", fn, real)
             continue
         cpath = os.path.join(BUILD, fn + ".c")
+        spath = os.path.join(BUILD, fn + ".s")
         mpath = os.path.join(BUILD, fn + ".m")
         with open(cpath, "w") as f:
+            # data stays data (zero filled objects, see stub_data_rules), only code
+            # symbols become functions
             for s in keep:
-                f.write(f"void {s[1:]}(void) {{}}\n")
+                if kinds.get(s, "T") in ("T", "t") and not R.is_known_data(s):
+                    f.write(f"void {s[1:]}(void) {{}}\n")
+        with open(spath, "w") as f:
+            f.write(".text\n")
+            for s in keep:
+                if kinds.get(s, "T") not in ("T", "t") or R.is_known_data(s):
+                    f.write("\n".join(R.data_asm(s)) + "\n")
         with open(mpath, "w") as f:
-            for name in classes:
-                # Root-class stub with its OWN real methods (Control #167):
-                # inheriting NSObject (Control #166) failed because the guest
-                # cannot load a dylib whose metaclass import is
-                # _OBJC_METACLASS_$_NSObject (Symbol not found at image load —
-                # the exe/dylib bind asymmetry measured in Control #167).
-                # With zero load-time binds, that failure class is
-                # unreachable, and the two sends chrome dies on —
-                # [x description], then [<return> copy] — resolve to real
-                # methods that return the receiver itself (a real object).
-                f.write(f"__attribute__((objc_root_class))\n@interface {name}\n@end\n"
-                        f"@implementation {name}\n"
-                        f"- (id)description {{ return self; }}\n"
-                        f"- (id)copyWithZone:(void *)zone {{ (void)zone; return self; }}\n"
-                        f"- (id)copy {{ return self; }}\n"
-                        f"@end\n")
-(Control #167 step 46: stub classes carry their own real methods — the fix passes live acceptance)
+            # Root classes with their OWN real methods (not NSObject subclasses: a dylib
+            # whose metaclass import is _OBJC_METACLASS_$_NSObject is refused at load).
+            # Shared with the other stub generators: stub_data_rules.classes_m.
+            f.write(R.classes_m(classes))
+        # (the class source above used to carry a stray, unclosed paren line here)
         objs = []
-        for src, out, extra in ((cpath, fn + ".c.o", []),
+        for src, out, extra in ((spath, fn + ".s.o", []),
+                                (cpath, fn + ".c.o", []),
                                 (mpath, fn + ".m.o", ["-fobjc-runtime=macosx-10.12"])):
             op = os.path.join(BUILD, out)
             r = run(["clang", "-target", "x86_64-apple-macos10.12"] + extra + ["-c", src, "-o", op])

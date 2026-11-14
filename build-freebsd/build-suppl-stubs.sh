@@ -15,6 +15,13 @@
 # Every linked image is run through check-suppl-bodies.py; an outward pc-relative
 # call/jump/RIP-relative reference in any body fails the build (set -e).
 #
+# Data is never emitted as code: check-data-as-code.py runs first over the installed
+# overlay and writes the names it finds to be data (ObjC classes, block isa objects,
+# constants bound through non-lazy pointers) to a list the generator reads; the linked
+# images are then run through the same check, and a symbol exported as a code stub that
+# is really data fails the build (set -e). ObjC classes come out of the generator as a
+# real Objective-C source (<name>.s.m) linked into the image.
+#
 # Usage: sh build-freebsd/build-suppl-stubs.sh [outdir]
 set -e
 
@@ -28,6 +35,10 @@ PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 export PATH
 
 mkdir -p "$OUT"
+# classification pass over the installed state; its exit status is the old state's, not ours
+python3 "${SRC}/build-freebsd/check-data-as-code.py" --overlay "$OVERLAY" \
+    --emit-data "${OUT}/data-names.txt" > "${OUT}/check-before.txt" 2>&1 || true
+tail -1 "${OUT}/check-before.txt"
 for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
     name="${pair%%:*}"
     install="${pair#*:}"
@@ -39,8 +50,14 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
 
     echo "=== ${name} (install_name ${install}, $(wc -l < "${OUT}/${name}.names.txt") symbols)"
     python3 "${SRC}/build-freebsd/gen-cg-supl.py" \
-        "${OUT}/${name}.names.txt" "${OUT}/${name}.s" "$install" "${OVERLAY}"
+        "${OUT}/${name}.names.txt" "${OUT}/${name}.s" "$install" "${OVERLAY}" --data-list "${OUT}/data-names.txt"
     clang -target x86_64-apple-macos10.12 -c "${OUT}/${name}.s" -o "${OUT}/${name}.o"
+    OBJS="${OUT}/${name}.o"
+    if [ -f "${OUT}/${name}.s.m" ]; then
+        clang -target x86_64-apple-macos10.12 -fobjc-runtime=macosx-10.12 \
+            -c "${OUT}/${name}.s.m" -o "${OUT}/${name}.m.o"
+        OBJS="${OBJS} ${OUT}/${name}.m.o"
+    fi
     # The providers are re-exported so that the names the generator omits are
     # still found in this image: the framework's imports are two-level and name
     # suppl, so dyld looks them up here and follows the re-exports.
@@ -56,8 +73,11 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
         ${REEXPORTS} \
         -install_name "$install" -current_version 0.0.0 \
         -compatibility_version 0.0.0 \
-        -o "${OUT}/${name}.dylib" "${OUT}/${name}.o"
+        -o "${OUT}/${name}.dylib" ${OBJS}
     file "${OUT}/${name}.dylib"
     # Fail the build if any body has a pc-relative reference that leaves it.
     python3 "${SRC}/build-freebsd/check-suppl-bodies.py" "${OUT}/${name}.dylib"
+    # Fail the build if data is exported as a code stub (symbols, consumers: see the check).
+    python3 "${SRC}/build-freebsd/check-data-as-code.py" --overlay "$OVERLAY" --no-discover \
+        --stub "${OUT}/${name}.dylib=/usr/lib/${name}.dylib"
 done

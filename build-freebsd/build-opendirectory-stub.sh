@@ -30,6 +30,9 @@ ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
   -install_name /System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory \
   -o "$W/OpenDirectory" "$W/od.m.o" "$W/od.c.o" "$W/empty_cache.o"
 llvm-nm -m "$W/OpenDirectory" | grep -E "OBJC_CLASS|kOD"
+# Fail the build if a class or constant is exported as a code stub (set -e).
+python3 "$SRC/build-freebsd/check-data-as-code.py" --overlay "$OD" --no-discover \
+  --stub "$W/OpenDirectory=/System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory"
 [ -e "$DIR/OpenDirectory.pre-odsession" ] || cp -p "$DIR/OpenDirectory" "$DIR/OpenDirectory.pre-odsession"
 cp "$W/OpenDirectory" "$DIR/OpenDirectory"
 md5 "$DIR/OpenDirectory" "$DIR/OpenDirectory.pre-odsession"
