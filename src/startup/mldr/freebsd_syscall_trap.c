@@ -2627,9 +2627,15 @@ dispatch_linux_syscall(unsigned int linux_nr,
 
         uint8_t *out = (uint8_t *)a2;
         size_t in_off = 0, out_off = 0;
-        while (in_off + sizeof(struct dirent) <= (size_t)r + offsetof(struct dirent, d_name)) {
+        /* getdirentries packs variable-length records (d_reclen), so the
+         * last records of a buffer are shorter than sizeof(struct dirent);
+         * bound the walk by the bytes actually returned, not by the size of
+         * a maximal record. (The former bound dropped every trailing record
+         * within 256 bytes of the end and returned EINVAL for a small
+         * directory, which CFBundle then treated as an empty directory.) */
+        while (in_off + offsetof(struct dirent, d_name) <= (size_t)r) {
             const struct dirent *nd = (const struct dirent *)(nbuf + in_off);
-            if (in_off >= (size_t)r || nd->d_reclen == 0)
+            if (nd->d_reclen == 0 || in_off + nd->d_reclen > (size_t)r)
                 break;
             size_t namelen = nd->d_namlen;
             size_t reclen = (19 + namelen + 1 + 7) & ~(size_t)7;
