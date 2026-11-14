@@ -60,8 +60,13 @@ def load_info(path):
         nm = re.search(r"name (\S+) \(offset", b)
         if cmd.group(1) == "LC_ID_DYLIB":
             info["id"] = nm.group(1)
-            # llvm-otool prints "n/a" for a version field that is 0
-            ver = lambda k: (re.search(k + r" version (\d+(?:\.\d+){0,2})", b) or [0, "0.0.0"])[1]
+            # llvm-otool prints "n/a" for 0xffffffff (65535.255.255), the "any version"
+            # the wrapper images carry: keep it, a consumer that asks for 150.0.0 refuses 0.0.0
+            def ver(k):
+                m = re.search(k + r" version (\S+)", b)
+                if m and re.match(r"^\d+(\.\d+){0,2}$", m.group(1)):
+                    return m.group(1)
+                return "65535.255.255" if m else "0.0.0"
             info["cur"] = ver("current")
             info["compat"] = ver("compatibility")
         elif cmd.group(1) in ("LC_LOAD_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_WEAK_DYLIB"):
@@ -125,10 +130,28 @@ def main():
                 datas.append(n)
             else:
                 funcs.append(n)
+        # hand written behaviour (stub-frameworks/behaviors/<image file name>/*.c) replaces the
+        # generic no-op for the names it defines; it is compiled and linked into the image
+        behaviors = []
+        bdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub-frameworks",
+                            "behaviors", os.path.basename(path))
+        if os.path.isdir(bdir):
+            cf = ov + "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+            for fn in sorted(os.listdir(bdir)):
+                if fn.endswith(".c"):
+                    bo = os.path.join(a.work, os.path.basename(path) + "." + fn + ".o")
+                    run("clang", "-target", "x86_64-apple-macos10.12", "-O1", "-fno-stack-protector",
+                        "-c", os.path.join(bdir, fn), "-o", bo, check=True)
+                    behaviors.append(bo)
+            defined = set()
+            for bo in behaviors:
+                defined |= set(exports(bo))
+            funcs = [n for n in funcs if n not in defined]
+            datas = [n for n in datas if n not in defined]
         classes = R.class_names(ex)
         fix = [n for n in ex if n in drop or (ex[n] == ("__TEXT", "__text") and
                (R.is_known_data(n) or n in datalist))]
-        if not fix:
+        if not fix and not behaviors:
             print("unchanged %s" % os.path.relpath(path, ov))
             continue
         base = re.sub(r"[^A-Za-z0-9_]", "_", os.path.basename(path))
@@ -141,14 +164,14 @@ def main():
                 f.write("\n".join(R.data_asm(n)) + "\n")
             if classes:
                 f.write(R.EMPTY_CACHE_S)
-        objs = [os.path.join(a.work, base + ".s.o")]
+        objs = [os.path.join(a.work, base + ".s.o")] + behaviors
         run("clang", "-target", "x86_64-apple-macos10.12", "-c", s, "-o", objs[0], check=True)
         if classes:
             m = os.path.join(a.work, base + ".m")
             open(m, "w").write(R.classes_m(classes))
             objs.append(m + ".o")
             run("clang", "-target", "x86_64-apple-macos10.12", "-fobjc-runtime=macosx-10.12",
-                "-c", m, "-o", objs[1], check=True)
+                "-c", m, "-o", m + ".o", check=True)
         out = os.path.join(a.work, base)
         cmd = ["ld64.lld", "-dylib", "-arch", "x86_64", "-platform_version", "macos", "10.12", "10.12",
                "-install_name", info["id"], "-current_version", info["cur"],
@@ -156,6 +179,8 @@ def main():
         for k, n in info["deps"]:
             if os.path.exists(ov + n):
                 cmd += ["-reexport_library" if k == "LC_REEXPORT_DYLIB" else "-needed_library", ov + n]
+        if behaviors:
+            cmd += ["-undefined", "dynamic_lookup", "-bind_at_load"]
         # a name dropped as shadowing needs its provider reachable from this image
         if drop:
             for p in provs:
