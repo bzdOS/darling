@@ -13947,3 +13947,184 @@ installed or started.
 - Why `PathForResource("icudtl", "dat")` finds nothing.
 - Whether the longer runs (D, F) differ from the short ones for a reason other
   than harness staging time.
+
+## Step 50 — bundle resource lookup
+
+### (1) Measurement
+
+The step-49 stop (`icudtl.dat not found in bundle`) was run with
+`DARLING_TRAP_LOG=1`; the framework's `Versions/<ver>` directory is opened and
+read just before the lookup fails. The path-syscall log of
+`chrome-rtsig-G.log` (nr 2 = open, 217 = getdents64, 3 = close):
+
+```text
+[traplog] path nr=2 $DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0
+[traplog] SIGILL LEAVE tid=... a=8 b=2
+[traplog] SIGILL LEAVE tid=... a=-22 b=217
+[traplog] SIGILL LEAVE tid=... a=0 b=3
+```
+
+`getdents64` on a directory with six entries (`.`, `..`, the framework
+binary, `Helpers`, `Libraries`, `Resources`) returned `-22` (EINVAL):
+`grep -c "a=-22 b=217" chrome-rtsig-G.log` is 44. CFBundle reads a failed
+listing as an empty directory, so the resource cache has no `icudtl.dat`
+and no syscall for the file is ever issued. The larger `Resources` directory
+listed fine (`a=3328`, `3344`, `1616`, `0`), which hid the bug: there it
+silently lost the trailing records of each chunk instead.
+
+Cause: `src/startup/mldr/freebsd_syscall_trap.c`, `LINUX_SYS_getdents64`
+repacks the native `getdirentries` buffer into `linux_dirent64` records. The
+loop condition `in_off + sizeof(struct dirent) <= r + offsetof(d_name)`
+needs a full maximal record (`sizeof(struct dirent)` is 280 for the 64-bit
+inode layout, d_name is 256 bytes) behind each record. Native records are
+variable-length (`d_reclen`), so every record within 256 bytes of the end of
+the returned buffer was consumed from the fd but dropped; if nothing was
+repacked the function returned `-EINVAL`. This is a layout/translation bug
+in the mldr getdents bridge, not in CoreFoundation.
+
+### (2) Fix
+
+Bound the walk by the bytes returned and by `d_reclen`:
+`in_off + offsetof(struct dirent, d_name) <= r` and
+`in_off + d_reclen <= r`. Same directory afterwards
+(`chrome-bundleres-A.log`):
+
+```text
+[traplog] path nr=2 $DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0
+[traplog] SIGILL LEAVE tid=... a=9 b=2
+[traplog] SIGILL LEAVE tid=... a=200 b=217
+[traplog] SIGILL LEAVE tid=... a=0 b=217
+```
+
+`grep -c "a=-22 b=217"` is 0, and the lookup now issues the path syscalls for
+the file:
+
+```text
+[traplog] path nr=6 $DARLING_OVERLAY/Frameworks/Google Chrome for Testing Framework.framework/Versions/154.0.8029.0/Resources/icudtl.dat
+[traplog] path nr=257 .../Resources/icudtl.dat
+[traplog] mmap-linux-len-prot tid=... a=10823536 b=1
+```
+
+The 10823536 bytes are the file size; ICU data is mapped and the two
+`icu_util.cc` errors are gone.
+
+### (3) Next wall (run A) and the one extra fix
+
+```text
+[FATAL:third_party/crashpad/crashpad/util/mach/child_port_handshake.cc:349] Check failed: . shutdown SHUT_RD: Function not implemented (78)
+[darling-mldr] unhandled Linux syscall 48 — ENOSYS
+```
+
+Syscall 48 is `shutdown`; `SHUT_RD/WR/RDWR` are 0/1/2 on both systems, so it
+is a plain passthrough (`LINUX_SYS_shutdown` -> `SYS_shutdown`), a separate
+commit. The earlier `clone` (Linux 56, crashpad's `fork`) still returns
+ENOSYS; crashpad logs `spawn_subprocess.cc:136 fork: No such file or
+directory` and carries on.
+
+### (4) md5 proof
+
+mldr is exec'ed in place from `$DARLING_BUILD_DIR/dserver/mldr-real/mldr`
+(no staged copy; the overlay and staged trees were not touched).
+
+```text
+                     md5
+pre-fix (backup)     23bc34d8d09c5c94e5a312bcffbfd229   mldr.pre-bundleres
+getdents fix         eb43d178d9e0fbd37efec178565e4a9a   built == installed (run A)
++ shutdown           b0872152a2f3b52aa06d2111140b84bd   built == installed (runs B-E);
+                                                        backup mldr.pre-shutdown = eb43d...
+```
+
+The built binary is the one in the build script's temporary directory.
+Earlier `*.pre-*` backups are kept.
+
+### (5) Runs
+
+Wrapper: `$DARLING_BUILD_DIR/bundleres-run.sh <suffix> <timeout> [ENV=val ...]`,
+the step-48/49 wrapper with a new log prefix (refuses to overwrite a log,
+`DARLING_TRAP_LOG=1`). The timeout includes the harness's re-staging of the
+framework, which took between a few seconds and about 7 minutes.
+
+| run | log (`$DARLING_BUILD_DIR/`) | binary | extra env | WRAPPER_RC | duration | timeout |
+| --- | --- | --- | --- | --- | --- | --- |
+| A | `chrome-bundleres-A.log` | getdents fix | none | 133 | 73 s | 600 s |
+| B | `chrome-bundleres-B.log` | + shutdown | none | 139 | 32 s | 900 s |
+| C | `chrome-bundleres-C.log` | + shutdown | `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY=wayland-0` | 124 | 912 s | 900 s (hit) |
+| D | `chrome-bundleres-D.log` | + shutdown | same as C | 124 | 900 s | 900 s (hit) |
+| E | `chrome-bundleres-E.log` | + shutdown | none | 124 | 900 s | 900 s (hit) |
+
+`XDG_RUNTIME_DIR` in C and D was a private empty mode-0700 directory; no
+compositor was installed or started. A and B ended on their own. C, D and E
+were killed by the timeout, which proves nothing beyond "stays alive"; they
+are described under (7).
+
+### (6) Next stop (run B): the first WindowServer call
+
+```text
+[WaylandDisplay] wl_display_connect called, WAYLAND_DISPLAY=(null) XDG_RUNTIME_DIR=(null)
+[wayland_shim] dlsym_fatal('wl_display_connect') => 0x83d336850
+error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+[WaylandDisplay] wl_display_connect returned 0x0
+... WaylandDisplay: wl_display_connect failed (WAYLAND_DISPLAY=(unset))
+... Terminating app due to uncaught exception 'NSException', reason: 'Failed to connect to a window server. Available backends are: <CFArray ...>{... (
+	0 : <NSBundle: ...> </System/Library/Frameworks/AppKit.framework/Resources/Backends/Wayland.backend> (loaded)
+)}'
+[dserver-sendsignal] pid=59670 tid=965440 signal=6 ret=0x35eb57
+WRAPPER_RC=139
+```
+
+Classification: a deliberate abort. Chromium initialises AppKit, the
+Wayland backend is loaded, `WaylandDisplay` calls `wl_display_connect`
+(libwayland, resolved by the shim's `dlsym`), which fails for lack of
+`XDG_RUNTIME_DIR`/`WAYLAND_DISPLAY`; AppKit raises an uncaught
+`NSException`, the runtime sends SIGABRT (6) to its own thread and the
+process ends with status 139. No socket path is probed and no guest
+`connect()` to a Wayland socket was issued (the only guest `connect` is the
+darlingserver RPC socket, `[gsw-bisect] connect fd=3 len=43`). The
+environment read is `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` (both printed).
+Why the abort ends as 139 rather than 134 was not investigated.
+
+### (7) Runs C, D, E: a stall before the display
+
+Runs C, D and E (with and without the Wayland variables) did not reach the
+display at all. Right after the `clone` ENOSYS of crashpad's spawn, the main
+thread sends a 16-byte `sendmsg` to darlingserver and blocks in `recvmsg`;
+the reply never arrives (run E):
+
+```text
+[traplog] linux-unhandled tid=1074146 a=56 b=17
+[traplog] SIGILL LEAVE tid=1074146 a=-78 b=56
+[traplog] SIGILL LEAVE tid=1074146 a=16 b=46
+[traplog] SIGILL LEAVE tid=1074762 a=-60 b=202      <- other thread: futex timeout
+[traplog] SIGILL ENTER tid=1074146 ... b=47          <- main thread: recvmsg, never returns
+```
+
+In run B the same point was passed because another thread's 56-byte request
+made darlingserver send signal 65 to the main thread
+(`[dserver-sendsignal] pid=59670 tid=965440 signal=65`) and the main
+thread's `recvmsg` returned. At the stall (run E, `ps -H`): the main thread
+`sbwait`, one thread `kqread`, one more `sbwait` (recvmsg), one thread in
+`uwait` (a short futex-timeout thread that is repeatedly re-created), all at
+0.0 % CPU; darlingserver idle in `select`/`uwait`. So chrome stays alive but
+idle on a lost RPC reply, not in an AppKit run loop. Runs A and B passed this
+point and C, D, E did not, so it is a race and not an effect of the
+environment. Not investigated further (it is the known park/wakeup class:
+see the earlier thread_hold and round-trip notes).
+
+### (8) WindowServer status
+
+First WindowServer-side event reached in run B: AppKit loads
+`Wayland.backend` and calls `wl_display_connect`, which fails on missing
+`XDG_RUNTIME_DIR`. No guest connect to a Wayland socket, no compositor.
+`NSApplication` activity is implied by the backend selection, `_CGSDefaultConnection`
+was not grepped for separately.
+
+### (9) Not verified
+
+- Why the `NSException` abort ends with status 139 instead of 134.
+- The cause of the lost RPC reply in C/D/E, or that it does not depend on
+  timing of the staging step.
+- What `wl_display_connect` does once a socket exists (no compositor started).
+- That the dropped-record behaviour of the old getdents loop is the only
+  directory-listing bug (large directories above the 4096-byte chunk were not
+  separately diffed against `ls`).
+- Crashpad's handler spawn (`clone` still ENOSYS).
