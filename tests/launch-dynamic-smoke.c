@@ -32,6 +32,7 @@
  *   3. Uses /var/darling-build as default build dir (matches VM deploy path).
  */
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -567,6 +568,8 @@ int main(void) {
     printf("binary        : %s\n", binary);
     printf("overlay       : %s\n", od);
 
+    time_t launch_t0 = time(NULL);
+    fprintf(stderr, "[launch] STAGING begin t=0 epoch=%ld\n", (long)launch_t0);
     cleanup();
     mkdir(PREFIX, 0755);
 
@@ -1077,6 +1080,9 @@ int main(void) {
         mldr_argv[i++] = extra_argv[j];
     mldr_argv[i] = NULL;
 
+    fprintf(stderr, "[launch] STAGING end / GUEST-EXEC pid=%d t=%lds\n",
+            (int)getpid(), (long)(time(NULL) - launch_t0));
+    fflush(stderr);
     execv(mldr, mldr_argv);
     perror("execv mldr");
     cleanup();
