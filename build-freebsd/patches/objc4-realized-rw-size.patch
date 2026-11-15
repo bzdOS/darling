@@ -1,0 +1,17 @@
+diff --git a/runtime/objc-runtime-new.mm b/runtime/objc-runtime-new.mm
+index df3f9fa..fc92c65 100644
+--- a/runtime/objc-runtime-new.mm
++++ b/runtime/objc-runtime-new.mm
+@@ -2590,7 +2590,11 @@ static void validateAlreadyRealizedClass(Class cls) {
+ 
+     // Note: this check will need some adjustment if class_rw_t's
+     // size changes to not match the malloc bucket.
+-    if (rwSize != sizeof(class_rw_t))
++    // A third-party malloc zone may report a larger usable size than the
++    // request (PartitionAlloc, with its in-slot metadata, reports 40 for the
++    // 32 bytes of a class_rw_t). A block smaller than class_rw_t, or no heap
++    // block at all (size 0), is still corrupt.
++    if (rwSize < sizeof(class_rw_t))
+         _objc_fatal("realized class %p has corrupt data pointer %p", cls, rw);
+ #endif
+ }
