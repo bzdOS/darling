@@ -15281,3 +15281,211 @@ SIGTRAP handler the callee of `_Unwind_Resume`'s caller. Not attempted: stubs th
 - Rule c treats a function whose address is only taken (`__got`) as data; the allow list
   has the one such case measured.
 - Anything past the registry roundtrip: surfaces, buffers, `get_tree`, grim of a window.
+
+## Step 53 — unwind wall and window
+
+Paths are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`. Logs are
+`$DARLING_BUILD_DIR/chrome-uw-<name>.log`, never overwritten, produced by
+`chrome-wl-run.sh` with `CHROME_LOG_PREFIX=chrome-uw` and an own headless sway
+(`WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman`, private mode-0700
+runtime directory, stopped after every run, local page only).
+
+Result: **the unwind wall was not an unwind problem; it and two more walls are fixed, the
+next wall is a missing darlingserver feature (memory entries). No window was created**
+(no xdg_toplevel, no `get_tree` entry, no png): success fraction 0 of 6 Chrome runs.
+
+### (1) The trap at framework +0x2e5d832 is a bounds-check `int3`, not a returned unwinder
+
+Disassembly of the framework around the trap (`llvm-objdump --no-show-raw-insn`):
+
+```text
+ 2e5d7ae: callq  *%r12                   ## objc_msgSend(obj, @selector(thermalState))
+ 2e5d7b1: movq   %rax, %r12
+ 2e5d7b4: movq   %r15, %rdi
+ 2e5d7b7: callq  *0xc34590b(%rip)        ## objc_release
+ 2e5d7bd: cmpq   $0x4, %r12
+ 2e5d7c1: jae    0x2e5d831
+ ...
+ 2e5d82c: callq  <_Unwind_Resume stub>
+ 2e5d831: int3
+ 2e5d832: ud2
+```
+
+The receiver class is `NSProcessInfo` (`_OBJC_CLASS_$_NSProcessInfo`, selref strings
+`processInfo` and `thermalState`, read from the file). The block is the thermal handler;
+the `jae` is the "value is not one of the four enum cases" trap. So the `int3` is reached
+by the compare, and `_Unwind_Resume` is never entered. Evidence, a fatal `MLDR_TRAP_AT`
+on the `movq %rax,%r12` at +0x2e5d7b1 (log `chrome-uw-m2.log`):
+
+```text
+[darling-mldr] === MLDR_TRAP_AT hit #1: Google Chrome for Testing Framework+0x2e5d7b1 ===
+  rdi=0x1400000c270 rsi=0x2313b555f36a rdx=0x14000008900 rcx=0x2313b72bffc0 rax=0x1400000c270
+  code @rip: 49 89 c4 4c 89 ff ff 15 0b 59 34 0c 49 83 fc 04
+```
+
+`rax == rdi`: `thermalState` returned the receiver (an object pointer, far above 4). With
+`MLDR_TRAP_STR=rdi` the object's isa word is `0x011d86ca690bffc1`, class pointer
+`0x6ca690bffc0` (equal to rcx): a real `NSProcessInfo` instance (run `m3`).
+
+Why the receiver comes back: the guest Foundation has no `thermalState`
+(`grep -c thermalState` over Foundation and all Extras images: 0). The selector goes to the
+CoreFoundation forwarding code, which does
+`[target doesNotRecognizeSelector:_cmd]; return target;` (`NSForwarding.m`), and
+`doesNotRecognizeSelector:` returns here instead of raising.
+
+The three candidates of the task, measured:
+
+| candidate | result |
+| --- | --- |
+| (a) `_Unwind_Resume` binds to a stub | The import is ordinal 67 = `usr/lib/suppl.dylib`; `llvm-nm -m` on it lists no `_Unwind_*`, `__cxa_throw` or `objc_exception_throw` (it re-exports the libSystem sub-libraries). The guest unwinds (next bullet). |
+| (b) no unwind info for generated bodies | In the guest an ObjC `@throw` caught by `@catch` and a C++ `throw` across a frame with a destructor both work: `uw-probe: objc throw caught: UwProbe`, `uw-probe: cxx throw caught: 42` (below). Nothing was thrown on the trapping path, so generator CFI is not the cause here. No generator change was made. |
+| (c) a C++ exception thrown by a stand-in | No exception was thrown on this path (the trap is the compare). A real uncaught exception does terminate correctly: run `m1` printed `terminating with uncaught exception of type NSException` / `Terminating app due to uncaught exception 'NSException', reason: 'Failed to connect to a window server`. |
+
+Probe (`tests/src/unwind-probe.m`, `tests/src/unwind-probe-cxx.cpp`,
+`sh build-freebsd/build-unwind-probe.sh`, run under `launch-dynamic` with
+`DARLING_TEST_BINARY=unwind-probe-macho`; log `chrome-uw-p1.log`, rc 0, 3 s / 120 s):
+
+```text
+uw-probe: class=NSProcessInfo obj=0x7f91f517c920
+uw-probe: responds thermalState=0 uwNoSuchSelector=0
+uw-probe: objc throw caught: UwProbe
+uw-probe: cxx throw caught: 42
+uw-probe: unknown selector returned 0x0 (receiver 0x7f91f517c920)
+uw-probe: thermalState returned 0x0
+```
+
+(The probe sees 0 for an unknown selector where Chrome saw the receiver; the forwarding
+return depends on what is in `rax` when the stub returns. Not investigated further.)
+
+### (2) Fix 1: `-[NSProcessInfo thermalState]` in FoundationExtras
+
+`build-freebsd/stub-frameworks/behaviors/FoundationExtras.dylib/process-info.c` adds the
+method (type `q16@0:8`, returns 0 = nominal) to the real class from a load-time
+constructor, so `respondsToSelector:` agrees. It uses the existing behaviour mechanism of
+`rebuild-stub-data.py` (`stub-frameworks/behaviors/<image>/*.c`):
+
+```text
+python3 build-freebsd/rebuild-stub-data.py --overlay $DARLING_OVERLAY --work $DARLING_BUILD_DIR/stub-data-uw \
+    --data-list $DARLING_BUILD_DIR/stub-data/data-names.txt $DARLING_OVERLAY/usr/lib/FoundationExtras.dylib
+rebuilt usr/lib/FoundationExtras.dylib: 0 functions, 3 data objects, 14 ObjC classes, 0 dropped (provider has them), 0 retyped
+```
+
+The export list is unchanged (diff of `llvm-nm -m --defined-only` before/after: only
+`__dyld_private`, `_foundation_extras_process_info`, `_thermal_state`, all non-external).
+Backup `FoundationExtras.dylib.pre-unwind` (md5 `79e931873e67ce4e2cb7b606093a35e8`, the
+value recorded by the previous step as installed).
+
+### (3) Fix 2: `IOPMCopyCPUPowerStatus` returns an error
+
+Run `r1` (rc 139, 119 s / 150 s) passed the trap and died with a SIGSEGV at address 0:
+
+```text
+[darling-mldr] FATAL signal 11 (code=1) at addr=0x0
+  rip=0x00002be8e9f238d2 ... (CoreFoundation + 0x678d2 = _CFDictionaryGetValue, `movq (%rax),%rax`)
+```
+
+The caller is framework +0x2a4660d: `callq _IOPMCopyCPUPowerStatus` with `rdi = &local (NULL)`,
+`testl %eax,%eax; jne skip`, then `CFDictionaryGetValue(local, key)`. The generic stub
+returned 0 (success) and left the out parameter NULL. `IOKitExtras.dylib` behaviour
+`iokit-power.c` now returns `kIOReturnUnsupported` with `*status = NULL`. Same rebuild
+command for `usr/lib/IOKitExtras.dylib`; backup `IOKitExtras.dylib.pre-unwind`
+(md5 `8ef25cf7cd1dd773e27ef360d69818b6`). `check-data-as-code.py` after both images:
+`check-data-as-code: OK (0 offenders in 0 stub images)`.
+
+### (4) Fix 3: darlingserver aborted on a memory-entry request
+
+Run `r3` (rc 132, 122 s / 150 s): all guest threads got `BAD SEND STATUS: -61` on their
+RPC sockets, `semaphore_timedwait failed (internally): -61`, then an abort cascade
+(`genuine SIGILL (ud2 ...) at libsystem_kernel.dylib+0x2933a`). Cause, from the server:
+
+```text
+pid <darlingserver>, jid 0, uid 0: exited on signal 6 (no core dump - coredumpsize limit is 0)
+$prefix/private/var/log/dserver.log:
+(dtape, Error)[P:..][T:..] ...: stub (unsafe): _mach_make_memory_entry
+```
+
+`duct-tape/src/memory.c` `_mach_make_memory_entry` was `dtape_stub_unsafe()`, which aborts
+the server. The fix lives in the darlingserver submodule's working tree (dirty, not
+committed there) and is exported as `build-freebsd/patches/darlingserver-mach-memory-entry.patch`
+(diffed against the unmodified file; the file was clean before the edit): it returns
+`KERN_NOT_SUPPORTED` with a null handle. `git apply --check` against
+`git show HEAD:duct-tape/src/memory.c` in a temp directory: `APPLY_CHECK_OK`; the three
+existing darlingserver patches still check against their HEAD files (`rpc-log OK`,
+`skip-fork-wait OK`, `sendsignal-log OK`).
+
+Narrow rebuild: `sh build-freebsd/rebuild-dtape-object.sh src/memory.c` (new; recompiles
+one object with `build-dtape.sh`'s flags into `libdtape.a`, archive kept as
+`libdtape.a.pre-unwind`), then `build-darlingserver.sh` (its final `install` reports "same
+file", because the canonical path is a symlink to the build output; the binary is built).
+Server backup `darlingserver.pre-unwind` (md5 `3bf570ea0b9c0e639724593a629f9533`).
+
+### (5) md5: built == installed == staged
+
+```text
+e73af2e320e18886aa96177ecf290542  FoundationExtras.dylib  (built / $DARLING_OVERLAY/usr/lib / staged local overlay)
+1d348a0c9dd9aa98a700db10feed2380  IOKitExtras.dylib       (built / $DARLING_OVERLAY/usr/lib / staged local overlay)
+b8e878bf5a1a704b4edd524c2398770d  darlingserver           (build output == canonical path, a symlink to it)
+2090d1d89a57e93607fea90ded359f9e  mldr (diagnostics only, see (7)); previous 9436a286c4154557426bbd6f8b9decad kept as mldr.pre-unwind
+```
+
+### (6) Runs
+
+All with `$DARLING_BUILD_DIR/chrome-uw-<name>.log`; rc is `WRAPPER_RC`, duration and
+timeout are the wrapper's last line. Two attempts (one for `r1`, one for `r4`) did not start
+the own sway in time and produced no log; the run script then retried the sway start.
+
+| run | rc | duration / timeout | what |
+| --- | --- | --- | --- |
+| m1 | 134 | 21 s / 120 s | wrong socket name given to the guest: `NSException ... Failed to connect to a window server` (an uncaught exception terminates correctly) |
+| m2 | 132 | 49 s / 120 s | fatal `MLDR_TRAP_AT` at +0x2e5d7b1: `rax == rdi` (the rc is the planted trap itself) |
+| m3 | 132 | 40 s / 120 s | same plus `MLDR_TRAP_STR=rdi`: the object is an `NSProcessInfo` |
+| p1 | 0 | 3 s / 120 s | guest unwind probe |
+| r1 | 139 | 119 s / 150 s | after fix 1: SIGSEGV in `CFDictionaryGetValue(NULL)` |
+| r2 | 132 | 95 s / 150 s | after fix 2: silent SIGILL on a thread, see (7) |
+| r3 | 132 | 122 s / 150 s | server abort cascade (4) |
+| r4 | 124 | 170 s / 150 s | timeout kill, log ends while the images load; the machine was paging (other jobs). Proves nothing |
+| r5 | 132 | 32 s / 300 s | after fix 3: the SIGILL of (7) again, with new diagnostics |
+| r6 | 133 | 30 s / 200 s | **next wall (8)** |
+
+### (7) Intermittent SIGILL (not solved)
+
+`r2` and `r5` end with a SIGILL that mldr's handler classifies as "not ours":
+`si_code=0x5 si_pid=0 si_addr=<libsystem_kernel+0x2c843> rip=<libsystem_kernel+0x2c845> bytes=c3 90`
+(the `linux_syscall` thunk: the patched `syscall` and the `retq` after it), `rax=0`,
+`rdi=0x1001` in `r5`. In `r5` the previous syscall of that thread is `158` (`arch_prctl`,
+`ARCH_SET_GS`) from the thread start in `elfcalls/threads.c` (the thread is still on its
+native stack, return address in `darling_thread_entry`); the handler's `LEAVE a=0` line is
+printed, then a second SIGILL entry has the context the first handler left behind. It does
+not happen in every run (`r1`, `r3`, `r6` pass thread creation). One gated line was added
+to the handler (`SIGILL-FAULT info`/`ctx`); the `ctx` line did not fire in a later run, so no
+more is known. Not a candidate for the unwind wall.
+
+### (8) Next wall: shared memory
+
+`r6` stops with Chrome's own check (the `SIGTRAP-AUDIT-DELIVER` rip is framework +0x95876b3,
+the `int3` after a `LogMessage` destructor). The block at +0x57fe9e builds the message from
+these strings in the file:
+
+```text
+../../base/memory/platform_shared_memory_region_apple.cc     (line 0x99 = 153, severity 3)
+Check failed: kr == KERN_SUCCESS
+. 
+mach_make_memory_entry_64
+```
+
+The fatal log call then dies in libc++'s `string_view::substr` hardening trap
+(`+0x95bb306`), which is why the chain is deep. With fix 3 the request fails cleanly
+(`KERN_NOT_SUPPORTED`) instead of killing the server, and Chrome's check fires. A
+real fix needs memory entries (a port that names a shareable region) and
+`mach_vm_map` of such a port; `fork` (Linux `clone` 56 answers ENOSYS in mldr) also still
+blocks multi-process Chrome. Not attempted.
+
+### (9) Not verified
+
+- That `-[NSObject doesNotRecognizeSelector:]` returning (instead of raising) is general;
+  only the `thermalState` and unknown-selector probe cases were looked at.
+- The cause of the SIGILL in (7).
+- Any Wayland object creation past the registry roundtrip (`xdg_toplevel`, buffer commit),
+  `swaymsg get_tree`, grim of a window: no milestone reached.
+- That the mldr build from the current source matches the previously installed binary
+  apart from the diagnostics (sizes differ: 758848 vs 741K).
