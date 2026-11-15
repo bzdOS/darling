@@ -466,7 +466,10 @@ static const char *src_dir(void) {
 }
 
 static void cleanup(void) {
-    system("pkill -9 darlingserver 2>/dev/null");
+    /* Only the darlingserver bound to our own prefix (its argv is
+     * "darlingserver <prefix> <uid> <gid> <pipe> <fix_perms>"): other users of the
+     * machine run their own darlingservers, which must survive our start and exit. */
+    system("pkill -9 -f ^darlingserver  PREFIX   2>/dev/null");
     system("rm -rf " PREFIX);
     /* DARLING_KEEP_LOCAL=1: keep the staged local overlay between runs. Staging
      * the frameworks takes minutes; the staged files are not modified by a run
