@@ -56,3 +56,15 @@ int IOAllowPowerChange(unsigned kernelPort, long notificationID)
     (void)kernelPort; (void)notificationID;
     return 0;
 }
+
+/* IOPMCopyCPUPowerStatus(CFDictionaryRef *status): Chromium's power monitor tests only the
+ * return value and then reads the dictionary without a NULL test. The plain stub returned
+ * success and left *status NULL (CFDictionaryGetValue(NULL, key) faulted). A machine with
+ * no power management answers kIOReturnNotFound-class errors and leaves *status alone,
+ * which the caller handles. */
+int IOPMCopyCPUPowerStatus(void **status)
+{
+    if (status)
+        *status = 0;
+    return (int)0xe00002c7; /* kIOReturnUnsupported */
+}
