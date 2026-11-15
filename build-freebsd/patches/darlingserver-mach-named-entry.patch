@@ -1,0 +1,426 @@
+--- a/duct-tape/src/memory.c
++++ b/duct-tape/src/memory.c
+@@ -135,6 +135,7 @@
+ 	shared_entry->size = size;
+ 	shared_entry->page_offset = page_offset;
+ 	shared_entry->descriptor = descriptor;
++	shared_entry->protection = VM_PROT_ALL;
+ 
+ 	dtape_map_shared_descriptor_retain(descriptor);
+ 
+@@ -528,14 +529,206 @@
+ 	}
+ };
+ 
+-kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
+-	// Memory entries are not implemented. The stub used to abort the whole server
+-	// (dtape_stub_unsafe), taking every guest process with it the first time a program
+-	// asked for a shareable region; report the failure to the caller instead.
+-	if (object_handle) {
+-		*object_handle = IP_NULL;
++// ---- Mach named memory entries (host shared-memory objects) ----
++//
++// A named entry is a port (IKOT_NAMED_ENTRY) whose kobject is a vm_named_entry. The entry
++// does not describe a VM object: `backing.copy` (never otherwise used by this port type, since
++// is_object, is_sub_map and is_copy stay clear) holds a retained dtape_map_shared_descriptor,
++// i.e. an anonymous memfd, refcounted and sized at creation. `offset` and `size` select the
++// window of the memfd the entry names, `protection` is the most any mapping may ask for.
++//
++// mach_vm_map() of such a port asks the owning process (server-to-client mmap, the descriptor
++// travels as SCM_RIGHTS) to mmap(MAP_SHARED) the window, and records the mapping in the task's
++// shared-entry tree so that a later memory entry made from that address range finds the same
++// descriptor. The descriptor lives until the port is destroyed AND every recorded mapping is gone.
++
++static dtape_map_shared_descriptor_t* dtape_named_entry_descriptor(vm_named_entry_t entry) {
++	if (entry->is_object || entry->is_sub_map || entry->is_copy) {
++		return NULL;
+ 	}
+-	return KERN_NOT_SUPPORTED;
++	return (dtape_map_shared_descriptor_t*)entry->backing.copy;
++};
++
++// Returns the entry behind `port`, or NULL if the port is not one of ours.
++static vm_named_entry_t dtape_named_entry_from_port(ipc_port_t port) {
++	if (!IP_VALID(port) || ip_kotype(port) != IKOT_NAMED_ENTRY) {
++		return NULL;
++	}
++	vm_named_entry_t entry = (vm_named_entry_t)ip_get_kobject(port);
++	if (!entry || !dtape_named_entry_descriptor(entry)) {
++		return NULL;
++	}
++	return entry;
++};
++
++// Consumes the caller's reference on `descriptor` (also when it fails).
++static kern_return_t dtape_named_entry_make(dtape_map_shared_descriptor_t* descriptor, uint64_t offset, uint64_t size, vm_prot_t protection, ipc_port_t* out_port) {
++	vm_named_entry_t entry = (vm_named_entry_t)kalloc(sizeof(*entry));
++	if (!entry) {
++		dtape_map_shared_descriptor_release(descriptor);
++		return KERN_RESOURCE_SHORTAGE;
++	}
++	bzero(entry, sizeof(*entry));
++	named_entry_lock_init(entry);
++	entry->backing.copy = (vm_map_copy_t)descriptor;
++	entry->offset = offset;
++	entry->size = size;
++	entry->protection = protection;
++	entry->ref_count = 1;
++
++	*out_port = ipc_kobject_alloc_port((ipc_kobject_t)entry, IKOT_NAMED_ENTRY, IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST);
++	if (*out_port == IP_NULL) {
++		named_entry_lock_destroy(entry);
++		kfree(entry, sizeof(*entry));
++		dtape_map_shared_descriptor_release(descriptor);
++		return KERN_RESOURCE_SHORTAGE;
++	}
++	return KERN_SUCCESS;
++};
++
++// Records a mapping, first dropping every recorded mapping it overlaps (those can only be stale:
++// the new mapping replaced them, or they were unmapped by the guest, which does not tell us).
++static void dtape_map_replace_shared_entry(dtape_map_t* map, dtape_map_shared_entry_t* shared_entry) {
++	dtape_map_shared_entry_t* entry;
++	dtape_map_shared_entry_t* tmp;
++
++	dtape_mutex_lock(&map->shared_entry_lock);
++	RB_FOREACH_SAFE(entry, dtape_map_shared_entry_head, &map->shared_entries, tmp) {
++		if (entry->address < shared_entry->address + shared_entry->size && shared_entry->address < entry->address + entry->size) {
++			RB_REMOVE(dtape_map_shared_entry_head, &map->shared_entries, entry);
++			dtape_map_shared_entry_destroy(entry);
++		}
++	}
++	dtape_map_insert_shared_entry_locked(map, shared_entry);
++	dtape_mutex_unlock(&map->shared_entry_lock);
++};
++
++static int dtape_vm_prot_to_posix(vm_prot_t prot) {
++	int posix = 0;
++	if (prot & VM_PROT_READ) {
++		posix |= PROT_READ;
++	}
++	if (prot & VM_PROT_WRITE) {
++		posix |= PROT_WRITE;
++	}
++	if (prot & VM_PROT_EXECUTE) {
++		posix |= PROT_EXEC;
++	}
++	return posix;
++};
++
++// Supported combinations (anything else returns an error, never aborts):
++//   MAP_MEM_NAMED_CREATE | prot, offset 0, no parent: new zero-filled region of round_page(size)
++//   MAP_MEM_VM_SHARE | prot or plain prot, parent NULL: window onto an address range of target_map
++//       that was itself mapped from a named entry (the usual "read-only copy of a writable region")
++//   any of the above with a parent entry: sub-window of the parent (page aligned offset)
++// Not supported: MAP_MEM_VM_COPY, purgable, ledger, caching modes, 'ONLY', data-address variants,
++// and VM_SHARE of memory that is not backed by a named entry (returns KERN_NOT_SUPPORTED).
++kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
++	const uint64_t page_size = sysconf(_SC_PAGESIZE);
++	const uint64_t supported_flags = MAP_MEM_NAMED_CREATE | MAP_MEM_VM_SHARE;
++	uint64_t flags = permission & MAP_MEM_FLAGS_MASK;
++	vm_prot_t prot = permission & VM_PROT_ALL;
++	dtape_map_shared_descriptor_t* descriptor = NULL;
++	uint64_t entry_offset = 0;
++	uint64_t entry_size = 0;
++	kern_return_t kr;
++
++	if (!object_handle || !size) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	*object_handle = IP_NULL;
++
++	if ((permission & VM_PROT_IS_MASK) || (flags & ~supported_flags)) {
++		return KERN_NOT_SUPPORTED;
++	}
++	if (flags == supported_flags || *size == 0 || *size + page_size < *size) {
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	if (flags & MAP_MEM_NAMED_CREATE) {
++		if (parent_entry != IP_NULL || offset != 0) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		entry_size = mach_vm_round_page(*size);
++
++		int memfd = memfd_create("darling-mach-entry", MFD_CLOEXEC);
++		if (memfd < 0) {
++			return KERN_RESOURCE_SHORTAGE;
++		}
++		if (ftruncate(memfd, entry_size) < 0) {
++			close(memfd);
++			return KERN_RESOURCE_SHORTAGE;
++		}
++		descriptor = dtape_map_shared_descriptor_create(memfd, entry_size);
++		if (!descriptor) {
++			close(memfd);
++			return KERN_RESOURCE_SHORTAGE;
++		}
++	} else if (parent_entry != IP_NULL) {
++		vm_named_entry_t parent = dtape_named_entry_from_port(parent_entry);
++		if (!parent) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		if (offset & (page_size - 1)) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		entry_size = mach_vm_round_page(*size);
++		if (offset > parent->size || entry_size > parent->size - offset) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		if (prot & ~parent->protection) {
++			return KERN_PROTECTION_FAILURE;
++		}
++		entry_offset = parent->offset + offset;
++		descriptor = dtape_named_entry_descriptor(parent);
++		dtape_map_shared_descriptor_retain(descriptor);
++	} else {
++		if (!target_map) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		uint64_t start = mach_vm_trunc_page(offset);
++		uint64_t end = mach_vm_round_page(offset + *size);
++		dtape_map_shared_entry_t* found = NULL;
++		vm_prot_t found_protection = VM_PROT_NONE;
++		dtape_map_shared_entry_t* it;
++
++		if (end < start) {
++			return KERN_INVALID_ARGUMENT;
++		}
++
++		dtape_mutex_lock(&target_map->shared_entry_lock);
++		RB_FOREACH(it, dtape_map_shared_entry_head, &target_map->shared_entries) {
++			if (it->address <= start && end <= it->address + it->size) {
++				found = it;
++				break;
++			}
++		}
++		if (found) {
++			descriptor = found->descriptor;
++			found_protection = found->protection;
++			dtape_map_shared_descriptor_retain(descriptor);
++			entry_offset = (found->page_offset * page_size) + (start - found->address);
++		}
++		dtape_mutex_unlock(&target_map->shared_entry_lock);
++
++		if (!found) {
++			return KERN_NOT_SUPPORTED;
++		}
++
++		// the new entry may not grant more than the mapping itself allows
++		if (prot & ~found_protection) {
++			dtape_map_shared_descriptor_release(descriptor);
++			return KERN_PROTECTION_FAILURE;
++		}
++		entry_size = end - start;
++	}
++
++	kr = dtape_named_entry_make(descriptor, entry_offset, entry_size, prot, object_handle);
++	if (kr == KERN_SUCCESS) {
++		*size = entry_size;
++	}
++	return kr;
+ };
+ 
+ kern_return_t mach_memory_entry_access_tracking(ipc_port_t entry_port, int* access_tracking, uint32_t* access_tracking_reads, uint32_t* access_tracking_writes) {
+@@ -598,8 +791,81 @@
+ 	dtape_stub_unsafe();
+ };
+ 
++// Maps a named entry (or fresh anonymous memory when `port` is null) into target_map.
++// Supported: port null or one of our named entries; copy == FALSE; mask == 0; flags limited to
++// ANYWHERE/OVERWRITE/tag bits; offset page aligned and inside the entry; protections within the
++// entry's. Everything else returns an error code.
+ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t initial_size, mach_vm_offset_t mask, int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance) {
+-	dtape_stub_safe();
++	const uint64_t page_size = sysconf(_SC_PAGESIZE);
++	dtape_memory_flags_t memflags = dtape_memory_flag_none;
++	uint64_t map_size;
++	uintptr_t addr;
++
++	if (!target_map || !address || initial_size == 0 || initial_size + page_size < initial_size) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (flags & ~(VM_FLAGS_ANYWHERE | VM_FLAGS_OVERWRITE | VM_FLAGS_ALIAS_MASK)) {
++		return KERN_NOT_SUPPORTED;
++	}
++	if (mask != 0) {
++		return KERN_NOT_SUPPORTED;
++	}
++	if (!(flags & VM_FLAGS_ANYWHERE)) {
++		if (*address & (page_size - 1)) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		memflags |= dtape_memory_flag_fixed;
++		if (flags & VM_FLAGS_OVERWRITE) {
++			memflags |= dtape_memory_flag_overwrite;
++		}
++	}
++	map_size = mach_vm_round_page(initial_size);
++
++	if (!IP_VALID(port)) {
++		addr = dtape_hooks->task_allocate_pages(target_map->dtape_task->context, map_size / page_size, dtape_vm_prot_to_posix(cur_protection), (flags & VM_FLAGS_ANYWHERE) ? 0 : *address, memflags);
++		if (!addr) {
++			return KERN_NO_SPACE;
++		}
++		*address = addr;
++		return KERN_SUCCESS;
++	}
++
++	vm_named_entry_t entry = dtape_named_entry_from_port(port);
++	if (!entry) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (copy) {
++		return KERN_NOT_SUPPORTED;
++	}
++	if (offset & (page_size - 1)) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (offset > entry->size || map_size > entry->size - offset) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if ((max_protection & ~entry->protection) || (cur_protection & ~entry->protection)) {
++		return KERN_INVALID_RIGHT;
++	}
++
++	dtape_map_shared_descriptor_t* descriptor = dtape_named_entry_descriptor(entry);
++	uint64_t page_offset = (entry->offset + offset) / page_size;
++	dtape_map_shared_descriptor_retain(descriptor);
++
++	addr = dtape_hooks->task_map_file(target_map->dtape_task->context, descriptor->memfd, map_size / page_size, dtape_vm_prot_to_posix(cur_protection), (flags & VM_FLAGS_ANYWHERE) ? 0 : *address, page_offset, memflags);
++	if (!addr) {
++		dtape_map_shared_descriptor_release(descriptor);
++		return KERN_NO_SPACE;
++	}
++
++	dtape_map_shared_entry_t* shared_entry = dtape_map_shared_entry_create(addr, map_size, page_offset, descriptor);
++	dtape_map_shared_descriptor_release(descriptor); // the shared entry holds its own reference
++	if (shared_entry) {
++		shared_entry->protection = max_protection & VM_PROT_ALL;
++		dtape_map_replace_shared_entry(target_map, shared_entry);
++	}
++	// if the bookkeeping allocation failed the mapping still works; it just cannot be re-shared
++
++	*address = addr;
+ 	return KERN_SUCCESS;
+ };
+ 
+@@ -1458,6 +1724,9 @@
+ 			assert(named_entry->backing.copy->cpy_hdr.nentries == 1);
+ #endif // __DARLING__
+ 			vm_map_copy_discard(named_entry->backing.copy);
++		} else if (named_entry->backing.copy != VM_MAP_COPY_NULL) {
++			// a duct-taped entry: the backing is a shared-memory descriptor (see _mach_make_memory_entry)
++			dtape_map_shared_descriptor_release((dtape_map_shared_descriptor_t*)named_entry->backing.copy);
+ 		} else {
+ 			assert(named_entry->backing.copy == VM_MAP_COPY_NULL);
+ 		}
+--- a/duct-tape/src/kernelrpc_stubs.c
++++ b/duct-tape/src/kernelrpc_stubs.c
+@@ -36,74 +36,76 @@
+ /* current_task() is a macro expanding to current_task_fast() in kern/task.h */
+ 
+ /* ── mach_vm trap wrappers ───────────────────────────────────────────────── */
++/* The MIG server stubs (mach_vm.defs, `target_task : vm_map_t`) convert the task port to a
++ * vm_map_t before calling these, so the first argument IS the map, not a task. */
+ 
+-kern_return_t _kernelrpc_mach_vm_allocate_external(task_t task,
++kern_return_t _kernelrpc_mach_vm_allocate_external(vm_map_t map,
+     mach_vm_address_t *addr, mach_vm_size_t size, int flags)
+ {
+-    return mach_vm_allocate_kernel(task->map, (mach_vm_offset_t *)addr,
++    return mach_vm_allocate_kernel(map, (mach_vm_offset_t *)addr,
+         size, flags, 0 /* VM_KERN_MEMORY_NONE */);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_deallocate(task_t task,
++kern_return_t _kernelrpc_mach_vm_deallocate(vm_map_t map,
+     mach_vm_address_t start, mach_vm_size_t size)
+ {
+-    return vm_deallocate(task->map, (vm_offset_t)start, (vm_size_t)size);
++    return vm_deallocate(map, (vm_offset_t)start, (vm_size_t)size);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_protect(task_t task,
++kern_return_t _kernelrpc_mach_vm_protect(vm_map_t map,
+     mach_vm_address_t address, mach_vm_size_t size,
+     boolean_t set_maximum, vm_prot_t new_protection)
+ {
+-    return mach_vm_protect(task->map, address, size, set_maximum, new_protection);
++    return mach_vm_protect(map, address, size, set_maximum, new_protection);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_map_external(task_t task,
++kern_return_t _kernelrpc_mach_vm_map_external(vm_map_t map,
+     mach_vm_address_t *address, mach_vm_size_t size, mach_vm_offset_t mask,
+     int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy,
+     vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance)
+ {
+-    return mach_vm_map_external(task->map, (mach_vm_offset_t *)address, size,
++    return mach_vm_map_external(map, (mach_vm_offset_t *)address, size,
+         mask, flags, port, offset, copy, cur_protection, max_protection,
+         inheritance);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_remap_external(task_t target_task,
++kern_return_t _kernelrpc_mach_vm_remap_external(vm_map_t target_map,
+     mach_vm_address_t *target_address, mach_vm_size_t size,
+-    mach_vm_offset_t mask, int flags, task_t src_task,
++    mach_vm_offset_t mask, int flags, vm_map_t src_map,
+     mach_vm_address_t src_address, boolean_t copy,
+     vm_prot_t *cur_protection, vm_prot_t *max_protection,
+     vm_inherit_t inheritance)
+ {
+-    return mach_vm_remap_external(target_task->map,
++    return mach_vm_remap_external(target_map,
+         (mach_vm_offset_t *)target_address, size, mask, flags,
+-        src_task->map, src_address, copy, cur_protection, max_protection,
++        src_map, src_address, copy, cur_protection, max_protection,
+         inheritance);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_remap_new_external(task_t target_task,
++kern_return_t _kernelrpc_mach_vm_remap_new_external(vm_map_t target_map,
+     mach_vm_address_t *target_address, mach_vm_size_t size,
+     mach_vm_offset_t mask, int flags, mach_port_t src_tport,
+     mach_vm_address_t memory_address, boolean_t copy,
+     vm_prot_t *cur_protection, vm_prot_t *max_protection,
+     vm_inherit_t inheritance)
+ {
+-    return mach_vm_remap_new_external(target_task->map,
++    return mach_vm_remap_new_external(target_map,
+         (mach_vm_offset_t *)target_address, size, mask, flags,
+         src_tport, memory_address, copy, cur_protection, max_protection,
+         inheritance);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_purgable_control(task_t task,
++kern_return_t _kernelrpc_mach_vm_purgable_control(vm_map_t map,
+     mach_vm_address_t address, vm_purgable_t control, int *state)
+ {
+-    return mach_vm_purgable_control(task->map, address, control, state);
++    return mach_vm_purgable_control(map, address, control, state);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_read(task_t task,
++kern_return_t _kernelrpc_mach_vm_read(vm_map_t map,
+     mach_vm_address_t addr, mach_vm_size_t size,
+     vm_offset_t *data, mach_msg_type_number_t *data_size)
+ {
+-    return mach_vm_read(task->map, addr, size, (pointer_t *)data, data_size);
++    return mach_vm_read(map, addr, size, (pointer_t *)data, data_size);
+ }
+ 
+ /* ── host page size ─────────────────────────────────────────────────────── */
+--- a/duct-tape/internal-include/darlingserver/duct-tape/memory.h
++++ b/duct-tape/internal-include/darlingserver/duct-tape/memory.h
+@@ -22,6 +22,9 @@
+ 	uint64_t size;
+ 	uint64_t page_offset;
+ 	dtape_map_shared_descriptor_t* descriptor;
++	// the most a memory entry made from this mapping may grant (VM_PROT_*), i.e. the
++	// max_protection the mapping was made with
++	int protection;
+ } dtape_map_shared_entry_t;
+ 
+ typedef RB_HEAD(dtape_map_shared_entry_head, dtape_map_shared_entry) dtape_map_shared_entry_head_t;
