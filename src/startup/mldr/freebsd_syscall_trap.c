@@ -3697,6 +3697,20 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
             /* exit-attribution diagnostic: registers, a stack window and
              * the recent SIGSYS ring, so the faulting site is attributable. */
             mldr_tlogx("SIGILL-FAULT rip", pc, (long)mc->mc_rax);
+            /* who raised it: a #UD has si_code ILL_*, a signal sent by another
+             * thread or process has SI_USER/SI_LWP and a pid */
+            fprintf(stderr,
+                "[darling-mldr] SIGILL-FAULT info: si_code=0x%x si_pid=%d si_uid=%d"
+                " si_addr=%p rip=%p bytes=%02x %02x\n",
+                (unsigned)info->si_code, (int)info->si_pid, (int)info->si_uid,
+                info->si_addr, (const void *)pc, pc[0], pc[1]);
+            fprintf(stderr,
+                "[darling-mldr] SIGILL-FAULT ctx: trapno=%ld err=%ld flags=0x%lx onstack=%ld"
+                " rsp=0x%llx altstack sp=%p size=%zu flags=0x%x si_trapno=%d\n",
+                (long)mc->mc_trapno, (long)mc->mc_err, (unsigned long)mc->mc_flags,
+                (long)mc->mc_onstack, (unsigned long long)mc->mc_rsp,
+                uctx->uc_stack.ss_sp, (size_t)uctx->uc_stack.ss_size,
+                (unsigned)uctx->uc_stack.ss_flags, (int)info->si_trapno);
             mldr_tlogx("SIGILL-FAULT rsp", (const void *)(uintptr_t)mc->mc_rsp, 0);
             mldr_tlogx("SIGILL-FAULT rbp", (const void *)(uintptr_t)mc->mc_rbp, 0);
             mldr_tlogx("SIGILL-FAULT rcx", (const void *)(uintptr_t)mc->mc_rcx, 0);
