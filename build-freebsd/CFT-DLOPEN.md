@@ -15632,3 +15632,153 @@ only contains the abort path. Not investigated further: the receiver is unknown.
 - Cross-task sharing, `MAP_MEM_VM_SHARE` of memory that was not mapped from an entry.
 - The silent SIGILL at thread start did not occur in runs 2 to 5 (no `SIGILL-FAULT` line).
 - Any xdg_surface/xdg_toplevel creation, buffer commit, `swaymsg get_tree`, grim: no milestone reached.
+
+## Step 55 — ObjC realized-class fatal and window
+
+Branch `task/objc-realized`. Paths are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`.
+
+Result: **the realized-class fatal is fixed (cause measured); two walls behind it are fixed; Chrome now
+runs past AppKit start-up, but most runs die from the old intermittent crash family and the one run
+that stayed alive wedges in a darlingserver `sigprocess` call. No window yet** (no xdg_toplevel, no
+`get_tree` entry, no png).
+
+### (1) The class and the cause
+
+`validateAlreadyRealizedClass` (objc4 `runtime/objc-runtime-new.mm`) is reached from
+`realizeClassWithoutSwift`; a fatal `MLDR_TRAP_AT=libobjc.A.dylib+0x49b46` (`_objc_fatal`) with
+`MLDR_TRAP_STR=rsi` dumps the class (run `t1`, `t3`, `t7`):
+
+```text
+[darling-mldr] === MLDR_TRAP_AT hit #1: libobjc.A.dylib+0x49b46 ===
+  rdi=0x1211c1628f1b rsi=0x1211d1683440 rdx=0x114000041b0 ...
+  called from libobjc.A.dylib+0x23b39
+  [rsp+160] Google Chrome for Testing Framework (data)+0x11d418
+  [rsp+168] Google Chrome for Testing Framework (data)+0x11d440
+```
+
+The class is at framework `__DATA` +0x11d440 (image offset 0xfe6d440), the metaclass of the class at
+0xfe6d418. Its `class_ro_t` (read from the file) names it `ChromeSwizzleServicesMenuUpdater`, a direct
+`NSObject` subclass of Chromium. The `class_rw_t` at `rdx` is a valid structure (dump with
+`MLDR_TRAP_STR=rdx`: flags `0x80080001`, ro pointer, sibling pointer), so the data pointer is not
+corrupt: only the size check fails. A trap at the failure arm of the check (`libobjc.A.dylib+0x23b25`,
+run `t7`) shows what `malloc_size` returned:
+
+```text
+[darling-mldr] === MLDR_TRAP_AT hit #1: libobjc.A.dylib+0x23b25 ===
+  rdi=0x20 rsi=0x114b2556000 rdx=0x114b2556000 rcx=0x3969000 rax=0x28
+```
+
+`rax` = 0x28 = 40 for a block requested as 32 bytes (`sizeof(class_rw_t)`). The pointers are 48 bytes
+apart (`0x114000041b0`, `0x114000041e0`: slot 48 of a PartitionAlloc span), i.e. Chromium's malloc zone
+(PartitionAlloc, with in-slot metadata) reports 40 for a 32-byte request. The system zone is not
+involved: `tests/src/malloc-size-probe.c` (`ms-probe-1.log`, rc 0) gets 32 for 32 from the guest's
+default zone on the main thread and a worker. The reported OS identity (`osversion-probe`:
+`kern.osproductversion` 11.7.4, `kern.osrelease` 20.6.0) was checked as a candidate for a version-keyed
+allocator workaround; it was not proven to be the cause, so the fix does not depend on it. The class
+that fails first is simply the first realized after the zone is installed.
+
+Candidates of the task: (a) generated root classes: no (the class is Chromium's own); (b) behaviours
+constructor: no (it fails before and without any added method); (c) `malloc_size` misreports: yes, but
+it is the application's zone; (d) real framework class bug: no.
+
+### (2) Fix (objc4, exported patch)
+
+`validateAlreadyRealizedClass` now fails only when `malloc_size(rw) < sizeof(class_rw_t)` (size 0 = not
+a heap block, still fatal). objc4 is a dirty submodule, so the hunk is exported as
+`build-freebsd/patches/objc4-realized-rw-size.patch` (diffed against the unmodified file; the file had
+no earlier patch). `git apply --check` against `git show HEAD:runtime/objc-runtime-new.mm` in a
+temporary directory: `APPLY_OK_IDENTICAL` (the result is byte-identical to the working tree file).
+
+Rebuild: `sh build-freebsd/build-libobjc-only.sh` (new). The objc4 objects are compiled with the tree's
+ninja commands for x86_64 only and linked against the installed overlay dylibs (the tree's firstpass
+dylibs are not kept); `-DNDEBUG` is dropped and `OBJC_IS_DEBUG_BUILD=1` is set because the installed
+library has `LOCKDEBUG` on (`compare-dylib.sh`: exports diff 0 lines; code differs, since it is a
+different compile; binds differ only in addresses). The i386 slice of the installed fat file is carried
+over unchanged. Backup `libobjc.A.dylib.pre-objcreal`.
+
+md5, built == installed == staged (`stage-md5.sh`):
+
+```text
+MATCH usr/lib/libobjc.A.dylib built=0eadddd10b2d3dfdffb98f2110991066 overlay=0eadddd10b2d3dfdffb98f2110991066 staged=0eadddd10b2d3dfdffb98f2110991066
+MATCH usr/lib/AppKitExtras.dylib built=efecb68b14877f440cea137d9d0d4a22 overlay=efecb68b14877f440cea137d9d0d4a22 staged=efecb68b14877f440cea137d9d0d4a22 (after workspace.c; the services-menu-only build was b6af8c74...)
+previous: libobjc 61e9e2b75a676605405986adb43ca772, AppKitExtras 18a366cd8ff76ece4e55529fea1e19b9 (both kept as *.pre-objcreal)
+```
+
+### (3) The walls behind it
+
+With the fix the fatal is gone (`chrome-or-u2..u5`); the stop becomes **SIGTRAP at framework
++0x3fbc4d8** (rc 133) in all three runs that get that far (`u2`, `u3`, `u4`; `u5` is the intermittent
+SIGILL, `u1` an abort from the same crash handler). Classification: the function at +0x3fbc260 is a
+`dispatch_once` body. Its two failure arms (`je` at +0x3fbc296 and +0x3fbc2c3) fall into the `int3` at
++0x3fbc4d7. Decoding it from the file:
+
+```text
+NSClassFromString(@"_NSServiceEntry")        instancesRespondToSelector: bundleIdentifier
+NSClassFromString(@"_NSServicesMenuUpdater") instancesRespondToSelector: populateMenu:withServiceEntries:forDisplay:
+                                             ... plugMenu:intoMenu:
+```
+
+Chromium CHECKs that these private AppKit classes and selectors exist before it swizzles them; this
+AppKit has none of them. Fix: `stub-frameworks/behaviors/AppKitExtras.dylib/services-menu.c` registers
+both as empty `NSObject` subclasses at load time. Run `w1` (300 s, rc 124) then showed the next wall:
+
+```text
+Terminating app due to uncaught exception 'NSException', reason: 'This class is not key value
+coding-compliant for the key voiceOverEnabled.'
+```
+
+Chromium observes `voiceOverEnabled` on `NSWorkspace`. Fix: `.../AppKitExtras.dylib/workspace.c` adds
+`-voiceOverEnabled` and `-isVoiceOverEnabled` (NO) to the real class from a load-time constructor, with
+an add-image retry because AppKit can be mapped after this image. Rebuilt with
+`rebuild-stub-data.py ... usr/lib/AppKitExtras.dylib` (export list unchanged, `check-data-as-code.py`:
+0 offenders). Not seen again in the later runs.
+
+Not on this path (ruled out by traps that never hit): a thrown exception (`objc_exception_throw`,
+`__cxa_throw`, `_Unwind_RaiseException`/`Resume` all armed, no hit), the landing pad at +0x3fbc4cf, and
+the libc++abi guard abort blocks (+0x3fbc46c, +0x48a, +0x49f, +0x4b8). `fork` (crashpad handler start,
+`spawn_subprocess.cc:136 fork: Function not implemented`) is logged and tolerated.
+
+### (4) Where it stops now
+
+Run `x3` (alive at the 120 s timeout, rc 124, GUEST-EXEC at 0 s): the main thread sends call 12
+(`sigprocess`, 56 bytes) after the `signal 65` hold and waits in `recvmsg` for the rest of the run; no
+other call from it. No Wayland object beyond the registry roundtrip is created. `sigprocess` is the
+guest handing a signal to `Thread::processSignal` (the Mach exception path); which signal it was and
+what the server does with it was not determined (the three runs with the RPC log all died early).
+
+The much more common outcome is one of the old intermittent crashes, now seen in 17 of 18 runs after
+the AppKit fixes (w2, x1..x3, y1..y6, z1..z8): a genuine `ud2` in `libsystem_platform+0x2688` (the unfair-lock corruption abort,
+lock word printed), `FATAL signal 4` in `__pthread_kill` (abort with signal 6), a SIGSEGV (rc 139), or an
+abort with no message. These are the step 53 (7) family and are what stands between the fixed walls and
+a window.
+
+### (5) Runs
+
+Every run has GUEST-EXEC; logs are `$DARLING_BUILD_DIR/chrome-or-<name>.log`, own headless sway
+(`WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman`, private 0700 runtime dir,
+stopped afterwards), local page only. Duration / timeout are the wrapper's.
+
+| run | rc | duration / timeout | GUEST-EXEC | end |
+| --- | --- | --- | --- | --- |
+| t1, t3, t7 | 132 | 55, 59, 83 s / 200-300 s | 51, 35, 4 s | planted trap at `_objc_fatal` / failure arm (the rc is the trap) |
+| t2, t5 | 139 | 23, 51 s | 14, 0 s | intermittent SEGV before the trap; repeated |
+| u1..u5 | 134,133,133,133,132 | 72,39,81,35,13 s / 400 s | 69,23,28,31,10 s | after the fix: fatal gone; SIGTRAP at +0x3fbc4d8 |
+| w1 | 124 | 301 s / 300 s | 33 s | past services menu, then the voiceOverEnabled exception (alive until the kill) |
+| w2 | 132 | 10 s / 240 s | 5 s | abort (signal 6) from the crash handler |
+| x1, x2 | 132 | 31, 10 s / 120 s | 23, 7 s | unfair-lock `ud2`; abort |
+| x3 | 124 | 125 s / 120 s | 0 s | alive, main thread in the `sigprocess` call; no window |
+| y1..y6 | 132,132,132,132,132,134 | 3,3,12,20,8,2 s / 70 s | 0,1,9,17,5,0 s | intermittent crashes |
+| z1..z8 | 132,132,134,132,139,132,132,132 | 9,3,3,9,7,9,10,3 s / 60 s | 6,1,0,6,3,2,3,0 s | intermittent crashes |
+
+Other runs (diagnostic traps on `fork`, `abort`, `pthread_kill`, unwind and throw functions, `f`, `g`,
+`h`..`s`) ended at their planted trap or at the same crash family; none reached a window. A timeout kill
+(`w1`, `x3`) is not a result by itself.
+
+### (6) Not verified
+
+- Which signal the `sigprocess` call of `x3` carries and why the server does not reply.
+- The cause of the intermittent crash family (it now dominates).
+- That the PartitionAlloc size rule is the *only* difference from a real macOS (the OS-version
+  hypothesis was not tested; no run with a different reported version was completed).
+- Any xdg_surface / xdg_toplevel / buffer commit, `swaymsg get_tree` entry, grim png.
+- The rebuilt libobjc beyond what runs showed: its code is a new compile of the same sources.
