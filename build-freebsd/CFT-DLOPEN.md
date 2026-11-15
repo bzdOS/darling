@@ -15782,3 +15782,155 @@ Other runs (diagnostic traps on `fork`, `abort`, `pthread_kill`, unwind and thro
   hypothesis was not tested; no run with a different reported version was completed).
 - Any xdg_surface / xdg_toplevel / buffer commit, `swaymsg get_tree` entry, grim png.
 - The rebuilt libobjc beyond what runs showed: its code is a new compile of the same sources.
+
+## Step 56 — signal 65 reentrancy
+
+Branch `task/sig-reentry`, from `pr-arm64` (4bb37a0ca). Paths are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`,
+`$DARLING_BUILD_DIR`. Logs: `$DARLING_BUILD_DIR/sr-*.log` (probe), `chrome-sr-*.log` (Chrome).
+
+Result: **two causes found and fixed, one of them for a large share of the Chrome deaths; the probe
+and Chrome still crash (a third cause, behind signal 65 and thread_suspend, is open). No window.**
+
+- Cause 1 (mldr, probe-proven): a *second delivery* of an already emulated SIGILL. Fixed in
+  `freebsd_syscall_trap.c`.
+- Cause 2 (darlingserver, Chrome-proven): the server **aborts** on `task_info` with a flavor it does
+  not implement (`dtape_stub_unsafe`). Every guest thread then gets `BAD SEND STATUS: -61`
+  (`dserver_rpc_interrupt_enter failed with code -61`) and dies with some random signature: this is the
+  "intermittent crash family" of step 55 (ud2 in libsystem_platform, `FATAL signal 4`, SEGV, silent abort).
+  Fixed with `build-freebsd/patches/darlingserver-task-info-flavor.patch`.
+- The lead's hypothesis (signal 65 inside the emulation handler) is not the cause of the *common* crash:
+  the spawn-only probe, which never sends signal 65, crashes 4 of 12 times. It is the cause of the
+  remaining probe failures (below), not measured to the end.
+
+### (1) Probe
+
+`tests/src/sig-reentry-probe.c`, `sh build-freebsd/build-sig-reentry-probe.sh`, runner
+`sh build-freebsd/sig-reentry-probe-run.sh PREFIX N [TIMEOUT] [SUSPENDS] [SPAWNS] [IDLE_WORKER]`
+(`launch-dynamic`, `DARLING_KEEP_LOCAL=1`, a run without GUEST-EXEC is invalid and repeated,
+`PROBE_TRAP_LOG=1`, `PROBE_EXTRA_ENV`). Threads: worker (mach_port_allocate/deallocate,
+semaphore signal/wait, mutex, getpid, mach_thread_self in a loop), suspender (`thread_suspend` /
+`thread_resume` of the worker, each suspend is darlingserver `thread_hold`, i.e. signal 65, logged as
+`[dserver-sendsignal] ... signal=65`), spawner (`pthread_create`/`pthread_join`, 300 or 100 times),
+watchdog. No trap log, timeout 120 s, N=12 valid runs per cell.
+
+| config | build | ok | bad | signatures |
+| --- | --- | --- | --- | --- |
+| S: 0 suspends, 300 spawns | before (mldr md5 247149c6...) | 8 | 4 | 4x rc 132 `Illegal instruction`, no message |
+| S | after (mldr cd0b7446..., this step) | 11 | 1 | 1 hang, rc 124, `*** dserver_rpc_interrupt_enter failed with code -61 ***` |
+| F: 1500 suspends, 100 spawns | before | 0 | 12 | 11x rc 132 `Illegal instruction`, 1 hang (-61 line) |
+| F | after, first version (exact `rip == si_addr+2` test) | 0 | 12 | mix of rc 132 and 139 (SEGV), 1 rc 134 |
+| F | after, final | 0 | 12 | 11x rc 139 `Segmentation fault`, 1x rc 134 `abort_with_payload: reason: pthread_t was corrupted; code: 4`; no SIGILL left |
+
+So the SIGILL family is gone in both configs; F still fails every time, now with a deterministic
+SEGV/abort. Earlier, with the trap log: 8 runs spawn-only before: 4 SIGILL, 1 hang; with the
+experimental gate on (`MLDR_SIGILL_DUP=1`): 8 of 8 ok, two `DUPLICATE-RESUME` hits.
+
+### (2) Cause 1: duplicate SIGILL delivery
+
+Verbatim, `sr-probe-h-4.log` (spawn-only, trap log), the faulting thread:
+
+```text
+[traplog] SIGILL ENTER tid=263055 ...f843 b=202
+[traplog] SIGILL LEAVE tid=263055 a=0 b=202
+[traplog] SIGILL ENTER tid=263055 p=0x10127dd6f845 b=0
+[darling-mldr] SIGILL-FAULT info: si_code=0x5 si_pid=0 si_uid=0 si_addr=0x10127dd6f843 rip=0x10127dd6f845 bytes=c3 90
+[darling-mldr] SIGILL-FAULT ctx: trapno=1 err=0 flags=0x5 onstack=0 rsp=0x1012804abc78 altstack sp=0x1012804ae000 ...
+[darling-mldr] SIGILL-FAULT h1: prev tid=263055 seq=27136 uctx=0x1012804bd380 info=0x1012804bd6f0 rip_in=0x10127dd6f843 rip_out=0x10127dd6f845 rax_out=0x14 | now seq=27141 uctx=0x1012804bd380 info=0x1012804bd6f0 rip=0x10127dd6f845 rsp=0x1012804abc78 sigmask0=0x0
+```
+
+The handler finished one `ud2` (`rip_in ...f843`, `rip_out ...f845`), and the very next SIGILL on that
+thread carries the old siginfo (`si_addr` = the ud2) with a context that is the one the first handler
+left behind (`rip` = after the ud2, `rax` = its result). A real `#UD` is reported with `si_addr ==` context
+rip (`trap.c`: `ksi_addr = tf_rip`). mldr then took it for "not one of ours", reset SIGILL to default and
+re-raised: silent rc 132. With signal 65 the stale delivery lands anywhere in the handler, e.g.
+`SIGILL-FAULT info: ... si_addr=0x2d9311b6f843 rip=0x2267af bytes=73 03` (`rip` inside mldr's
+`freebsd_raw_syscall`).
+
+Fix (`freebsd_syscall_trap.c`, `sigill_handler`): a SIGILL whose `si_addr` names one of mldr's patched ud2
+sites but differs from the context rip is a duplicate: resume without touching the context
+(`[traplog] SIGILL DUPLICATE-RESUME`). Seen 2 times in 8 probe runs and in 3 of 10 Chrome runs
+(`chrome-sr-a*`). The kernel-side reason the delivery is repeated was **not** established: candidates
+read in `/usr/src` (libthr `thr_sighandler` deferral, `kern.forcesigexit`, sigfastblock) were not
+confirmed by any measurement; `ktrace` was too slow to reproduce. Not verified.
+
+Diagnostics kept (gated on `DARLING_TRAP_LOG`): per-thread record of the last SIGILL frame, printed in the
+not-ours branch (`SIGILL-FAULT h1:`).
+
+### (3) Cause 2: the server aborts
+
+`/var/log/messages`: 20 lines `pid N (darlingserver), jid 0, uid 0: exited on signal 6` on 15 Nov, eight
+of them within the minutes of the `chrome-sr-a*`, `w`, `x` runs. With `DSERVER_LOG_STDERR=1`
+(`chrome-sr-x1.log`):
+
+```text
+(dtape, Error)[P:90614(90614)][T:282744(282744)] 90614(90614):282744(282744): stub (unsafe): task_info:unimplemented flavor
+```
+
+`duct-tape/src/task.c` `task_info()` `default:` was `dtape_stub_unsafe`. Which flavor was not logged (the
+fix logs it as a warning). Fix: log the flavor, return `KERN_INVALID_ARGUMENT`. The file is in the dirty
+darlingserver submodule; only the hunk is exported:
+`build-freebsd/patches/darlingserver-task-info-flavor.patch` (the file had no earlier patch). Apply-check of
+the patch against `git show HEAD:duct-tape/src/task.c` in a temporary repository: `APPLY_OK`.
+Rebuild: `rebuild-dtape-object.sh src/task.c`, `build-darlingserver.sh`.
+
+Number of Chrome logs containing the server-gone line (`failed with code -61` / `BAD SEND STATUS: -61`):
+step 55 y1..y6 3 of 6, z1..z8 3 of 8, `chrome-sr-a1..a10` (mldr fix only) 8 of 10, `chrome-sr-b1..b10`
+(both fixes) 0 of 10. No new `darlingserver ... exited on signal 6` after the fix.
+
+### (4) Chrome crash rates
+
+Own sway per batch (`sh build-freebsd/chrome-sr-batch.sh PREFIX N TIMEOUT`: private 0700 runtime dir,
+headless, pixman, stopped afterwards), `chrome-wl-run.sh`, timeout 120 s, every run has GUEST-EXEC.
+
+| build | runs | crashed | alive at timeout | rc | duration |
+| --- | --- | --- | --- | --- | --- |
+| before: step 55 `chrome-or-y1..y6, z1..z8` | 14 | 14 | 0 | 132 x11, 134 x2, 139 x1 | 2-20 s |
+| mldr fix only: `chrome-sr-a1..a10` | 10 | 10 | 0 | 132 x8, 139 x1, 134 x1 | 4-35 s |
+| mldr + darlingserver fix: `chrome-sr-b1..b10` | 10 | 10 | 0 | 134 x3, 139 x6, 132 x1 | 4-7 s |
+
+The Chrome crash *rate* did not improve: 10 of 10 still die. What changed: the server no longer aborts,
+and all ten `b` runs print the Wayland lines (62 `[WaylandDisplay]` lines each) and (checked in b1 and b8) reach the AppKit
+start-up past the thermal observer error. They now die in 4-7 s with an abort (rc 134) or SEGV (rc 139) that
+carries no `FATAL` line from mldr (`chrome-run-summary.sh`: `last=[none]`), i.e. a third cause that was
+not investigated. No xdg_toplevel, no buffer commit, no `get_tree` entry, no png: the "window created"
+milestone was not reached.
+
+### (5) md5
+
+mldr is exec'ed in place; built == installed:
+
+```text
+247149c6f8a8aab15099e214b1921136  mldr.pre-sigreentry   (before)
+cd0b7446e365e830208b919f6eb51f85  built (/tmp/mldr-build-*/mldr) == installed dserver/mldr-real/mldr == mldr.sigreentry-fixed2
+e5d3c0fb48f2e1a63fb92cf804194814  darlingserver.pre-sigreentry (before)
+eb90b5f18b79442791b0e24b509cdaba  darlingserver built == installed (canonical path is a symlink to dserver-build/darlingserver)
+```
+
+No overlay file was replaced (mldr and darlingserver are not overlay files), so `stage-md5.sh` has nothing
+to check for this step. Backups are `*.pre-sigreentry` in `$DARLING_BUILD_DIR/dserver/` and
+`.../dserver/mldr-real/`; intermediate mldr builds `mldr.sigreentry-fixed` (exact-site test, d770013d...)
+and `mldr.sigreentry-fixed2` (final) in `$DARLING_BUILD_DIR`.
+
+### (6) Open: signal 65 / thread_suspend
+
+Probe config F fails every time after the fixes. Measured, not explained: the worker's `progress` counter
+stays 0 over 1000+ suspend/resume rounds (`suspend round 1000 progress=0`), i.e. the held thread never
+completes a loop after being held; in `sr-probe-k-4.log` the signalled thread issues kprintf (call 4),
+interrupt_enter (call 14) and thread_self_trap (35) over and over; the SEGV is in the guest pthread code
+reading `pthread_self` (rax=`0x3000000010` then a load at +0x10), the abort is
+`pthread_t was corrupted`. Design observation, not tested: mldr's emulated recvmsg is a raw host
+syscall; the guest RPC loop relies on EINTR plus its own pushed-reply queue
+(`dserver_rpc_hooks_push_reply`), which is never consulted if the kernel restarts the interrupted
+`recvmsg` (SA_RESTART) while the nested handler consumed the reply. Also, the emulated
+`rt_sigprocmask` applies its mask inside the SIGILL handler, and `sigreturn` restores the mask saved at
+handler entry, so a guest block (the RPC layer's `atomic_begin`) has no lasting effect. Neither was
+confirmed by a run.
+
+### (7) Not verified
+
+- Why the kernel delivers the SIGILL twice (candidates only).
+- Which `task_info` flavor Chrome asks for.
+- The cause of the post-fix Chrome deaths (rc 134/139, no FATAL line) and of the config F failures.
+- The `-61` hangs of the spawn-only probe (1 of 12 after, 4 of 8 earlier with an idle worker): server
+  side state of two threads waiting in call 62 (`semaphore_timedwait`) with the server idle.
+- Anything past the registry roundtrip.

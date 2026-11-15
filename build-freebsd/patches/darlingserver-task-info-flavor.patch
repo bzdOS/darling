@@ -1,0 +1,16 @@
+diff --git a/duct-tape/src/task.c b/duct-tape/src/task.c
+index 9e1f694..67c3d03 100644
+--- a/duct-tape/src/task.c
++++ b/duct-tape/src/task.c
+@@ -522,7 +522,10 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
+ 		};
+ 
+ 		default:
+-			dtape_stub_unsafe("unimplemented flavor");
++			// An unknown flavor used to abort the whole server (dtape_stub_unsafe), taking every
++			// thread of every guest process with it. Answer like XNU does for a flavor it does not know.
++			dtape_log_warning("%s: unimplemented flavor %d", __FUNCTION__, (int)flavor);
++			return KERN_INVALID_ARGUMENT;
+ 	}
+ };
+ 

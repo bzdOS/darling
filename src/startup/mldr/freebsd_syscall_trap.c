@@ -3689,18 +3689,55 @@ mldr_path_log(unsigned int nr, long a1, long a2)
  *              actually executed by the CPU); re-raises as the default
  *              action for any #UD that isn't one of our own patches.
  */
+/* sig-reentry diagnostic (DARLING_TRAP_LOG only): the last SIGILL frame seen per host
+ * thread. Racy by design, nothing is printed on the hot path; the not-ours branch
+ * below prints the previous and the current record. */
+struct mldr_h1rec { long tid; uintptr_t uctx, info, rip_in, rip_out; unsigned long rax_out, seq; };
+static struct mldr_h1rec mldr_h1[64];
+static unsigned long mldr_h1_seq;
+
 static void
 sigill_handler(int signo, siginfo_t *info, void *uctx_void)
 {
     ucontext_t *uctx = (ucontext_t *)uctx_void;
     mcontext_t *mc = &uctx->uc_mcontext;
     const uint8_t *pc = (const uint8_t *)(uintptr_t)mc->mc_rip;
+    struct mldr_h1rec *h1 = NULL, h1prev;
+    memset(&h1prev, 0, sizeof(h1prev));
+    if (mldr_trap_log_enabled) {
+        long ht = 0;
+        freebsd_raw_syscall(SYS_thr_self, (long)&ht, 0, 0, 0, 0, 0);
+        h1 = &mldr_h1[ht & 63];
+        h1prev = *h1;
+        h1->tid = ht; h1->uctx = (uintptr_t)uctx; h1->info = (uintptr_t)info;
+        h1->rip_in = (uintptr_t)mc->mc_rip; h1->rip_out = 0; h1->rax_out = 0;
+        h1->seq = ++mldr_h1_seq;
+    }
 
     /* exit-caller logging slice: handler entry with the faulting pc */
     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
         mldr_tlogx("SIGILL ENTER", pc, (long)mc->mc_rax);
     if (pc[0] == 0x0f && pc[1] == 0x0b)
         mldr_path_log((unsigned int)mc->mc_rax, (long)mc->mc_rdi, (long)mc->mc_rsi);
+
+    /* Step 56: a SIGILL whose siginfo names one of our patched ud2 sites, but whose context
+     * rip is somewhere else, is not a fresh trap (a real #UD is reported with si_addr equal to
+     * the context rip): it is a second delivery of a trap that was already emulated, and the
+     * context is whatever the thread was doing when the kernel got round to delivering it
+     * (the instruction after the ud2 in the measured crashes, the raw syscall inside this
+     * handler in the ones with a signal 65). The trap itself is done; resume without
+     * touching the context. */
+    if (info->si_addr != NULL && (uintptr_t)info->si_addr != (uintptr_t)mc->mc_rip) {
+        for (int i = 0; i < _mldr_ud2_site_count; i++) {
+            if (_mldr_ud2_sites[i] == (uintptr_t)info->si_addr) {
+                static volatile unsigned long dups;
+                unsigned long n = ++dups;
+                if (mldr_trap_log_enabled)
+                    mldr_tlogx("SIGILL DUPLICATE-RESUME", pc, (long)n);
+                return;
+            }
+        }
+    }
 
     if (pc[0] != 0x0f || pc[1] != 0x0b) {
         /* Not one of ours — a genuine illegal instruction elsewhere.
@@ -3725,6 +3762,13 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
                 (long)mc->mc_onstack, (unsigned long long)mc->mc_rsp,
                 uctx->uc_stack.ss_sp, (size_t)uctx->uc_stack.ss_size,
                 (unsigned)uctx->uc_stack.ss_flags, (int)info->si_trapno);
+            fprintf(stderr,
+                "[darling-mldr] SIGILL-FAULT h1: prev tid=%ld seq=%lu uctx=%p info=%p rip_in=%p rip_out=%p rax_out=0x%lx |"
+                " now seq=%lu uctx=%p info=%p rip=%p rsp=%p sigmask0=0x%x\n",
+                h1prev.tid, h1prev.seq, (void *)h1prev.uctx, (void *)h1prev.info, (void *)h1prev.rip_in,
+                (void *)h1prev.rip_out, h1prev.rax_out, h1 ? h1->seq : 0UL, (void *)uctx, (void *)info,
+                (void *)(uintptr_t)mc->mc_rip, (void *)(uintptr_t)mc->mc_rsp,
+                (unsigned)*(const uint32_t *)(const void *)&uctx->uc_sigmask);
             mldr_tlogx("SIGILL-FAULT rsp", (const void *)(uintptr_t)mc->mc_rsp, 0);
             mldr_tlogx("SIGILL-FAULT rbp", (const void *)(uintptr_t)mc->mc_rbp, 0);
             mldr_tlogx("SIGILL-FAULT rcx", (const void *)(uintptr_t)mc->mc_rcx, 0);
@@ -3926,6 +3970,7 @@ sigill_handler(int signo, siginfo_t *info, void *uctx_void)
      * that convention belongs to the macOS BSD-syscall class only. */
     mc->mc_rax = (uint64_t)ret;
     mc->mc_rip += 2; /* skip the ud2 the CPU never actually executed */
+    if (h1 != NULL) { h1->rip_out = (uintptr_t)mc->mc_rip; h1->rax_out = (unsigned long)mc->mc_rax; }
     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
         mldr_tlog("SIGILL LEAVE", (long)mc->mc_rax, (long)linux_nr);
 }
