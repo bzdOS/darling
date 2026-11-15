@@ -15489,3 +15489,146 @@ blocks multi-process Chrome. Not attempted.
   `swaymsg get_tree`, grim of a window: no milestone reached.
 - That the mldr build from the current source matches the previously installed binary
   apart from the diagnostics (sizes differ: 758848 vs 741K).
+
+## Step 54 — Mach memory entries
+
+Branch `task/mem-entry`. Paths are `$DARLING_SRC_DIR`, `$DARLING_OVERLAY`, `$DARLING_BUILD_DIR`.
+
+Result: **memory entries work (probe passes); Chrome no longer stops at
+`mach_make_memory_entry_64`; no window yet.** The next wall is an ObjC fatal after the
+Wayland registry roundtrip (below). No `xdg_toplevel`, no commit, no `get_tree` entry, no png.
+
+### (1) Design
+
+- A named entry is a Mach port (`IKOT_NAMED_ENTRY`) whose kobject is a `vm_named_entry`; its
+  `backing.copy` (unused by this port type) holds a retained `dtape_map_shared_descriptor`
+  (an anonymous memfd, sized at creation, refcounted), plus `offset`, `size` (a window of the
+  memfd) and `protection` (the most a mapping may ask for).
+- `mach_vm_map` of such a port goes through the MIG path to darlingserver
+  (`mach_vm_map_external`), which asks the owning process, with the existing server-to-client
+  mmap call, to `mmap(MAP_SHARED)` the window; the memfd travels as SCM_RIGHTS (step 51 bridge).
+  The client-side `mach_vm_map` shortcut only handles a null port, so nothing client-side
+  changed in libsystem_kernel.
+- Lifetime: the descriptor is released when the port is destroyed (`mach_destroy_memory_entry`)
+  and when every mapping recorded for it in the task's shared-entry tree is gone. Mappings
+  outlive the port (probe checks it). The guest unmaps without telling the server, so a
+  recorded mapping can go stale; recording a new mapping drops every recorded mapping it overlaps.
+- Supported: `MAP_MEM_NAMED_CREATE | prot` (offset 0, size rounded up to a page);
+  `MAP_MEM_VM_SHARE | prot` (or plain `prot`) of an address range that was itself mapped from a
+  named entry, limited to that mapping's max protection (the read-only copy Chrome makes);
+  a sub-entry of a parent entry; `mach_vm_map` with a null port (anonymous memory) or one of our
+  entries, `copy == FALSE`, `mask == 0`, flags `ANYWHERE`/`OVERWRITE`/tag bits, page aligned
+  offset inside the entry, protections within the entry's.
+- Everything else returns an error code and never aborts: `MAP_MEM_VM_COPY`, purgable, ledger,
+  caching modes, data-address variants, `VM_SHARE` of memory not backed by an entry, `copy`,
+  non-zero mask: `KERN_NOT_SUPPORTED` (46); bad offset/size: `KERN_INVALID_ARGUMENT`; more
+  protection than the entry has: `KERN_INVALID_RIGHT` / `KERN_PROTECTION_FAILURE`.
+
+### (2) What had to change (three faults found on the way)
+
+1. `duct-tape/src/kernelrpc_stubs.c`: the `_kernelrpc_mach_vm_*` wrappers took a `task_t` and read
+   `task->map`, but the MIG stubs already pass a `vm_map_t`. The first `mach_vm_map` of an entry
+   killed the server with SIGBUS (core: `target_map` was a garbage value read from offset 0x170 of
+   the map). The wrappers now use the map directly.
+2. `mldr` `sendto`: the guest answers a server-to-client call with `sendto` and the server's
+   address in Linux layout; it reached the host unchanged and failed with EINVAL, so the RPC that
+   asked for the mmap failed (`mach_msg_overwrite failed (internally): -22`; the mmap itself had
+   succeeded). The address is re-packed like the `sendmsg` case does.
+3. `task_get_memory_region_info` reads `/proc/<pid>/maps`, which FreeBSD does not have, so the
+   protection of a mapping cannot be asked of the host; the shared entry records the
+   `max_protection` of the mapping instead.
+
+Patch: `build-freebsd/patches/darlingserver-mach-named-entry.patch` (stacks after
+`darlingserver-mach-memory-entry.patch`; touches `duct-tape/src/memory.c`,
+`duct-tape/src/kernelrpc_stubs.c`, `duct-tape/internal-include/darlingserver/duct-tape/memory.h`).
+Series check in a temp directory against `git show HEAD:<file>`, in order: rpc-log, skip-fork-wait,
+sendsignal-log, mach-memory-entry, mach-named-entry: all `APPLY_OK`, and the resulting six files are
+byte-identical to the working tree.
+
+Rebuild: `sh build-freebsd/rebuild-dtape-object.sh src/memory.c` and `src/kernelrpc_stubs.c`,
+`sh build-freebsd/build-darlingserver.sh`, `sh build-freebsd/build-mldr-only.sh`, and
+`cc -o $DARLING_BUILD_DIR/launch-dynamic tests/launch-dynamic-smoke.c -lpthread`. Backups:
+`dserver/darlingserver.pre-mementry` (md5 `b8e878bf5a1a704b4edd524c2398770d`),
+`dserver/mldr-real/mldr.pre-mementry` (`2090d1d89a57e93607fea90ded359f9e`),
+`launch-dynamic.pre-mementry`, `dtape/dtape-build/libdtape.a.pre-mementry`.
+
+### (3) Probe
+
+`tests/src/mach-memory-entry-probe.c`, `sh build-freebsd/build-mach-entry-probe.sh`, run under
+`launch-dynamic` with `DARLING_TEST_BINARY=mach-memory-entry-probe-macho`; log `me-probe-7.log`,
+rc 0, 2 s / 120 s:
+
+```text
+create: kr=0 ((os/kern) successful) entry=0x707 size=16384
+map 1: kr=0 ((os/kern) successful) addr=0x823127000
+map 2: kr=0 ((os/kern) successful) addr=0x82647b000
+read via mapping 2: "hello through mapping one" last=0x5a
+share ro: kr=0 ((os/kern) successful) entry=0x1403 size=16384
+map ro: kr=0 ((os/kern) successful) addr=0x826eaa000 data="hello through mapping one"
+map ro as rw (must fail): kr=17 ((os/kern) invalid right)
+map page 1: kr=0 ((os/kern) successful)
+VM_COPY: kr=46 ((os/kern) service not supported)
+PURGABLE: kr=46 ((os/kern) service not supported)
+VM_SHARE of plain memory: kr=46 ((os/kern) service not supported)
+map with copy=TRUE: kr=46 ((os/kern) service not supported)
+map beyond entry size: kr=4 ((os/kern) invalid argument)
+deallocate entry port: kr=0
+second entry: kr=0 ((os/kern) successful) addr=0x823175000
+PROBE-OK
+```
+
+Earlier probe runs: 1 and 2 (server SIGBUS, fault 1), 3 and 4 (`-22`, fault 2), 5 (`-22`, mldr
+installed but the address family check still rejected it), 6 (all but the read-only share, fault 3).
+
+### (4) Harness
+
+`tests/launch-dynamic-smoke.c` no longer runs `pkill -9 darlingserver` (every user's server): it
+matches `^darlingserver <prefix> ` (checked with two dummy processes: only the one with the
+matching prefix died). It also prints `[launch] STAGING begin` and
+`[launch] STAGING end / GUEST-EXEC pid=.. t=..s` to stderr, so a run whose log stays empty until
+the timeout can be told from one that never reached the guest. The first Chrome run
+(`chrome-me-1.log`, rc 124, 200 s / 200 s, empty log, no GUEST-EXEC marker existed yet) is invalid.
+
+### (5) Chrome runs
+
+Own sway (`WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman`, private mode-0700
+`XDG_RUNTIME_DIR`, build user), stopped after the runs. Logs `$DARLING_BUILD_DIR/chrome-me-<n>.log`,
+via `chrome-wl-run.sh` with the arguments of step 51.
+
+| run | rc | duration / timeout | GUEST-EXEC | end |
+| --- | --- | --- | --- | --- |
+| 1 | 124 | 200 s / 200 s | no marker yet | empty log, invalid |
+| 2 | 139 | 7 s / 600 s | no marker yet | mldr SIGSEGV right after `unhandled Linux syscall 56 (clone) — ENOSYS` (one occurrence, not reproduced) |
+| 3 | 134 | 36 s / 300 s | t=34 s | ObjC fatal (below) |
+| 4 | 134 | 18 s / 200 s | t=11 s | same |
+| 5 | 134 | 13 s / 200 s | t=8 s | same |
+
+Verbatim end of run 5:
+
+```text
+[WaylandDisplay] roundtrip1 returned 57, compositor=0x279516209560 ... 
+[darling-mldr] unhandled Linux syscall 56 — ENOSYS
+[50168:170603:1115/043822.848214:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+objc[50168]: realized class 0x2a5391283440 has corrupt data pointer 0x114000041b0
+abort_with_payload: reason: realized class 0x2a5391283440 has corrupt data pointer 0x114000041b0; code: 1
+```
+
+`FATAL ... platform_shared_memory_region_apple.cc` does not appear any more; the Wayland
+registry roundtrip completes (`roundtrip1 returned 57`) and Chrome runs on to the ObjC fatal.
+
+### (6) Next wall
+
+`validateAlreadyRealizedClass` (`objc4/runtime/objc-runtime-new.mm:2585`) calls
+`malloc_size(cls->data())` and finds it is not `sizeof(class_rw_t)`: a message was sent to something
+that is not a class (the `data` word `0x114000041b0` is not a heap pointer), in the main thread
+right after the thermal-state observer error and a `pthread_canceled` call. Same in runs 3, 4, 5
+(the class address differs by the slide, its low 20 bits are the same). The Chrome-side stack trace
+only contains the abort path. Not investigated further: the receiver is unknown.
+
+### (7) Not verified
+
+- That Chrome itself creates and maps a named entry in these runs (the probe does exactly
+  Chrome's sequence; the server has no per-call log for it).
+- Cross-task sharing, `MAP_MEM_VM_SHARE` of memory that was not mapped from an entry.
+- The silent SIGILL at thread start did not occur in runs 2 to 5 (no `SIGILL-FAULT` line).
+- Any xdg_surface/xdg_toplevel creation, buffer commit, `swaymsg get_tree`, grim: no milestone reached.
