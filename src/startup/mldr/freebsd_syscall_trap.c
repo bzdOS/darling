@@ -2618,11 +2618,25 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * S2C handling in its dserver-rpc-defs.h receive hook), and without
          * these it would get ENOSYS there and return a negative out of the
          * receive path — turning a serviceable S2C request into a failed RPC.
-         * No S2C call has appeared in a trace yet, so this is completing the
-         * socket family rather than fixing an observed failure; the six-arg
-         * form is BSD-lineage and identical on both sides, unlike the flag and
-         * struct translations elsewhere in this file.
+         * The six-arg form is BSD-lineage; only the address needs translating
+         * (below). The flags are passed through (S2C replies use 0).
          */
+        if (linux_nr == LINUX_SYS_sendto && a5 != 0 && (socklen_t)a6 > 2) {
+            /* The destination is a Linux sockaddr_un (110 bytes, 2-byte family) of
+             * the darlingserver RPC socket, which is the only thing the guest sends
+             * to by address; re-pack it exactly as the sendmsg case does (the host
+             * rejects 110 bytes and the unconverted layout with EINVAL, which failed
+             * the whole RPC that had asked the guest to map memory). */
+            struct sockaddr_un fixed_addr;
+            size_t path_len = (socklen_t)a6 - 2;
+            if (path_len > sizeof(fixed_addr.sun_path) - 1)
+                path_len = sizeof(fixed_addr.sun_path) - 1;
+            memset(&fixed_addr, 0, sizeof(fixed_addr));
+            memcpy(fixed_addr.sun_path, (const char *)(long)a5 + 2, path_len);
+            fixed_addr.sun_family = AF_UNIX;
+            fixed_addr.sun_len = (unsigned char)(offsetof(struct sockaddr_un, sun_path) + path_len);
+            return freebsd_raw_syscall(SYS_sendto, a1, a2, a3, a4, (long)&fixed_addr, fixed_addr.sun_len);
+        }
         return freebsd_raw_syscall(
             (linux_nr == LINUX_SYS_sendto) ? SYS_sendto : SYS_recvfrom,
             a1, a2, a3, a4, a5, a6);
