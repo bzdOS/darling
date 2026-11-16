@@ -21,6 +21,7 @@ fi
 # old fixed one); print LEFTOVER dservers=<n> last and exit 1 if n>0.
 leftover_report() {
 	_rc=$?
+	type cores_prune >/dev/null 2>&1 && cores_prune
 	LEFT=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)darlingserver$/ && ($3 ~ /^\/tmp\/darling-run\./ || $3 == "/tmp/darling-dynamic-smoke-fresh") {n++} END{print n+0}')
 	echo "LEFTOVER dservers=$LEFT"
 	[ "$LEFT" -eq 0 ] || exit 1
@@ -29,6 +30,22 @@ leftover_report() {
 trap leftover_report EXIT
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
+# Core files (a Mach core can be 14 GB): cap the size of any core this series' processes dump (ulimit -c, KB;
+# CORE_LIMIT_KB, default 2 GiB; 0 = none) and keep at most one core, the newest, found afterwards in the build dir
+# or the working directory; the others are deleted at exit. Delete the kept one after use (CORES line shows it).
+CORE_LIMIT_KB=${CORE_LIMIT_KB:-2097152}
+ulimit -c "$CORE_LIMIT_KB" 2>/dev/null
+CORE_MARK=$(mktemp "${TMPDIR:-/tmp}/series-core-mark.XXXXXX")
+cores_prune() {
+	_cs=$(find "$DARLING_BUILD_DIR" "$PWD" -maxdepth 1 -name '*.core' -type f -newer "$CORE_MARK" 2>/dev/null | xargs -r ls -t 2>/dev/null)
+	_n=0; _kept=""
+	for _f in $_cs; do
+		_n=$((_n+1))
+		if [ $_n -eq 1 ]; then _kept="$_f ($(du -h "$_f" | cut -f1))"; else rm -f "$_f" 2>/dev/null || sudo -n rm -f "$_f"; fi
+	done
+	rm -f "$CORE_MARK"
+	echo "CORES new=$_n kept=${_kept:-none} limit_kb=$CORE_LIMIT_KB"
+}
 MLDR=$DARLING_BUILD_DIR/dserver/mldr-real/mldr
 DS=$DARLING_BUILD_DIR/dserver/darlingserver
 M=$(md5 -q "$MLDR" 2>/dev/null || md5sum "$MLDR" | cut -d' ' -f1)
