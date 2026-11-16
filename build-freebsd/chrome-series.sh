@@ -3,6 +3,7 @@
 # usage: chrome-series.sh PREFIX N [TIMEOUT]    logs: $DARLING_BUILD_DIR/chrome-sr-<PREFIX>*.log
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR CHROME_APP (as for chrome-sr-batch.sh);
 #      EXPECT_MLDR_MD5  if set and different from the installed mldr, exit 1 before running.
+#      env-preflight.sh runs first (EXPECT_DSERVER_MD5, PREFLIGHT_MAX_LOAD, PREFLIGHT_PROBE=0, PREFLIGHT_IGNORE); exit 1 on fail.
 #      CHROME_EXTRA_ARGS  extra Chrome flags (exported to chrome-sr-batch.sh, inserted before the URL).
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> mldr=<md5>
@@ -14,6 +15,8 @@ DS=$DARLING_BUILD_DIR/dserver/darlingserver
 M=$(md5 -q "$MLDR" 2>/dev/null || md5sum "$MLDR" | cut -d' ' -f1)
 D=$(md5 -q "$DS" 2>/dev/null || md5sum "$DS" | cut -d' ' -f1)
 echo "mldr md5=$M"; echo "darlingserver md5=$D"
+# environment preflight (leftover servers, dserver md5, load, N=1 probe); see env-preflight.sh
+sh "$DARLING_SRC_DIR/build-freebsd/env-preflight.sh" || exit 1
 if [ -n "$EXPECT_MLDR_MD5" ] && [ "$EXPECT_MLDR_MD5" != "$M" ]; then
 	echo "GATE FAIL: expected mldr md5 $EXPECT_MLDR_MD5, installed $M"; exit 1
 fi
