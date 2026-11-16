@@ -1007,6 +1007,7 @@ int main(void) {
     }
 
     /* Parent: wait for darlingserver to signal ready */
+    fprintf(stderr, "[launch] DSERVER pid=%d\n", (int)dserver_pid);
     close(pipefd[1]);
     char buf[2];
     ssize_t n = read(pipefd[0], buf, 1);

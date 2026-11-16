@@ -46,7 +46,14 @@ LOG=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S.log
 dsp_new || exit 1
 START=$(date +%s)
 echo "WRAPPER_START=$START timeout=$T" > "$LOG"
-/usr/local/bin/sudo -n env \
+SUDO=${CHROME_SR_SUDO:-/usr/local/bin/sudo -n}
+LAUNCH=${CHROME_SR_LAUNCH:-$DARLING_BUILD_DIR/launch-dynamic}
+BASE=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S
+RCF=$BASE.rc.$$
+rm -f "$RCF"
+# Run in the background (own subshell, so kill -0 works on it) so that a hang can be dumped BEFORE timeout kills it.
+# CHROME_SR_SERVER_LOG=<level> starts the server with DSERVER_LOG_LEVEL=<level>.
+( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
   DARLING_TEST_BINARY=chrome-macho \
@@ -56,10 +63,37 @@ echo "WRAPPER_START=$START timeout=$T" > "$LOG"
   DARLING_TEST_ARGS="$CHROME_ARGS" \
   DARLING_GUEST_EXPOSE="$DARLING_GUEST_EXPOSE" \
   DARLING_GUEST_MKDIR="$DARLING_GUEST_MKDIR" DARLING_GUEST_COPY="$DARLING_GUEST_COPY" \
+  ${CHROME_SR_SERVER_LOG:+DSERVER_LOG_LEVEL=$CHROME_SR_SERVER_LOG} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
-  timeout --foreground -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" >> "$LOG" 2>&1
-RC=$?
+  timeout --foreground -k 5 "$T" "$LAUNCH" >> "$LOG" 2>&1; echo $? > "$RCF" ) &
+BGP=$!
+# Hang dump: CHROME_SR_DUMP_LEAD seconds (default 40) before the timeout, if the run is still alive, run
+# ds-microthreads-dump.sh on the server pid and guest-threads-snapshot.sh on the guest pid. Both pids come from the
+# launcher's own log lines ("[launch] DSERVER pid=" and "GUEST-EXEC pid="), no process search.
+# CHROME_SR_DUMP=0 disables. Results: <log base>-dsdump.txt and -guest.txt.
+LEAD=${CHROME_SR_DUMP_LEAD:-40}
+[ "$LEAD" -lt "$T" ] || LEAD=$((T-1))
+DUMPED=0
+while kill -0 $BGP 2>/dev/null; do
+	if [ $DUMPED -eq 0 ] && [ "${CHROME_SR_DUMP:-1}" != 0 ] && [ $(( $(date +%s) - START )) -ge $((T-LEAD)) ]; then
+		DUMPED=1
+		SPID=$(grep -a '^\[launch\] DSERVER pid=' "$LOG" | tail -1 | sed 's/.*pid=\([0-9]*\).*/\1/')
+		GPID=$(grep -a 'GUEST-EXEC pid=' "$LOG" | tail -1 | sed 's/.*GUEST-EXEC pid=\([0-9]*\).*/\1/')
+		echo "HANGDUMP server=${SPID:-none} guest=${GPID:-none} at=$(( $(date +%s) - START ))s" >> "$LOG"
+		DDIR=$DARLING_SRC_DIR/build-freebsd
+		[ -n "$SPID" ] && $SUDO timeout -k 5 30 sh "${CHROME_SR_DSDUMP:-$DDIR/ds-microthreads-dump.sh}" "$SPID" > "$BASE-dsdump.txt" 2>&1
+		[ -n "$GPID" ] && $SUDO timeout -k 5 30 sh "${CHROME_SR_GUESTSNAP:-$DDIR/guest-threads-snapshot.sh}" "$GPID" "$LOG" > "$BASE-guest.txt" 2>&1
+	fi
+	sleep 1
+done
+wait $BGP
+RC=$(cat "$RCF" 2>/dev/null); RC=${RC:-1}
+rm -f "$RCF"
+# server log (only with CHROME_SR_SERVER_LOG), copied before the prefix is removed; capped at 100 MB (tail)
+if [ -n "$CHROME_SR_SERVER_LOG" ]; then
+	$SUDO tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$BASE-dserver.txt" 2>/dev/null
+fi
 dsp_reap
 echo "WRAPPER_RC=$RC" >> "$LOG"
 echo "WRAPPER_DURATION=$(( $(date +%s) - START ))s TIMEOUT=${T}s" >> "$LOG"

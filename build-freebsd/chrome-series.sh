@@ -10,6 +10,9 @@
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
+#      chrome-series.sh --dump-selftest   (no Chrome: fake launcher + fake dump scripts, checks the rc124 hang dump)
+#      CHROME_SR_SERVER_LOG=debug  server runs with DSERVER_LOG_LEVEL=debug; its log is saved as chrome-sr-<run>-dserver.txt
+#      Hang dump (rc124 runs): chrome-sr-<run>-dsdump.txt / -guest.txt, taken CHROME_SR_DUMP_LEAD (40) s before the timeout, CHROME_SR_DUMP=0 off.
 # --core-selftest: sudo process that segfaults twice under the core-wrap.sh setup; checks a core appears and only the newest is kept
 if [ "$1" = "--core-selftest" ]; then
 	CORE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/core-selftest.XXXXXX") || exit 1
@@ -22,6 +25,49 @@ if [ "$1" = "--core-selftest" ]; then
 	sudo -n rm -rf "$CORE_DIR"
 	if [ "$n" -ge 2 ] && [ "$m" -eq 1 ]; then echo "CORE-SELFTEST pass (cores before=$n after_prune=$m limit_kb=$CORE_LIMIT_KB)"; exit 0; fi
 	echo "CORE-SELFTEST fail (cores before=$n after_prune=$m) $out"; exit 1
+fi
+# --dump-selftest: fake launcher (a fake server and a fake guest that never exit) and fake dump scripts; runs
+# chrome-wl-run.sh with a 8 s timeout and checks: rc 124, dump scripts called with exactly the fake server pid and
+# guest pid, their output saved beside the log, CHROME_SR_SERVER_LOG passed as DSERVER_LOG_LEVEL, dserver.log copied.
+if [ "$1" = "--dump-selftest" ]; then
+	W=$(cd "$(dirname "$0")" && pwd)
+	: "${DARLING_SRC_DIR:=$(cd "$W/.." && pwd)}"; export DARLING_SRC_DIR
+	TD=$(mktemp -d "${TMPDIR:-/tmp}/dump-selftest.XXXXXX") || exit 1
+	cat > "$TD/launch" <<'FAKE'
+#!/bin/sh
+sleep 600 &
+SP=$!
+trap 'kill $SP 2>/dev/null; exit 143' TERM
+mkdir -p "$DARLING_PREFIX/private/var/log"
+echo "level=$DSERVER_LOG_LEVEL" > "$DARLING_PREFIX/private/var/log/dserver.log"
+echo "[launch] DSERVER pid=$SP" >&2
+echo "[launch] STAGING end / GUEST-EXEC pid=$$ t=0s" >&2
+echo "$SP $$" > "$FAKE_PIDS"
+while :; do sleep 1; done
+FAKE
+	printf '#!/bin/sh\necho "ds called pid=$1 n=$#" >> "%s"; echo "FAKE-DSDUMP $1"\n' "$TD/calls" > "$TD/dsdump"
+	printf '#!/bin/sh\necho "guest called pid=$1 log=$2 n=$#" >> "%s"; echo "FAKE-GUEST $1"\n' "$TD/calls" > "$TD/guest"
+	chmod 755 "$TD/launch"; : > "$TD/pids"; : > "$TD/calls"; chmod 666 "$TD/pids" "$TD/calls"
+	mkdir -p "$TD/xdg"
+	( DARLING_BUILD_DIR="$TD" DARLING_OVERLAY=/nonexistent CHROME_APP=/nonexistent XDG_RUNTIME_DIR="$TD/xdg" WAYLAND_DISPLAY=w \
+	  CHROME_ARGS=x CORE_DIR= CHROME_LOG_PREFIX=chrome-sr CHROME_SR_LAUNCH="$TD/launch" CHROME_SR_DSDUMP="$TD/dsdump" \
+	  CHROME_SR_GUESTSNAP="$TD/guest" CHROME_SR_DUMP_LEAD=4 CHROME_SR_SERVER_LOG=debug \
+	  sh "$W/chrome-wl-run.sh" st1 8 FAKE_PIDS="$TD/pids" FAKE_CALLS="$TD/calls" >/dev/null 2>&1 )
+	SP=$(cut -d' ' -f1 "$TD/pids"); GP=$(cut -d' ' -f2 "$TD/pids")
+	L=$TD/chrome-sr-st1.log; ok=1; why=""
+	chk() { eval "$1" || { ok=0; why="$why [$2]"; }; }
+	chk 'grep -aq "^WRAPPER_RC=124" "$L"' rc124
+	chk '[ -n "$SP" ] && [ -n "$GP" ] && [ "$SP" != "$GP" ]' pids
+	chk '[ "$(grep -c "^ds called" "$TD/calls")" = 1 ] && grep -q "^ds called pid=$SP n=1$" "$TD/calls"' ds-called-with-server-pid
+	chk '[ "$(grep -c "^guest called" "$TD/calls")" = 1 ] && grep -q "^guest called pid=$GP log=$L n=2$" "$TD/calls"' guest-called-with-guest-pid
+	chk 'grep -q "FAKE-DSDUMP $SP" "$TD/chrome-sr-st1-dsdump.txt"' dsdump-saved
+	chk 'grep -q "FAKE-GUEST $GP" "$TD/chrome-sr-st1-guest.txt"' guest-saved
+	chk 'grep -q "^level=debug" "$TD/chrome-sr-st1-dserver.txt"' dserver-log-saved
+	chk 'grep -aq "^HANGDUMP server=$SP guest=$GP" "$L"' hangdump-line
+	chk '! ls /tmp/darling-run.* >/dev/null 2>&1 || ! kill -0 "$SP" 2>/dev/null' fake-server-gone
+	sudo -n kill -9 "$SP" 2>/dev/null; sudo -n rm -rf "$TD"
+	if [ $ok -eq 1 ]; then echo "DUMP-SELFTEST pass (rc=124 server_pid=$SP guest_pid=$GP dumps called once each with those pids, outputs and dserver.log saved)"; exit 0; fi
+	echo "DUMP-SELFTEST fail:$why"; exit 1
 fi
 # exclusive run lock: one probe/Chrome run at a time; nested calls (DARLING_LOCK_HELD) do not re-lock
 if [ -z "$DARLING_LOCK_HELD" ]; then
