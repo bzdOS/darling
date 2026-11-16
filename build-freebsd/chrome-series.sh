@@ -5,7 +5,7 @@
 #      EXPECT_MLDR_MD5  if set and different from the installed mldr, exit 1 before running.
 #      CHROME_EXTRA_ARGS  extra Chrome flags (exported to chrome-sr-batch.sh, inserted before the URL).
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
-# Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> mldr=<md5>
+# Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
@@ -18,7 +18,7 @@ if [ -n "$EXPECT_MLDR_MD5" ] && [ "$EXPECT_MLDR_MD5" != "$M" ]; then
 	echo "GATE FAIL: expected mldr md5 $EXPECT_MLDR_MD5, installed $M"; exit 1
 fi
 sh "$DARLING_SRC_DIR/build-freebsd/chrome-sr-batch.sh" "$P" "$N" "$T"
-valid=0; surv=0; rcs=""
+valid=0; surv=0; rcs=""; wins=0
 for L in "$DARLING_BUILD_DIR"/chrome-sr-"$P"*.log; do
 	[ -f "$L" ] || continue
 	grep -aq GUEST-EXEC "$L" || continue
@@ -28,8 +28,10 @@ for L in "$DARLING_BUILD_DIR"/chrome-sr-"$P"*.log; do
 	d=${d%%[!0-9]*}
 	[ "${d:-0}" -gt 20 ] && surv=$((surv+1))
 	rcs="$rcs ${rc:-?}"
+	w=$(sed -n 's/^SNAP windows=\([0-9]*\).*/\1/p' "$L" | tail -1)
+	[ "${w:-0}" -gt 0 ] && wins=$((wins+1))
 done
 top="rc?x0"
 [ -n "$rcs" ] && top=$(printf '%s\n' $rcs | sort | uniq -c | sort -rn | awk 'NR==1{print "rc" $2 "x" $1}')
-echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top mldr=$M args=\"$CHROME_EXTRA_ARGS\""
+echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins mldr=$M args=\"$CHROME_EXTRA_ARGS\""
 [ "$valid" -gt 0 ]

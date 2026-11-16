@@ -1,6 +1,7 @@
 #!/bin/sh
 # chrome-sr-batch.sh - N Chrome runs against an own headless sway, via chrome-wl-run.sh.
 # usage: chrome-sr-batch.sh FIRST_SUFFIX_PREFIX N [TIMEOUT]    logs: $DARLING_BUILD_DIR/chrome-sr-<PREFIX><i>.log
+# SNAP_AT (default 30): seconds after launch for a grim snapshot of the series' sway, if the run is alive.
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR CHROME_APP. Starts its own sway (private 0700
 # XDG_RUNTIME_DIR, headless, pixman) for the batch and stops it afterwards. Runs without GUEST-EXEC are
 # invalid and repeated (up to 2N attempts). Prints chrome-run-summary.sh lines.
@@ -24,8 +25,19 @@ export CHROME_LOG_PREFIX=chrome-sr
 valid=0; i=1
 while [ $valid -lt "$N" ] && [ $i -le $((2*N)) ]; do
 	S=$P$i
-	sh "$DARLING_SRC_DIR/build-freebsd/chrome-wl-run.sh" "$S" "$T" DARLING_KEEP_LOCAL=1 DARLING_SR_RUN=1 $CHROME_SR_EXTRA >/dev/null 2>&1
 	L=$DARLING_BUILD_DIR/chrome-sr-$S.log
+	PNG=$DARLING_BUILD_DIR/chrome-sr-$S.png
+	(
+		sleep "${SNAP_AT:-30}"
+		if grep -aq GUEST-EXEC "$L" && ! grep -aq '^WRAPPER_RC=' "$L"; then
+			grim "$PNG" >/dev/null 2>&1
+			w=$(swaymsg -t get_tree 2>/dev/null | grep -c app_id)
+			echo "SNAP windows=$w png=$PNG" >> "$L"
+		fi
+	) &
+	SNAPPID=$!
+	sh "$DARLING_SRC_DIR/build-freebsd/chrome-wl-run.sh" "$S" "$T" DARLING_KEEP_LOCAL=1 DARLING_SR_RUN=1 $CHROME_SR_EXTRA >/dev/null 2>&1
+	kill $SNAPPID 2>/dev/null
 	if grep -aq GUEST-EXEC "$L"; then valid=$((valid+1)); fi
 	sh "$DARLING_SRC_DIR/build-freebsd/chrome-run-summary.sh" "$L"
 	i=$((i+1))
