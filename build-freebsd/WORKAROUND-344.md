@@ -872,7 +872,7 @@ for-libelfloader.c:19     -  wd = oflags_bsd_to_linux(flags);
                            +  wd = get_perthread_wd();
 ```
 
-Committed as `build-freebsd/emu-shm-sem-flags.patch`, with a header that says
+Committed as `build-freebsd/patches/xnu-emu-shm-sem-flags.patch`, with a header that says
 where it applies and what not to touch beside it. `git apply --reverse --check`
 confirms it describes exactly the working tree, so the forward form applies to
 the unpatched one.
@@ -1997,7 +1997,7 @@ sh build-freebsd/fill-bundle-contents.sh remove framework-root  # and back to 3
 sh build-freebsd/shm-flags-contract.sh
 
 # §13's fix, as a patch against the darling-xnu submodule.
-git -C src/external/xnu apply --stat ../../build-freebsd/emu-shm-sem-flags.patch
+git -C src/external/xnu apply --stat ../../build-freebsd/patches/xnu-emu-shm-sem-flags.patch
 
 # §10's fourth wall, proved on the host with no root and no guest. The first
 # name is what the backend used to build; the second is the same name POSIX

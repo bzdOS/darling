@@ -1,6 +1,6 @@
 #!/bin/sh
 # sig-reentry-probe-run.sh - run tests/sig-reentry-probe-macho until N valid runs, under launch-dynamic.
-# usage: sig-reentry-probe-run.sh PREFIX N [TIMEOUT] [SUSPENDS] [SPAWNS] [IDLE_WORKER]
+# usage: sig-reentry-probe-run.sh PREFIX N [TIMEOUT] [SUSPENDS] [SPAWNS] [IDLE_WORKER]  (TIMEOUT default: $PROBE_TIMEOUT or 240 s)
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR; PROBE_TRAP_LOG=1 turns the guest trap log on.
 # PROBE_EXTRA_ENV="A=1 B=2" adds env to the guest run.
 # Logs: $DARLING_BUILD_DIR/PREFIX-<i>.log, never overwritten. A run without GUEST-EXEC (never reached the
@@ -13,7 +13,7 @@ if [ -z "$DARLING_LOCK_HELD" ]; then
 	[ $rc -eq 75 ] && { echo "LOCK busy"; exit 1; }
 	exit $rc
 fi
-P=${1:?}; N=${2:?}; T=${3:-90}; SU=${4:-3000}; SP=${5:-300}; IW=${6:-0}
+P=${1:?}; N=${2:?}; T=${3:-${PROBE_TIMEOUT:-240}}; SU=${4:-3000}; SP=${5:-300}; IW=${6:-0}
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
 PROBE_ENV=PROBE_RUN=1; [ -n "$PROBE_TRAP_LOG" ] && PROBE_ENV=DARLING_TRAP_LOG=1
 KT=; [ -n "$PROBE_KTRACE" ] && KT="ktrace -i -t cs -f $DARLING_BUILD_DIR/$P-ktr.out"

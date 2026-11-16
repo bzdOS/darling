@@ -13,3 +13,4 @@ xnu xnu-dserver-rpc-recv-validate.patch
 xnu xnu-fork-failure.patch
 xnu xnu-sysctl-hv-vmm-proc-translated.patch
 xnu xnu-sysctl-string-nul.patch
+xnu xnu-emu-shm-sem-flags.patch

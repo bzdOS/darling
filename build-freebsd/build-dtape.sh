@@ -37,11 +37,11 @@ mkdir -p "${MIGBUILD}" && cd "${MIGBUILD}"
 
 MIGCOMSRC="${BOOT}/migcom.tproj"
 DARLING_SRC="${BOOT}/darling/src"
-# Minimal mach stub headers for migcom host build (no macOS SDK, no duct-tape deep includes)
-MACH_INC="${BOOT}/freebsd-mig-includes"
+# Host-build shim headers (mig_version.h), tracked in build-freebsd/mig-includes
+MACH_INC="${SCRIPT_DIR}/build-freebsd/mig-includes"
 
 MIGDEFS="-Du_int=unsigned -D__int64_t=int64_t -D__int32_t=int32_t \
-  -D__darwin_natural_t=unsigned -D__uint32_t=uint32_t \
+  -D__uint32_t=uint32_t \
   -D__uint16_t=uint16_t -D__uint64_t=uint64_t \
   -D_BSD_I386__TYPES_H_ \
   -DDARLING -DDARLING_FREEBSD \
@@ -72,7 +72,7 @@ cp "${MIGBUILD}/i386/_types.h" "${MIGBUILD}/arm/_types.h"
 
 MIGCFLAGS="-std=c99 -Wno-dangling-else -Wno-implicit-function-declaration \
   -include ${MACH_INC}/mig_version.h \
-  -I${MIGCOMSRC} -I${MACH_INC} -I${MIGBUILD} ${MIGDEFS}"
+  -I${MIGCOMSRC} -I${MACH_INC} -I${MIGBUILD} -I${DT}/xnu/osfmk -I${DT}/xnu/libkern -I${DT}/xnu/EXTERNAL_HEADERS -idirafter ${DT}/xnu/bsd ${MIGDEFS}"
 
 # Run bison on parser.y
 bison -d -o "${MIGBUILD}/parser.c" "${MIGCOMSRC}/parser.y"
