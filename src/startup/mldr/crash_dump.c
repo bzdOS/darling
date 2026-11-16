@@ -98,8 +98,7 @@ static volatile sig_atomic_t dump_probe_active;
  * exists and is restored), the probe records which thread owns it, and a
  * fault on any other thread is passed to the disposition that was installed
  * before the window opened. */
-static volatile int          dump_probe_lock;
-static volatile long         dump_probe_owner;
+static volatile long         dump_probe_owner;   /* the lock: 0 = free, else the owning thread id */
 static struct sigaction      dump_probe_prev_segv, dump_probe_prev_bus;
 
 static long
@@ -196,9 +195,21 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
      * read itself is guarded. Both handlers are saved and restored: this runs
      * inside the crash handler, and leaving a probe handler installed would
      * make every later fault in the process jump into a dead jmp_buf. */
-    while (__sync_lock_test_and_set(&dump_probe_lock, 1))
-        ; /* another thread's window is open; it is a handful of instructions */
-    dump_probe_owner = dump_self_tid();
+    /* Re-entry: a signal (a patched-syscall SIGILL) can arrive on this very
+     * thread while it is inside its own window - the sigaction() calls below
+     * are system calls - and its handler probes again. Spinning would wait
+     * for a lock that only the interrupted frame can release, forever, so
+     * the nested probe is refused as "unreadable". The owner id IS the lock
+     * (taken by one compare-and-swap), so there is no instant at which the
+     * lock is held but its owner is not yet visible. */
+    {
+        long self = dump_self_tid();
+
+        if (dump_probe_owner == self)
+            return 0;
+        while (!__sync_bool_compare_and_swap(&dump_probe_owner, 0, self))
+            ; /* another thread's window is open; it is a handful of instructions */
+    }
     memset(&sa_probe, 0, sizeof(sa_probe));
     sa_probe.sa_sigaction = dump_probe_handler;
     sigemptyset(&sa_probe.sa_mask);
@@ -206,7 +217,7 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
     saved_segv_ok = (sigaction(SIGSEGV, &sa_probe, &dump_probe_prev_segv) == 0);
     saved_bus_ok = (sigaction(SIGBUS, &sa_probe, &dump_probe_prev_bus) == 0);
     if (!saved_segv_ok && !saved_bus_ok) {
-        __sync_lock_release(&dump_probe_lock);
+        __sync_lock_release(&dump_probe_owner);
         return 0;
     }
 
@@ -216,7 +227,7 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
             sigaction(SIGSEGV, &dump_probe_prev_segv, NULL);
         if (saved_bus_ok)
             sigaction(SIGBUS, &dump_probe_prev_bus, NULL);
-        __sync_lock_release(&dump_probe_lock);
+        __sync_lock_release(&dump_probe_owner);
         return 0;
     }
 
@@ -228,7 +239,7 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
         sigaction(SIGSEGV, &dump_probe_prev_segv, NULL);
     if (saved_bus_ok)
         sigaction(SIGBUS, &dump_probe_prev_bus, NULL);
-    __sync_lock_release(&dump_probe_lock);
+    __sync_lock_release(&dump_probe_owner);
     return 1;
 }
 
