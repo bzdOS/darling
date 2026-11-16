@@ -4107,6 +4107,15 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
     ucontext_t *uctx = (ucontext_t *)uctx_void;
     mcontext_t *mc   = &uctx->uc_mcontext;
 
+    {
+        char mk[] = "[darling-mldr] CRASH-HANDLER-ENTER signal=000\n";
+        int sn = signo > 999 ? 999 : (signo < 0 ? 0 : signo);
+        mk[sizeof(mk) - 3] = '0' + sn % 10;
+        mk[sizeof(mk) - 4] = '0' + (sn / 10) % 10;
+        mk[sizeof(mk) - 5] = '0' + sn / 100;
+        freebsd_raw_syscall(SYS_write, 2, (long)mk, (long)(sizeof(mk) - 1), 0, 0, 0);
+    }
+
     fprintf(stderr,
         "[darling-mldr] FATAL signal %d (code=%d) at addr=%p\n"
         /* survive-window slice: name the sender — si_pid is the killer for
@@ -4189,6 +4198,11 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
      * the same question honestly, per word. */
     mldr_dump_guarded_stack("guest stack dump at rsp",
                             (uintptr_t)mc->mc_rsp, MLDR_STACK_DUMP_WORDS);
+
+    /* Chain to the guest's recorded disposition (handler), if any. */
+    if ((signo == SIGSEGV || signo == SIGBUS || signo == SIGABRT) &&
+        mldr_sat_chain_fatal(signo, info, uctx_void))
+        return;
 
     /* Re-raise as default action so the process terminates with correct signal */
     struct sigaction sa_dfl = { .sa_handler = SIG_DFL };

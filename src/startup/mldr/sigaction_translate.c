@@ -184,8 +184,11 @@ sat_linux_signo_to_freebsd(int linux_signo)
 static bool
 sat_is_reserved_freebsd_signo(int native_signo)
 {
+    /* SIGABRT: mldr keeps its own fatal-dump handler installed; the guest's
+     * disposition lives in the registry and is chained from there. */
     return native_signo == SIGILL || native_signo == SIGBUS ||
-           native_signo == SIGSEGV || native_signo == SIGSYS;
+           native_signo == SIGSEGV || native_signo == SIGSYS ||
+           native_signo == SIGABRT;
 }
 
 /*
@@ -410,6 +413,27 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
     ((sat_guest_handler_t)handler)(linux_signo, &linfo, &luctx);
 
     mldr_ucontext_linux_to_freebsd(&luctx, (ucontext_t *)native_uctx);
+}
+
+/*
+ * purpose:  After mldr's fatal-signal dump, hand a SIGSEGV/SIGBUS/SIGABRT to
+ *           the guest's recorded disposition.
+ * output:   1 when a guest handler ran (caller returns and lets the signal
+ *           frame unwind); 0 when the guest disposition is SIG_DFL/IGN/unset
+ *           (caller restores native SIG_DFL and re-raises).
+ */
+int
+mldr_sat_chain_fatal(int native_signo, siginfo_t *info, void *uctx)
+{
+    int slot = sat_slot(sat_freebsd_signo_to_linux(native_signo));
+    if (slot < 0 || !sat_registry[slot].valid)
+        return 0;
+    void *h = sat_registry[slot].wire.lsa_handler;
+    if (h == SAT_LINUX_SIG_DFL || h == SAT_LINUX_SIG_IGN ||
+        h == SAT_LINUX_SIG_ERR)
+        return 0;
+    sat_guest_handler_trampoline(native_signo, info, uctx);
+    return 1;
 }
 
 long
