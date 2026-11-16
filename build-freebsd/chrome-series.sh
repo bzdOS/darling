@@ -26,8 +26,12 @@ fi
 # exclusive run lock: one probe/Chrome run at a time; nested calls (DARLING_LOCK_HELD) do not re-lock
 if [ -z "$DARLING_LOCK_HELD" ]; then
 	: "${DARLING_BUILD_DIR:?}"
-	DARLING_LOCK_HELD=1 lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" sh "$0" "$@"
+	# run a private snapshot: sh reads a script incrementally, so editing this file mid-run broke the parse
+	SNAP=$(mktemp "${TMPDIR:-/tmp}/chrome-series.XXXXXX") || exit 1
+	cp "$0" "$SNAP"
+	DARLING_LOCK_HELD=1 lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" sh "$SNAP" "$@"
 	rc=$?
+	rm -f "$SNAP"
 	[ $rc -eq 75 ] && { echo "LOCK busy"; exit 1; }
 	exit $rc
 fi
