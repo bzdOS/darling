@@ -11,7 +11,7 @@
 #   3. the gate runs again and must pass (set -e).
 #
 # Images with their own generator keep it: suppl.dylib and cg-supl.dylib
-# (build-suppl-stubs.sh), the OpenDirectory stand-in (build-opendirectory-stub.sh).
+# (build-suppl-stubs.sh), SystemConfigurationExtras.dylib (build-sc-stubs.sh, hand written behaviour), the OpenDirectory stand-in (build-opendirectory-stub.sh).
 # Set CHROME_APP so the Chrome framework is a consumer (rule c of the check).
 #
 # Usage: DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... [CHROME_APP=...] \
@@ -29,7 +29,7 @@ tail -1 "$W/check-before.txt"
 python3 "$CHK" --overlay "$OV" --list-stubs > "$W/stubs.txt"
 # images that have their own generator are left to it, and the real system libraries
 # under usr/lib/system are never rewritten
-grep -v -e '/usr/lib/suppl.dylib$' -e '/usr/lib/cg-supl.dylib$' \
+grep -v -e '/usr/lib/suppl.dylib$' -e '/usr/lib/cg-supl.dylib$' -e '/usr/lib/SystemConfigurationExtras.dylib$' \
         -e '/OpenDirectory.framework/' -e '/usr/lib/system/' "$W/stubs.txt" > "$W/images.txt"
 # shellcheck disable=SC2046
 python3 "$SRC/build-freebsd/rebuild-stub-data.py" --overlay "$OV" --work "$W" \

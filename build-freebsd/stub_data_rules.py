@@ -23,6 +23,9 @@ DATA_NAMES = re.compile(
 # bytes), so 64 covers them; the object is always zero (NULL pointer / 0).
 DATA_SIZE = 64
 
+# image that defines ___CFConstantStringClassReference: a CFString constant binds its isa to it two-level
+CF_INSTALL = "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+
 # Every stub that defines a class gets this one, hidden, so the root classes
 # do not bind to (or shadow) libobjc's own copy.
 EMPTY_CACHE_S = """\
@@ -74,7 +77,8 @@ def class_names(names):
 # constant in a dictionary (+[NSDictionary dictionaryWithObjects:forKeys:count:] throws, CFDictionaryGetValue
 # hashes NULL). Struct constants (CMTime) and objects (kCGColor*, callbacks) are not in this set.
 STRING_CONST = re.compile(
-    r"^_k(SC|Sec|LS|UT|AX|AV|UN|CT|VT|CMF|CMS|CVI|CVP|CVV|CFP|CFN|CFStream|CGColorSpace|CGImage|CGDisplay|CGWindow|CGPDF|CAGravity|CAFilter|CAMedia|CATransition)[A-Za-z]"
+    r"^_k(SC|Sec|LS|UT|AX|AV|UN|CT|VT|CMF|CMS|CVI|CVP|CVV|CFP|CFN|CFStream|CFProxy|MA|CGColorSpace|CGImage|CGDisplay|CGWindow|CGPDF|CAGravity|CAFilter|CAMedia|CATransition)[A-Za-z]"
+    r"|^_k[A-Z][A-Za-z0-9_]*(Notification|NotificationName|Key|Domain)$"
     r"|^_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$")
 NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$")
 
@@ -86,9 +90,8 @@ def is_string_const(name):
 def data_asm(name, size=DATA_SIZE, strings=False):
     """Assembly for one exported data object: zero filled, or for a string constant a pointer to a
     constant CFString (text = the name without its underscore). The CFString isa is
-    ___CFConstantStringClassReference, found by flat lookup: only for an image linked with
-    -undefined dynamic_lookup and no dependency that would make the linker bind the isa two-level
-    (strings=True); anything else keeps zero filled objects."""
+    ___CFConstantStringClassReference; the image must be linked against CF_INSTALL (-needed_library)
+    so the isa is a two-level bind (strings=True); anything else keeps zero filled objects."""
     if strings and is_string_const(name):
         lab = re.sub(r"[^A-Za-z0-9_]", "_", name)
         return [".section __TEXT,__cstring,cstring_literals", "L_s_%s:" % lab,

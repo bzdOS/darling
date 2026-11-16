@@ -113,19 +113,8 @@ if [ -n "$EXPECT_MLDR_MD5" ] && [ "$EXPECT_MLDR_MD5" != "$M" ]; then
 	echo "GATE FAIL: expected mldr md5 $EXPECT_MLDR_MD5, installed $M"; exit 1
 fi
 sh "$DARLING_SRC_DIR/build-freebsd/chrome-sr-batch.sh" "$P" "$N" "$T"
-valid=0; surv=0; rcs=""; wins=0
-for L in "$DARLING_BUILD_DIR"/chrome-sr-"$P"*.log; do
-	[ -f "$L" ] || continue
-	grep -aq GUEST-EXEC "$L" || continue
-	valid=$((valid+1))
-	rc=$(sed -n 's/^WRAPPER_RC=//p' "$L" | tail -1)
-	d=$(sed -n 's/^WRAPPER_DURATION=//p' "$L" | tail -1)
-	d=${d%%[!0-9]*}
-	[ "${d:-0}" -gt 20 ] && surv=$((surv+1))
-	rcs="$rcs ${rc:-?}"
-	w=$(sed -n 's/^SNAP windows=\([0-9]*\).*/\1/p' "$L" | tail -1)
-	[ "${w:-0}" -gt 0 ] && wins=$((wins+1))
-done
+. "$DARLING_SRC_DIR/build-freebsd/series-count.sh"
+series_count "$DARLING_BUILD_DIR" "$P" "$N" || exit 1
 top="rc?x0"
 [ -n "$rcs" ] && top=$(printf '%s\n' $rcs | sort | uniq -c | sort -rn | awk 'NR==1{print "rc" $2 "x" $1}')
 echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins mldr=$M args=\"$CHROME_EXTRA_ARGS\""

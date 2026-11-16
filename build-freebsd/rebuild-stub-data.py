@@ -151,6 +151,9 @@ def main():
         classes = R.class_names(ex)
         fix = [n for n in ex if n in drop or (ex[n] == ("__TEXT", "__text") and
                (R.is_known_data(n) or n in datalist))]
+        # a string constant exported as a zero filled object is rebuilt as a pointer to a CFString
+        fix += [n for n in datas if R.is_string_const(n) and n not in fix and
+                ex[n][0].startswith("__DATA") and n not in drop]
         if not fix and not behaviors:
             print("unchanged %s" % os.path.relpath(path, ov))
             continue
@@ -161,7 +164,7 @@ def main():
             for n in funcs:
                 f.write(".globl %s\n.p2align 4\n%s:\n    xorl %%eax, %%eax\n    retq\n" % (n, n))
             for n in datas:
-                f.write("\n".join(R.data_asm(n)) + "\n")
+                f.write("\n".join(R.data_asm(n, strings=True)) + "\n")
             if classes:
                 f.write(R.EMPTY_CACHE_S)
         objs = [os.path.join(a.work, base + ".s.o")] + behaviors
@@ -181,6 +184,19 @@ def main():
                 cmd += ["-reexport_library" if k == "LC_REEXPORT_DYLIB" else "-needed_library", ov + n]
         if behaviors:
             cmd += ["-undefined", "dynamic_lookup", "-bind_at_load"]
+        if any(R.is_string_const(n) for n in datas):
+            # the CFString isa is bound two-level to CoreFoundation itself, never by flat lookup
+            # CoreFoundation goes FIRST: the linker binds the isa to the first input that defines it,
+            # and a framework this image re-exports (CoreText, Foundation, ...) would otherwise be
+            # recorded as the image the dynamic linker must find it in.
+            cfp = ov + R.CF_INSTALL
+            if os.path.realpath(cfp) != os.path.realpath(path):
+                # re-exported when the image already re-exports it or it provides a dropped name
+                # (the linker keeps only the first of two inputs naming the same dylib)
+                rex = any(k == "LC_REEXPORT_DYLIB" and ov + n == cfp for k, n in info["deps"]) or \
+                    (drop and cfp in provs and any(n in pcache[cfp] for n in drop))
+                cmd[1:1] = ["-reexport_library" if rex else "-needed_library", cfp]
+            cmd += ["-syslibroot", ov]   # CF re-exports libSystem by install name
         # a name dropped as shadowing needs its provider reachable from this image
         if drop:
             for p in provs:

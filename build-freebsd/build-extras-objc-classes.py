@@ -57,6 +57,18 @@ def reexport_target(path):
     return m.group(1) if m else None
 
 
+def reexport_targets(path):
+    """every LC_REEXPORT_DYLIB of the wrapper, in order (Foundation wrapper: Foundation, CoreFoundation)"""
+    out = run(["llvm-otool", "-l", path]).stdout
+    res = []
+    for b in re.split(r"\n(?=Load command )", out):
+        if "LC_REEXPORT_DYLIB" in b:
+            m = re.search(r"name (\S+) \(offset", b)
+            if m and m.group(1) not in res:
+                res.append(m.group(1))
+    return res
+
+
 def build_empty_cache():
     src = os.path.join(BUILD, "empty_cache.s")
     obj = os.path.join(BUILD, "empty_cache.o")
@@ -82,7 +94,8 @@ def main():
             continue
         keep = [s for s in syms if not OBJC.search(s) and s != "__objc_empty_cache"]
         classes = sorted({OBJC.search(s).group(2) for s in objc})
-        target = reexport_target(wrapper)
+        targets = reexport_targets(wrapper)
+        target = targets[0] if targets else reexport_target(wrapper)
         real = OD + target if target else None
         if not real or not os.path.exists(real):
             print("SKIP", fn, real)
@@ -100,7 +113,7 @@ def main():
             f.write(".text\n")
             for s in keep:
                 if kinds.get(s, "T") not in ("T", "t") or R.is_known_data(s):
-                    f.write("\n".join(R.data_asm(s)) + "\n")
+                    f.write("\n".join(R.data_asm(s, strings=True)) + "\n")
         with open(mpath, "w") as f:
             # Root classes with their OWN real methods (not NSObject subclasses: a dylib
             # whose metaclass import is _OBJC_METACLASS_$_NSObject is refused at load).
@@ -123,7 +136,16 @@ def main():
         r = run(["ld64.lld", "-dylib", "-arch", "x86_64",
                  "-platform_version", "macos", "10.12", "10.12",
                  "-install_name", "/usr/lib/" + fn,
+                 # the wrapper stands in for a system framework: consumers require its compatibility version
+                 "-current_version", "65535.255.255", "-compatibility_version", "65535.255.255",
+                 # CoreFoundation first: the isa of a CFString constant binds to the first input defining it
+                 # (re-exported when the wrapper re-exported it before: the linker keeps the first input only)
+                 "-reexport_library" if R.CF_INSTALL in targets else "-needed_library", OD + R.CF_INSTALL,
+                 "-syslibroot", OD,
                  "-reexport_library", real,
+                 ] + [x for t in targets[1:] if t != R.CF_INSTALL and os.path.exists(OD + t)
+                      for x in ("-reexport_library", OD + t)] + [
+                 "-undefined", "dynamic_lookup",
                  "-o", wrapper] + objs + [empty_cache])
         if r.returncode:
             print("LD FAIL", fn, r.stderr[:300])

@@ -9,6 +9,8 @@
 #
 # Install names are the ones the installed dylibs carry: suppl.dylib calls
 # itself /usr/lib/supl.dylib, cg-supl.dylib calls itself /usr/lib/suppl.dylib.
+# The CFString constants bind their isa two-level to CoreFoundation (-needed_library; -syslibroot
+# lets the linker find what CoreFoundation re-exports by install name).
 # -undefined dynamic_lookup is required: the forwarding stubs jump to symbols
 # that a real image (libsystem_c/libsystem_platform) must provide.
 #
@@ -49,7 +51,12 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
         | awk '$1 ~ /^0x/ {print $2}' > "${OUT}/${name}.names.txt"
 
     echo "=== ${name} (install_name ${install}, $(wc -l < "${OUT}/${name}.names.txt") symbols)"
-    python3 "${SRC}/build-freebsd/gen-cg-supl.py" \
+    CFW="${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+    # cg-supl defines a few names CoreFoundation owns (_NSCocoaErrorDomain ...): it re-exports
+    # CoreFoundation and drops them, so the real object is found instead of a shadow.
+    EXTRA="${GEN_EXTRA_PROVIDERS:-}"
+    [ "$name" = cg-supl ] && EXTRA="$CFW"
+    GEN_EXTRA_PROVIDERS="$EXTRA" python3 "${SRC}/build-freebsd/gen-cg-supl.py" \
         "${OUT}/${name}.names.txt" "${OUT}/${name}.s" "$install" "${OVERLAY}" --data-list "${OUT}/data-names.txt"
     clang -target x86_64-apple-macos10.12 -c "${OUT}/${name}.s" -o "${OUT}/${name}.o"
     OBJS="${OUT}/${name}.o"
@@ -65,14 +72,18 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
     # generator drops a stub for any name one of them defines, so each of them
     # must be reachable from here.
     REEXPORTS=""
+    # cg-supl: CoreFoundation first, so the CFString isa binds to it (not to a provider that also lists it)
+    [ "$name" = cg-supl ] && REEXPORTS=" -reexport_library $CFW"
     for prov in $(python3 "${SRC}/build-freebsd/gen-cg-supl.py" --providers "${OVERLAY}"); do
         REEXPORTS="${REEXPORTS} -reexport_library ${prov}"
     done
-    if [ "$name" = suppl ]; then
-        for x in $(echo "${GEN_EXTRA_PROVIDERS:-}" | tr : " "); do REEXPORTS="${REEXPORTS} -reexport_library ${x}"; done
-    fi
+    [ "$name" = cg-supl ] || for x in $(echo "$EXTRA" | tr : " "); do REEXPORTS="${REEXPORTS} -reexport_library ${x}"; done
+    NEEDCF="-needed_library $CFW"
+    [ "$name" = cg-supl ] && NEEDCF=""
     ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
         -undefined dynamic_lookup \
+        ${NEEDCF} \
+        -syslibroot "${OVERLAY}" \
         ${REEXPORTS} \
         -install_name "$install" -current_version 0.0.0 \
         -compatibility_version 0.0.0 \
