@@ -8,7 +8,8 @@
 #      stage-gate.sh runs after the preflight: STAGECHK line, exit 1 on a built/overlay/staged md5 mismatch.
 #      CHROME_EXTRA_ARGS  extra Chrome flags (exported to chrome-sr-batch.sh, inserted before the URL).
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
-# Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> mldr=<md5>
+# Before it: FWDMISS <unique -[Class sel] of the runs' OBJC-FWD-MISS lines, comma separated> (or FWDMISS none).
+# Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> fwdmiss=<unique OBJC-FWD-MISS selectors> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
 #      chrome-series.sh --dump-selftest   (no Chrome: fake launcher + fake dump scripts, checks the rc124 hang dump)
 #      CHROME_SR_SERVER_LOG=debug  server runs with DSERVER_LOG_LEVEL=debug; its log is saved as chrome-sr-<run>-dserver.txt
@@ -117,5 +118,6 @@ sh "$DARLING_SRC_DIR/build-freebsd/chrome-sr-batch.sh" "$P" "$N" "$T"
 series_count "$DARLING_BUILD_DIR" "$P" "$N" || exit 1
 top="rc?x0"
 [ -n "$rcs" ] && top=$(printf '%s\n' $rcs | sort | uniq -c | sort -rn | awk 'NR==1{print "rc" $2 "x" $1}')
-echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins mldr=$M args=\"$CHROME_EXTRA_ARGS\""
+if [ -n "$fwdlist" ]; then echo "FWDMISS $(printf '%s\n' "$fwdlist" | paste -sd, - | sed 's/,/, /g')"; else echo "FWDMISS none"; fi
+echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins fwdmiss=$fwdmiss mldr=$M args=\"$CHROME_EXTRA_ARGS\""
 [ "$valid" -gt 0 ]

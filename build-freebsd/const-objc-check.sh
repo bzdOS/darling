@@ -6,7 +6,10 @@
 # Usage: sh build-freebsd/const-objc-check.sh [wait-secs]    Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR
 # Prints CONSTOBJC BAD lines and one verdict line "CONST-OBJC-VERDICT pass|FAIL n=<checked> bad=<n> zero=<n> [first bad]";
 # exit 0 on pass. Only the darlingserver processes this run started are stopped (by pid).
-SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"; WAIT="${1:-120}"
+SRC="${DARLING_SRC_DIR:-}"; BD="${DARLING_BUILD_DIR:-}"; OD="${DARLING_OVERLAY:-}"; WAIT="${1:-120}"
+if [ -z "$SRC" ] || [ -z "$BD" ] || [ -z "$OD" ]; then
+	echo "CONST-OBJC-VERDICT FAIL n=0 bad=1 zero=0 [missing env:$([ -z "$SRC" ] && printf ' DARLING_SRC_DIR')$([ -z "$BD" ] && printf ' DARLING_BUILD_DIR')$([ -z "$OD" ] && printf ' DARLING_OVERLAY')]"; exit 1
+fi
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=const-objc-probe-macho; W="$BD/const-objc"; mkdir -p "$W"

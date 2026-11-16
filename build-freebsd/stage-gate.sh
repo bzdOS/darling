@@ -8,8 +8,11 @@
 # A built image that differs from the overlay (built, not installed) or a staged copy that stays different is a failure.
 # The gated set is images.txt plus EXTRA_IMAGES (own-generator images that images.txt omits).
 # Output: one "STAGECHK" line; exit 1 on any mismatch.
-: "${DARLING_BUILD_DIR:?}" "${DARLING_OVERLAY:?}"
+if [ -z "$DARLING_BUILD_DIR" ] || [ -z "$DARLING_OVERLAY" ]; then
+	echo "STAGECHK FAIL missing env:$([ -z "$DARLING_BUILD_DIR" ] && printf ' DARLING_BUILD_DIR')$([ -z "$DARLING_OVERLAY" ] && printf ' DARLING_OVERLAY')"; exit 1
+fi
 SO="${STAGED_OVERLAY:-/tmp/darling-local-overlay}"; W="$DARLING_BUILD_DIR/stub-data"
+[ -f "$DARLING_BUILD_DIR/stub-data/images.txt" ] || { echo "STAGECHK FAIL no $DARLING_BUILD_DIR/stub-data/images.txt (run build-stub-data.sh)"; exit 1; }
 m() { md5 -q "$1" 2>/dev/null || echo none; }
 ML=$(m "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
 # images with their own generator that build-stub-data.sh leaves out of images.txt but whose md5 is still gated

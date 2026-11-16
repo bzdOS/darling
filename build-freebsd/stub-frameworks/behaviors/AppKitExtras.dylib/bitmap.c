@@ -10,7 +10,13 @@
  *   -getPixel:atX:y:   the samples of the pixel, 1..16 and 32 bits per sample, chunky or planar
  *   -colorAtX:y:       a calibrated RGB (3+ samples) or white (1 sample) NSColor, alpha unpremultiplied
  * Both read through the public accessors (-getBitmapDataPlanes:, -bytesPerRow, ...), so the lazily created
- * bitmap of the image is made by AppKit itself. Float samples return nil/0. */
+ * bitmap of the image is made by AppKit itself. Float samples return nil/0.
+ *
+ * -CGBitmapInfo: drawing into a rep (lockFocus, +[NSGraphicsContext graphicsContextWithBitmapImageRep:]) makes
+ * a CGBitmapContext over the rep's memory with this info. The 32 bit RGBA layout of a rep is the bytes R,G,B,A
+ * but the default byte order of the context writes the word in host order, so the bytes landed as A,B,G,R
+ * (colour 51,102,153,255 read back 255,153,102,51). 8 bit, 32 bit pixel, integer reps get kCGBitmapByteOrder32Big
+ * added to the info (alpha last or first alike), which is the memory order getPixel and bitmapData promise. */
 typedef void *Class;
 typedef void *SEL;
 typedef void *IMP;
@@ -122,6 +128,19 @@ static id color_at_imp(id self, SEL cmd, long x, long y)
     return 0;
 }
 
+#define CG_BYTE_ORDER_MASK 0x7000UL
+#define CG_BYTE_ORDER_32BIG 0x4000UL
+static unsigned long (*orig_cg_bitmap_info)(id, SEL);
+
+static unsigned long cg_bitmap_info_imp(id self, SEL cmd)
+{
+    unsigned long info = orig_cg_bitmap_info ? orig_cg_bitmap_info(self, cmd) : 0;
+    if (SEND_L(self, "bitsPerSample") == 8 && SEND_L(self, "bitsPerPixel") == 32 && !SEND_L(self, "isPlanar") &&
+        !(SEND_L(self, "bitmapFormat") & NS_FLOAT) && !(info & CG_BYTE_ORDER_MASK))
+        info |= CG_BYTE_ORDER_32BIG;
+    return info;
+}
+
 static int done;
 
 static void try_add(void)
@@ -134,6 +153,7 @@ static void try_add(void)
         return;
     class_replaceMethod(c, S("getPixel:atX:y:"), (IMP)get_pixel_imp, "v40@0:8^Q16q24q32");
     class_replaceMethod(c, S("colorAtX:y:"), (IMP)color_at_imp, "@32@0:8q16q24");
+    orig_cg_bitmap_info = (unsigned long (*)(id, SEL))class_replaceMethod(c, S("CGBitmapInfo"), (IMP)cg_bitmap_info_imp, "I16@0:8");
     done = 1;
 }
 
