@@ -274,7 +274,7 @@ def main():
         elif name.startswith(("_OBJC_CLASS_$_", "_OBJC_METACLASS_$_")):
             classes.append(name)
         elif name.startswith(DATA_PREFIXES) or R.is_known_data(name) or name in datalist:
-            out += R.data_asm(name)
+            out += R.data_asm(name, strings=True)
             n_data += 1
         else:
             out += [f".text", f".globl {name}", f"{name}:",

@@ -335,8 +335,159 @@ int mldr_trap_log_handlers = 1;
  * create inside the guest go through darling_thread_entry, which must register
  * a stack of its own — see mldr_setup_thread_signal_stack.
  */
-#define SIGSYS_ALTSTACK_SIZE (64 * 1024)
-static char _sigsys_altstack[SIGSYS_ALTSTACK_SIZE] __attribute__((aligned(16)));
+#define SIGSYS_ALTSTACK_SIZE (128 * 1024)
+#define MLDR_SIGSTK_PAGE     4096
+#define MLDR_SIGSTK_MAGIC    0x6d6c64726b737431ULL
+
+/*
+ * Per-thread mldr-private signal stack. One mapping per native thread:
+ *   [guard page, PROT_NONE][header page][SIGSYS_ALTSTACK_SIZE stack bytes]
+ * The native sigaltstack of a thread is ALWAYS this stack (guest sigaltstack
+ * calls never reach the kernel, see mldr_linux_sigaltstack); the header, found
+ * from the native altstack's ss_sp, carries the thread's guest-visible state:
+ * the guest's own altstack and the guest rsp of the trap being serviced.
+ */
+struct mldr_sigstk_hdr {
+    uint64_t  magic;
+    uintptr_t base;            /* native altstack base (== this page + page size) */
+    size_t    size;            /* native altstack full size */
+    uintptr_t trap_guest_rsp;  /* guest rsp of the SIGSYS/SIGILL trap being serviced, 0 if none */
+    uintptr_t g_sp;            /* guest altstack (Linux sigaltstack semantics) */
+    size_t    g_size;
+    int       g_flags;         /* Linux SS_* flags; LINUX_SS_DISABLE when unset */
+};
+
+static struct mldr_sigstk_hdr *
+mldr_cur_hdr(void)
+{
+    stack_t cur;
+    if (sigaltstack(NULL, &cur) < 0 || cur.ss_sp == NULL)
+        return NULL;
+    struct mldr_sigstk_hdr *h =
+        (struct mldr_sigstk_hdr *)((char *)cur.ss_sp - MLDR_SIGSTK_PAGE);
+    return h->magic == MLDR_SIGSTK_MAGIC ? h : NULL;
+}
+
+/* Linux struct sigaltstack: {void *ss_sp; int ss_flags; size_t ss_size;} */
+struct mldr_linux_sigaltstack {
+    void *ss_sp;
+    int ss_flags;
+    unsigned long ss_size;
+};
+
+static long
+mldr_linux_sigaltstack(const void *ssp, void *ossp)
+{
+    const struct mldr_linux_sigaltstack *ss = ssp;
+    struct mldr_linux_sigaltstack *oss = ossp;
+    struct mldr_sigstk_hdr *h = mldr_cur_hdr();
+    if (h == NULL)
+        return -ENOMEM;
+    uintptr_t grsp = h->trap_guest_rsp;
+    int on = h->g_sp != 0 && grsp >= h->g_sp && grsp < h->g_sp + h->g_size;
+
+    if (oss != NULL) {
+        oss->ss_sp = (void *)h->g_sp;
+        oss->ss_size = h->g_size;
+        oss->ss_flags = (h->g_sp == 0 ? LINUX_SS_DISABLE : (h->g_flags & LINUX_SS_DISABLE))
+                        | (on ? LINUX_SS_ONSTACK : 0);
+    }
+    if (ss != NULL) {
+        if (on)
+            return -EPERM;
+        int fl = ss->ss_flags & ~0x80000000 /* SS_AUTODISARM */;
+        if (fl & ~LINUX_SS_DISABLE)
+            return -EINVAL;
+        if (fl & LINUX_SS_DISABLE) {
+            h->g_sp = 0; h->g_size = 0; h->g_flags = LINUX_SS_DISABLE;
+        } else {
+            if (ss->ss_size < 2048)
+                return -ENOMEM;
+            h->g_sp = (uintptr_t)ss->ss_sp; h->g_size = ss->ss_size; h->g_flags = 0;
+        }
+    }
+    return 0;
+}
+
+struct mldr_sw_ctx {
+    struct mldr_sigstk_hdr *h;
+    uintptr_t alt_end;
+    void (*fn)(void *);
+    void *arg;
+};
+
+/* Runs on the guest stack. The native altstack may only be changed when not on it,
+ * which is now true: shrink it below the live mldr frames, so a trap taken by the
+ * guest handler starts below them instead of overwriting them. */
+static void
+mldr_sw_entry(void *p)
+{
+    struct mldr_sw_ctx *c = p;
+    stack_t s, old;
+    int shrunk = 0;
+    if (c->alt_end) {
+        s.ss_sp = (void *)c->h->base;
+        s.ss_size = c->alt_end - c->h->base;
+        s.ss_flags = 0;
+        shrunk = sigaltstack(&s, &old) == 0;
+    }
+    c->fn(c->arg);
+    if (shrunk) {
+        old.ss_flags = 0;
+        sigaltstack(&old, NULL);
+    }
+}
+
+#if defined(__x86_64__)
+static void
+mldr_run_on_stack(uintptr_t sp, void (*fn)(void *), void *arg)
+{
+    __asm__ volatile(
+        "movq %%rsp, %%r12\n\t"
+        "movq %0, %%rsp\n\t"
+        "call *%1\n\t"
+        "movq %%r12, %%rsp\n\t"
+        : : "r"(sp), "r"(fn), "D"(arg)
+        : "r12", "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11",
+          "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+          "memory", "cc");
+}
+#endif
+
+void
+mldr_call_guest_handler(uintptr_t intr_rsp, int sa_onstack, void (*fn)(void *), void *arg)
+{
+#if defined(__x86_64__)
+    struct mldr_sigstk_hdr *h = mldr_cur_hdr();
+    uintptr_t cur = (uintptr_t)__builtin_frame_address(0);
+
+    if (h != NULL && cur >= h->base && cur < h->base + h->size) {
+        /* Delivered on mldr's signal stack: move to the guest's stack. */
+        uintptr_t ir = intr_rsp;
+        if (ir >= h->base && ir < h->base + h->size)
+            ir = h->trap_guest_rsp;   /* interrupted mldr's own trap handler */
+        if (ir != 0) {
+            uintptr_t target;
+            int g_on = sa_onstack && h->g_sp != 0 && !(h->g_flags & LINUX_SS_DISABLE);
+            if (g_on && !(ir >= h->g_sp && ir < h->g_sp + h->g_size))
+                target = h->g_sp + h->g_size;
+            else
+                target = ir - 128;    /* red zone */
+            target &= ~(uintptr_t)15;
+            struct mldr_sw_ctx c = { h, 0, fn, arg };
+            uintptr_t end = (cur - 2048) & ~(uintptr_t)15;
+            if (end > h->base + MLDR_SIGSTK_PAGE)
+                c.alt_end = end;
+            mldr_run_on_stack(target, mldr_sw_entry, &c);
+            return;
+        }
+    }
+#else
+    (void)intr_rsp; (void)sa_onstack;
+#endif
+    fn(arg);
+}
 
 /* ── open(2) flag translation ──────────────────────────────────────────────── */
 
@@ -1741,6 +1892,87 @@ mldr_note_mapping(void *base, size_t size, int fd, bool executable)
 }
 #endif /* __x86_64__ */
 
+
+#include "crash_dump.h"
+
+/*
+ * purpose:  MLDR_ABORT_TRACE=1: when the guest kills itself with SIGABRT,
+ *           print the guest frame-pointer chain (raw addresses, up to 32) and
+ *           any text that rdi/rsi/rdx or the first stack slots point to, so
+ *           the CHECK message of a Chromium abort is on record.
+ * input:    mc — saved guest context (may be NULL)
+ * sideEffects: writes to stderr; all reads are guarded and cannot fault.
+ */
+static void
+mldr_abort_trace(const mcontext_t *mc)
+{
+    /* One buffer, one write(2): several guest threads can abort at once and
+     * their lines must not interleave. */
+    static __thread char out[12288];
+    size_t len = 0;
+#define AP(...) do { if (len < sizeof(out)) { int _n = snprintf(out + len, sizeof(out) - len, __VA_ARGS__); \
+                     if (_n > 0) len += (size_t)_n; } } while (0)
+    if (mc == NULL)
+        return;
+    AP("[darling-mldr] ABORT-TRACE rip=0x%llx rsp=0x%llx rbp=0x%llx\n",
+       (unsigned long long)mc->mc_rip, (unsigned long long)mc->mc_rsp,
+       (unsigned long long)mc->mc_rbp);
+    AP("[darling-mldr] ABORT-FRAME 0 0x%llx\n", (unsigned long long)mc->mc_rip);
+    uintptr_t fp = (uintptr_t)mc->mc_rbp;
+    for (int i = 1; i < 32 && fp != 0 && (fp & 7) == 0; i++) {
+        uint64_t nfp = 0, ret = 0;
+        if (!mldr_dump_read_guarded(fp, &nfp) ||
+            !mldr_dump_read_guarded(fp + 8, &ret) || ret == 0)
+            break;
+        AP("[darling-mldr] ABORT-FRAME %d 0x%llx\n", i, (unsigned long long)ret);
+        if (nfp <= fp)
+            break;
+        fp = (uintptr_t)nfp;
+    }
+    uint64_t vals[3 + 16];
+    char names[3 + 16][12];
+    int nv = 0;
+    vals[nv] = (uint64_t)mc->mc_rdi; snprintf(names[nv++], 12, "rdi");
+    vals[nv] = (uint64_t)mc->mc_rsi; snprintf(names[nv++], 12, "rsi");
+    vals[nv] = (uint64_t)mc->mc_rdx; snprintf(names[nv++], 12, "rdx");
+    for (int i = 0; i < 16; i++) {
+        uint64_t w = 0;
+        if (!mldr_dump_read_guarded((uintptr_t)mc->mc_rsp + 8 * (uintptr_t)i, &w))
+            break;
+        vals[nv] = w; snprintf(names[nv++], 12, "sp+%d", 8 * i);
+    }
+    for (int i = 0; i < nv; i++) {
+        char buf[264];
+        int n = 0, done = 0;
+        if (vals[i] < 0x10000)
+            continue;
+        for (; n < 256 && !done; n += 8) {
+            uint64_t w = 0;
+            if (!mldr_dump_read_guarded((uintptr_t)vals[i] + (uintptr_t)n, &w))
+                break;
+            memcpy(buf + n, &w, 8);
+            char *z = memchr(&w, 0, 8);
+            if (z) { n += (int)(z - (char *)&w); done = 1; break; }
+        }
+        if (n > 256) n = 256;
+        int ok = n >= 4;
+        for (int k = 0; k < n && ok; k++) {
+            unsigned char c = (unsigned char)buf[k];
+            if (!((c >= 32 && c < 127) || c == '\n' || c == '\t')) ok = 0;
+        }
+        if (!ok)
+            continue;
+        buf[n] = '\0';
+        for (int k = 0; k < n; k++)
+            if (buf[k] == '\n') buf[k] = ' ';
+        AP("[darling-mldr] ABORT-STR %s=0x%llx \"%s\"\n", names[i],
+           (unsigned long long)vals[i], buf);
+    }
+#undef AP
+    if (len >= sizeof(out)) len = sizeof(out) - 1;
+    freebsd_raw_syscall(SYS_write, 2, (long)out, (long)len, 0, 0, 0);
+}
+
 /*
  * purpose:  Translate a raw Linux x86-64 syscall (as made directly by the
  *           upstream dyld/libdyld.dylib overlay binary, which was compiled
@@ -1997,6 +2229,15 @@ dispatch_linux_syscall(unsigned int linux_nr,
             const int *hd = (const int *)mh->msg_iov[0].iov_base;
             fprintf(stderr, "[traplog] sendmsg fd=%ld callnum=%d pid=%d tid=%d len=%zu\n",
                     (long)a1, hd[0], hd[1], hd[2], (size_t)mh->msg_iov[0].iov_len);
+            if (hd[0] == 4 && mh->msg_iov[0].iov_len >= 32) {
+                /* kprintf: show the text (step 57) */
+                const uint64_t *kb = (const uint64_t *)((const char *)mh->msg_iov[0].iov_base + 16);
+                uint64_t kw = 0;
+                if (mldr_dump_read_guarded((uintptr_t)kb[0], &kw)) {
+                    int kl = kb[1] > 100 ? 100 : (int)kb[1];
+                    fprintf(stderr, "[traplog] kprintf-text tid=%d \"%.*s\"\n", hd[2], kl, (const char *)kb[0]);
+                }
+            }
             fflush(stderr);
         }
         mldr_cmsg_convert(mh->msg_control, (size_t)mh->msg_controllen, 1);
@@ -2038,6 +2279,7 @@ dispatch_linux_syscall(unsigned int linux_nr,
         void *orig_ctl = mh->msg_control;
         socklen_t orig_ctllen = mh->msg_controllen;
         unsigned char big_ctl[512];
+        int ctrunc = 0;
         if (orig_ctl != NULL && orig_ctllen > 0) {
             mh->msg_control = big_ctl;
             mh->msg_controllen = sizeof(big_ctl);
@@ -2083,8 +2325,21 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 if (outlen > total)
                     outlen = total;
                 mldr_cmsg_convert(big_ctl, outlen, 0);
-                if (outlen > orig_ctllen)
-                    outlen = orig_ctllen;
+                if (outlen > orig_ctllen) {
+                    /* the guest's buffer cannot hold what arrived: like Linux, deliver none of it, say
+                     * MSG_CTRUNC, and close the descriptors so they do not leak */
+                    size_t o = 0;
+                    while (o + 16 <= outlen) {
+                        uint64_t l = *(uint64_t *)(big_ctl + o);
+                        if (l < 16 || o + l > outlen)
+                            break;
+                        for (size_t k = 0; k + sizeof(int) <= l - 16; k += sizeof(int))
+                            freebsd_raw_syscall(SYS_close, *(int *)(big_ctl + o + 16 + k), 0, 0, 0, 0, 0);
+                        o += (l + 7) & ~(size_t)7;
+                    }
+                    outlen = 0;
+                    ctrunc = 1;
+                }
                 memcpy(orig_ctl, big_ctl, outlen);
                 if (mldr_trap_log_enabled && outlen >= 20) {
                     fprintf(stderr, "[traplog] recvmsg-cmsg controllen=%zu len=%llu level=%d type=%d fd0=%d\n",
@@ -2095,11 +2350,26 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 }
             }
             mh->msg_control = orig_ctl;
-            mh->msg_controllen = (socklen_t)outlen;
+            /* A failed receive (EINTR above all) leaves the msghdr as the caller built it, as on Linux.
+             * Writing 0 here made the caller's retry pass a zero-length control buffer, and the kernel
+             * then dropped the SCM_RIGHTS descriptor of the next message. */
+            mh->msg_controllen = (r >= 0) ? (socklen_t)outlen : orig_ctllen;
+        }
+        if (r >= 0) {
+            /* msg_flags: FreeBSD MSG_* values differ from Linux's (EOR 0x8/0x80, TRUNC 0x10/0x20,
+             * CTRUNC 0x20/0x08), and the guest tests the Linux ones */
+            int nf = mh->msg_flags, lf = nf & 0x7;
+            if (nf & 0x8)  lf |= 0x80;
+            if (nf & 0x10) lf |= 0x20;
+            if (nf & 0x20) lf |= 0x08;
+            if (ctrunc)    lf |= 0x08;
+            mh->msg_flags = lf;
         }
 
         if (orig_name != NULL && orig_namelen > 0) {
-            if (r >= 0 && mh->msg_namelen >= offsetof(struct sockaddr_un, sun_path)) {
+            if (r < 0) {
+                mh->msg_namelen = orig_namelen;
+            } else if (mh->msg_namelen >= offsetof(struct sockaddr_un, sun_path)) {
                 size_t path_len = mh->msg_namelen - offsetof(struct sockaddr_un, sun_path);
                 size_t avail = (orig_namelen > 2) ? (size_t)orig_namelen - 2 : 0;
                 if (path_len > avail) path_len = avail;
@@ -2729,46 +2999,10 @@ dispatch_linux_syscall(unsigned int linux_nr,
         mldr_eventfd_track(fds[0], fds[1], true);
         return fds[0];
     }
-    case LINUX_SYS_sigaltstack: {
-        /* Linux struct sigaltstack: {void*ss_sp; int ss_flags; size_t ss_size;}
-         * FreeBSD stack_t:           {void*ss_sp; size_t ss_size; int ss_flags;}
-         * Field ORDER differs, and the ss_flags BIT VALUES differ too
-         * (LINUX_SS_ONSTACK/LINUX_SS_DISABLE vs FreeBSD's SS_ONSTACK/
-         * SS_DISABLE) — a blind pass-through would corrupt both the size
-         * and the on-stack/disable flags. */
-        struct linux_sigaltstack {
-            void *ss_sp;
-            int ss_flags;
-            unsigned long ss_size;
-        };
-        struct linux_sigaltstack *lin_ss  = (struct linux_sigaltstack *)a1;
-        struct linux_sigaltstack *lin_oss = (struct linux_sigaltstack *)a2;
-        stack_t native_ss, native_oss;
-        stack_t *pss = NULL, *poss = NULL;
-
-        if (lin_ss != NULL) {
-            native_ss.ss_sp = lin_ss->ss_sp;
-            native_ss.ss_size = lin_ss->ss_size;
-            native_ss.ss_flags = 0;
-            if (lin_ss->ss_flags & LINUX_SS_ONSTACK) native_ss.ss_flags |= SS_ONSTACK;
-            if (lin_ss->ss_flags & LINUX_SS_DISABLE) native_ss.ss_flags |= SS_DISABLE;
-            pss = &native_ss;
-        }
-        if (lin_oss != NULL) {
-            poss = &native_oss;
-        }
-
-        long r = freebsd_raw_syscall(SYS_sigaltstack, (long)pss, (long)poss, 0, 0, 0, 0);
-
-        if (r >= 0 && lin_oss != NULL) {
-            lin_oss->ss_sp = native_oss.ss_sp;
-            lin_oss->ss_size = native_oss.ss_size;
-            lin_oss->ss_flags = 0;
-            if (native_oss.ss_flags & SS_ONSTACK) lin_oss->ss_flags |= LINUX_SS_ONSTACK;
-            if (native_oss.ss_flags & SS_DISABLE) lin_oss->ss_flags |= LINUX_SS_DISABLE;
-        }
-        return r;
-    }
+    case LINUX_SYS_sigaltstack:
+        /* Guest altstack is stored per thread for mldr_call_guest_handler; the
+         * native altstack (mldr's own signal stack) is never touched. */
+        return mldr_linux_sigaltstack((const void *)a1, (void *)a2);
     case LINUX_SYS_getrandom:
         /* Identical signature (buf, buflen, flags) AND identical GRND_*
          * bit values on both OSes — pure passthrough. */
@@ -2972,6 +3206,11 @@ dispatch_linux_syscall(unsigned int linux_nr,
     case LINUX_SYS_wait4:
         return freebsd_raw_syscall(SYS_wait4, a1, a2, a3, a4, 0, 0);
     case LINUX_SYS_kill:
+        if (a2 == SIGABRT && (a1 == 0 || a1 == (long)getpid())) {
+            const char *e = getenv("MLDR_ABORT_TRACE");
+            if (e != NULL && e[0] == '1')
+                mldr_abort_trace(mc);
+        }
         return freebsd_raw_syscall(SYS_kill, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_rt_sigaction:
         /* Was a passthrough, which cannot work: the two struct sigaction
@@ -3090,6 +3329,38 @@ dispatch_linux_syscall(unsigned int linux_nr,
              */
             sigdelset(&nset, SIGILL);
             sigdelset(&nset, SIGSYS);
+
+            /*
+             * Step 57. The guest's sigset is 8 bytes, but its real-time signals
+             * (thread_suspend = 65, S2C = 66) are FreeBSD 65..126: a SETMASK
+             * built from a saved guest mask has no bit for them, so the RPC
+             * layer's atomic_end (SETMASK to the mask atomic_begin read) cleared
+             * the block on 65 that the kernel had applied for the duration of the
+             * signal-65 handler. The pending next signal 65 was delivered right
+             * there, nested inside the handler, and the nesting never unwound.
+             * For SETMASK keep the current state of every native signal the guest
+             * mask cannot express.
+             */
+            if (freebsd_how == SIG_SETMASK) {
+                sigset_t cur, repr;
+                sigemptyset(&cur);
+                sigemptyset(&repr);
+                if (freebsd_raw_syscall(SYS_sigprocmask, SIG_BLOCK, 0, (long)&cur, 0, 0, 0) == 0) {
+                    for (int ls = 1; ls <= 64; ls++) {
+                        int nn = mldr_linux_signo_to_freebsd(ls);
+                        if (nn > 0)
+                            sigaddset(&repr, nn);
+                    }
+                    for (int nn = 1; nn <= 126; nn++) {
+                        if (!sigismember(&repr, nn) && sigismember(&cur, nn)
+                            && nn != SIGILL && nn != SIGSYS) {
+                            sigaddset(&nset, nn);
+                            if (mldr_trap_log_enabled && nn >= 65)
+                                fprintf(stderr, "[traplog] sigprocmask SETMASK keeps native %d blocked\n", nn);
+                        }
+                    }
+                }
+            }
         }
 
         long r = freebsd_raw_syscall(SYS_sigprocmask, freebsd_how,
@@ -3396,7 +3667,7 @@ mldr_sysring_dump(const char *why, unsigned int eax, long a1)
 }
 
 static void
-sigsys_handler(int signo, siginfo_t *info, void *uctx_void)
+sigsys_handler_inner(int signo, siginfo_t *info, void *uctx_void)
 {
     (void)signo;
     (void)info;
@@ -3697,7 +3968,7 @@ static struct mldr_h1rec mldr_h1[64];
 static unsigned long mldr_h1_seq;
 
 static void
-sigill_handler(int signo, siginfo_t *info, void *uctx_void)
+sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
 {
     ucontext_t *uctx = (ucontext_t *)uctx_void;
     mcontext_t *mc = &uctx->uc_mcontext;
@@ -4211,6 +4482,27 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
 }
 #endif /* __x86_64__ */
 
+/* The trap handlers publish the guest rsp of the trap in the thread's stack header, so a
+ * guest signal that interrupts them (and the guest sigaltstack emulation) can find the
+ * guest stack. Restored on exit, so nesting works. */
+#define MLDR_TRAP_WRAPPER(name)                                                      \
+static void                                                                          \
+name(int signo, siginfo_t *info, void *uctx_void)                                    \
+{                                                                                    \
+    struct mldr_sigstk_hdr *h = mldr_cur_hdr();                                      \
+    uintptr_t prev = h ? h->trap_guest_rsp : 0;                                      \
+    if (h) h->trap_guest_rsp = MLDR_UCTX_RSP(uctx_void);                             \
+    name##_inner(signo, info, uctx_void);                                            \
+    if (h) h->trap_guest_rsp = prev;                                                 \
+}
+#if defined(__x86_64__)
+#define MLDR_UCTX_RSP(u) ((uintptr_t)((ucontext_t *)(u))->uc_mcontext.mc_rsp)
+#else
+#define MLDR_UCTX_RSP(u) ((uintptr_t)0)
+#endif
+MLDR_TRAP_WRAPPER(sigsys_handler)
+MLDR_TRAP_WRAPPER(sigill_handler)
+
 /*
  * purpose:  Give the calling thread its own alternate signal stack, so the
  *           SA_ONSTACK handlers installed by setup_macos_syscall_trap() have
@@ -4242,10 +4534,11 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
 int
 mldr_setup_thread_signal_stack(void)
 {
-    void *stack = mmap(NULL, SIGSYS_ALTSTACK_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANON, -1, 0);
+    size_t total = 2 * MLDR_SIGSTK_PAGE + SIGSYS_ALTSTACK_SIZE;
+    char *region = mmap(NULL, total, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
 
-    if (stack == MAP_FAILED) {
+    if (region == MAP_FAILED) {
         fprintf(stderr,
             "[darling-mldr] WARNING: could not map an alternate signal stack"
             " for this thread: %s — a raw-syscall trap on it will crash in"
@@ -4254,9 +4547,17 @@ mldr_setup_thread_signal_stack(void)
             mldr_tlog("altstack FAIL(mmap)", 0, errno);
         return -1;
     }
+    mprotect(region, MLDR_SIGSTK_PAGE, PROT_NONE);   /* guard page below */
+
+    struct mldr_sigstk_hdr *h = (struct mldr_sigstk_hdr *)(region + MLDR_SIGSTK_PAGE);
+    h->magic = MLDR_SIGSTK_MAGIC;
+    h->base = (uintptr_t)(region + 2 * MLDR_SIGSTK_PAGE);
+    h->size = SIGSYS_ALTSTACK_SIZE;
+    h->trap_guest_rsp = 0;
+    h->g_sp = 0; h->g_size = 0; h->g_flags = LINUX_SS_DISABLE;
 
     stack_t altss = {
-        .ss_sp    = stack,
+        .ss_sp    = (void *)h->base,
         .ss_size  = SIGSYS_ALTSTACK_SIZE,
         .ss_flags = 0,
     };
@@ -4268,12 +4569,12 @@ mldr_setup_thread_signal_stack(void)
             strerror(errno));
         if (mldr_trap_log_enabled)
             mldr_tlog("altstack FAIL(sigaltstack)", 0, errno);
-        munmap(stack, SIGSYS_ALTSTACK_SIZE);
+        munmap(region, total);
         return -1;
     }
 
     if (mldr_trap_log_enabled)
-        mldr_tlog("altstack OK", (long)(uintptr_t)stack, 0);
+        mldr_tlog("altstack OK", (long)h->base, 0);
     return 0;
 }
 
@@ -4290,16 +4591,7 @@ setup_macos_syscall_trap(void)
     }
 
     /* Alternate stack: prevents the handler from clobbering the Mach-O stack */
-    stack_t altss = {
-        .ss_sp    = _sigsys_altstack,
-        .ss_size  = SIGSYS_ALTSTACK_SIZE,
-        .ss_flags = 0,
-    };
-    if (sigaltstack(&altss, NULL) < 0) {
-        fprintf(stderr,
-            "[darling-mldr] WARNING: sigaltstack() failed: %s\n",
-            strerror(errno));
-    }
+    mldr_setup_thread_signal_stack();
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));

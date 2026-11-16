@@ -1,0 +1,15 @@
+# Ordered patch series: <submodule path under src/external> <patch file in this directory>
+# Applied by build-freebsd/apply-patches.sh, verified by build-freebsd/patches-clean-check.sh.
+# darlingserver-mach-memory-entry.patch is superseded by darlingserver-mach-named-entry.patch
+# (both rewrite _mach_make_memory_entry) and is intentionally not listed.
+darlingserver darlingserver-mach-named-entry.patch
+darlingserver darlingserver-rpc-log.patch
+darlingserver darlingserver-sendsignal-log.patch
+darlingserver darlingserver-skip-fork-wait.patch
+darlingserver darlingserver-task-info-flavor.patch
+darlingserver darlingserver-thread-suspend-lock.patch
+objc4 objc4-realized-rw-size.patch
+xnu xnu-dserver-rpc-recv-validate.patch
+xnu xnu-fork-failure.patch
+xnu xnu-sysctl-hv-vmm-proc-translated.patch
+xnu xnu-sysctl-string-nul.patch

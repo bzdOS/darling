@@ -3,21 +3,19 @@
 # Usage: sh build-freebsd/build-mldr-only.sh
 #
 # Environment:
-#   DARLING_BUILD_DIR  — where build artefacts go (default: /var/darling-build,
-#                        the same default tests/launch-dynamic-smoke.c reads
-#                        from — see the note by BUILD below)
+#   DARLING_BUILD_DIR  — REQUIRED. Where build artefacts go and where every run reads mldr and
+#                        darlingserver from. There is deliberately no default: the old default
+#                        (/var/darling-build) differed from the directory the runs use, so a rebuild
+#                        installed into a place nothing reads and the next run used the old binary.
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 set -e
+# apply build-freebsd/patches/series to the submodule trees (idempotent; fails the build on conflict)
+sh "$(dirname "$0")/apply-patches.sh" || exit 1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# /var, not /tmp: this must match tests/launch-dynamic-smoke.c's build_dir()
-# default, which is where every run actually looks for mldr and darlingserver.
-# While these defaults disagreed, a rebuild here installed into a directory
-# nothing reads, the install step below reported only a warning, and the test
-# went on running the previous binary — "edited the source, rebuilt, behaviour
-# unchanged" with no error anywhere. (Same failure mode as build-dtape.sh's
-# libdtape.a being a separately-built prebuilt: see its header.)
-BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/dserver"
+# No default for DARLING_BUILD_DIR (see above): refuse to guess an install directory.
+: "${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR to the build directory the runs read (e.g. the one holding dserver/mldr-real)}"
+BUILD="${DARLING_BUILD_DIR}/dserver"
 # Build in /tmp so the freebsd user doesn't need write access to the build dir.
 # The resulting binary is then installed to the canonical path with root privileges.
 MLDR_TMP_BUILD="/tmp/mldr-build-$$"

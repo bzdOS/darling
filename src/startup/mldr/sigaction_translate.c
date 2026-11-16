@@ -14,6 +14,7 @@
 #ifdef DARLING_FREEBSD
 
 #include "sigaction_translate.h"
+#include "freebsd_syscall_trap.h"
 #include "linux_siginfo.h"
 #include "linux_ucontext.h"
 
@@ -339,6 +340,20 @@ sat_freebsd_signo_to_linux(int native_signo)
 
 typedef void (*sat_guest_handler_t)(int, struct linux_siginfo_compat *, void *);
 
+struct sat_guest_call {
+    sat_guest_handler_t handler;
+    int signo;
+    struct linux_siginfo_compat *info;
+    void *uctx;
+};
+
+static void
+sat_guest_call_run(void *p)
+{
+    struct sat_guest_call *c = p;
+    c->handler(c->signo, c->info, c->uctx);
+}
+
 static void
 sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
                              void *native_uctx)
@@ -410,7 +425,11 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
     mldr_siginfo_freebsd_to_linux(native_info, linux_signo, &linfo);
     mldr_ucontext_freebsd_to_linux((const ucontext_t *)native_uctx, &luctx);
 
-    ((sat_guest_handler_t)handler)(linux_signo, &linfo, &luctx);
+    /* Never run the guest handler on mldr's signal stack: switch to the guest's. */
+    struct sat_guest_call call = { (sat_guest_handler_t)handler, linux_signo, &linfo, &luctx };
+    mldr_call_guest_handler((uintptr_t)((const ucontext_t *)native_uctx)->uc_mcontext.mc_rsp,
+                            (ent->wire.sa_flags & SAT_LINUX_SA_ONSTACK) != 0,
+                            sat_guest_call_run, &call);
 
     mldr_ucontext_linux_to_freebsd(&luctx, (ucontext_t *)native_uctx);
 }
@@ -547,6 +566,13 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
          * execution — never honor a guest request to block either. */
         sigdelset(&native_new.sa_mask, SIGILL);
         sigdelset(&native_new.sa_mask, SIGSYS);
+        /* Step 57: the guest's 8-byte sa_mask cannot name signals 65/66
+         * (thread_suspend, S2C). Its RT handlers ask to block both while one
+         * of them runs (sigexc.c handle_rt_signal); honor that natively. */
+        if (native_signo == SAT_RT_FIRST || native_signo == SAT_RT_FIRST + 1) {
+            sigaddset(&native_new.sa_mask, SAT_RT_FIRST);
+            sigaddset(&native_new.sa_mask, SAT_RT_FIRST + 1);
+        }
 
         pnew = &native_new;
     }
