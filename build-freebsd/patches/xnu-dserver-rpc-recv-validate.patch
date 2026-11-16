@@ -1,0 +1,196 @@
+diff --git a/darling/src/libsystem_kernel/emulation/include/linux_premigration/resources/dserver-rpc-defs.h b/darling/src/libsystem_kernel/emulation/include/linux_premigration/resources/dserver-rpc-defs.h
+index f6588cc..6fe8f5e 100644
+--- a/darling/src/libsystem_kernel/emulation/include/linux_premigration/resources/dserver-rpc-defs.h
++++ b/darling/src/libsystem_kernel/emulation/include/linux_premigration/resources/dserver-rpc-defs.h
+@@ -8,6 +8,7 @@
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/conversion/duct_errno.h>
+ #include <darling/emulation/conversion/network/getsockopt.h>
++#include <darling/emulation/conversion/network/duct.h>
+ #include <darling/emulation/other/mach/lkm.h>
+ #include <darling/emulation/linux_premigration/elfcalls_wrapper.h>
+ #include <darling/emulation/common/simple.h>
+@@ -83,10 +84,73 @@ static long int dserver_rpc_hooks_send_message(int socket, const dserver_rpc_hoo
+ #endif
+ };
+ 
++// Control-message hygiene for the receive path.
++// recvmsg() rewrites msg_controllen (and msg_flags) in place, and a kernel that has no ancillary data to
++// report may leave both the length and the buffer untouched. A caller that reuses one msghdr for several
++// receives (the S2C loop below, push-reply) would then parse stale or uninitialised bytes as a cmsg.
++// So: re-arm the msghdr before every receive, and only trust what the kernel says after checking it.
++#define DSERVER_RPC_HOOKS_FD_MAX 8
++
++// Number of descriptors carried by a received message, or -1 if the control data is malformed
++// (truncated, wrong level/type, length not covering the header, more than DSERVER_RPC_HOOKS_FD_MAX fds).
++__attribute__((unused)) static long int dserver_rpc_hooks_received_fd_count(const dserver_rpc_hooks_msghdr_t* msg) {
++	const dserver_rpc_hooks_cmsghdr_t* cmsg;
++	size_t hdr = DSERVER_RPC_HOOKS_CMSG_LEN(0);
++	size_t payload;
++
++	if (!msg->msg_control || msg->msg_controllen == 0) {
++		return 0;
++	}
++	if (msg->msg_controllen < sizeof(dserver_rpc_hooks_cmsghdr_t)) {
++		return -1;
++	}
++	cmsg = (const dserver_rpc_hooks_cmsghdr_t*)msg->msg_control;
++	if (cmsg->cmsg_len == 0 && cmsg->cmsg_level == 0 && cmsg->cmsg_type == 0) {
++		// the re-armed header was left untouched: no ancillary data
++		return 0;
++	}
++	if (cmsg->cmsg_len < hdr || cmsg->cmsg_len > msg->msg_controllen) {
++		return -1;
++	}
++	if (cmsg->cmsg_level != DSERVER_RPC_HOOKS_SOL_SOCKET || cmsg->cmsg_type != DSERVER_RPC_HOOKS_SCM_RIGHTS) {
++		return -1;
++	}
++	payload = cmsg->cmsg_len - hdr;
++	if ((payload % sizeof(int)) != 0 || (payload / sizeof(int)) > DSERVER_RPC_HOOKS_FD_MAX) {
++		return -1;
++	}
++	return (long int)(payload / sizeof(int));
++};
++
++__attribute__((unused)) static void dserver_rpc_hooks_close_received_fds(const dserver_rpc_hooks_msghdr_t* msg) {
++	long int n = dserver_rpc_hooks_received_fd_count(msg);
++	const int* fds;
++	long int i;
++
++	if (n <= 0) {
++		return;
++	}
++	fds = (const int*)DSERVER_RPC_HOOKS_CMSG_DATA((const dserver_rpc_hooks_cmsghdr_t*)msg->msg_control);
++	for (i = 0; i < n; ++i) {
++		LINUX_SYSCALL1(__NR_close, fds[i]);
++	}
++};
++
+ static long int dserver_rpc_hooks_receive_message(int socket, dserver_rpc_hooks_msghdr_t* out_message) {
+ 	long int ret = 0;
++	void* const control_base = out_message->msg_control;
++	const size_t control_capacity = out_message->msg_controllen;
+ 
+ retry:
++	// re-arm: capacity, flags and the first cmsg header (so a stale header is never mistaken for new data)
++	out_message->msg_controllen = control_capacity;
++	out_message->msg_flags = 0;
++	if (control_base && control_capacity >= sizeof(dserver_rpc_hooks_cmsghdr_t)) {
++		dserver_rpc_hooks_cmsghdr_t* first = (dserver_rpc_hooks_cmsghdr_t*)control_base;
++		first->cmsg_len = 0;
++		first->cmsg_level = 0;
++		first->cmsg_type = 0;
++	}
+ #ifdef __NR_socketcall
+ 	ret = LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_RECVMSG, ((long[6]) { socket, out_message, 0 }));
+ #else
+@@ -96,6 +160,18 @@ retry:
+ 		return ret;
+ 	}
+ 
++	if ((out_message->msg_flags & (LINUX_MSG_TRUNC | LINUX_MSG_CTRUNC)) != 0) {
++		// part of the message or of its descriptors was dropped: it cannot be interpreted. Do not leak what did
++		// arrive, and report a bad message to the caller (no abort).
++		__simple_printf("dserver rpc: truncated message (flags=0x%x, len=%ld): dropped\n", out_message->msg_flags, ret);
++		dserver_rpc_hooks_close_received_fds(out_message);
++		return -LINUX_EBADMSG;
++	}
++	if (dserver_rpc_hooks_received_fd_count(out_message) < 0) {
++		__simple_printf("dserver rpc: malformed control data (controllen=%lu): dropped\n", (unsigned long)out_message->msg_controllen);
++		return -LINUX_EBADMSG;
++	}
++
+ 	if (ret >= sizeof(dserver_s2c_callhdr_t)) {
+ 		dserver_s2c_callhdr_t* callhdr = out_message->msg_iov->iov_base;
+ 
+@@ -116,25 +192,33 @@ retry:
+ 						.errno_result = 0,
+ 					};
+ 
++					int mmap_bad = 0;
++
+ 					if (mmap_call->fd == 0) {
+-						dserver_rpc_hooks_cmsghdr_t* reply_cmsg = DSERVER_RPC_HOOKS_CMSG_FIRSTHDR(out_message);
+-						if (!reply_cmsg || reply_cmsg->cmsg_level != DSERVER_RPC_HOOKS_SOL_SOCKET || reply_cmsg->cmsg_type != DSERVER_RPC_HOOKS_SCM_RIGHTS || reply_cmsg->cmsg_len != DSERVER_RPC_HOOKS_CMSG_LEN(sizeof(int))) {
+-							__simple_printf("Bad S2C call: no FD, but expected one");
+-							__simple_abort();
++						// the descriptor travels as SCM_RIGHTS; exactly one is expected
++						if (dserver_rpc_hooks_received_fd_count(out_message) == 1) {
++							dserver_rpc_hooks_memcpy(&mmap_call->fd, DSERVER_RPC_HOOKS_CMSG_DATA((dserver_rpc_hooks_cmsghdr_t*)out_message->msg_control), sizeof(int));
++						} else {
++							// answer the server with EBADF instead of aborting: it is waiting for this reply
++							__simple_printf("dserver rpc: S2C mmap: expected exactly one descriptor, got %ld\n", dserver_rpc_hooks_received_fd_count(out_message));
++							dserver_rpc_hooks_close_received_fds(out_message);
++							mmap_bad = 1;
+ 						}
+-						dserver_rpc_hooks_memcpy(&mmap_call->fd, DSERVER_RPC_HOOKS_CMSG_DATA(reply_cmsg), sizeof(int));
+ 					} else if (mmap_call->fd != -1) {
+-						__simple_printf("Bad S2C call: invalid FD number");
+-						__simple_abort();
++						__simple_printf("dserver rpc: S2C mmap: invalid fd number %d\n", mmap_call->fd);
++						mmap_bad = 1;
+ 					}
+ 
++					if (mmap_bad) {
++						call_ret = -LINUX_EBADF;
++					} else
+ #ifdef __NR_mmap2
+ 					call_ret = (void*)LINUX_SYSCALL(__NR_mmap2, mmap_call->address, mmap_call->length, mmap_call->protection, mmap_call->flags, mmap_call->fd, mmap_call->offset / 4096);
+ #else
+ 					call_ret = (void*)LINUX_SYSCALL(__NR_mmap, mmap_call->address, mmap_call->length, mmap_call->protection, mmap_call->flags, mmap_call->fd, mmap_call->offset);
+ #endif
+ 
+-					if (mmap_call->fd >= 0) {
++					if (!mmap_bad && mmap_call->fd >= 0) {
+ 						close_internal(mmap_call->fd);
+ 					}
+ 
+@@ -253,8 +337,9 @@ retry:
+ 				} break;
+ 
+ 				default:
+-					__simple_printf("Invalid S2C call number: %d", callhdr->s2c_number);
+-					__simple_abort();
++					__simple_printf("dserver rpc: invalid S2C call number %d\n", callhdr->s2c_number);
++					dserver_rpc_hooks_close_received_fds(out_message);
++					return -LINUX_EBADMSG;
+ 			}
+ 
+ 			// go back and wait for another message
+diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/resources/dserver-rpc-defs.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/resources/dserver-rpc-defs.c
+index db422e9..3d570e4 100644
+--- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/resources/dserver-rpc-defs.c
++++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/resources/dserver-rpc-defs.c
+@@ -30,7 +30,20 @@ void __dserver_rpc_hooks_push_reply(int socket, const dserver_rpc_hooks_msghdr_t
+ 		.iov_len = sizeof(call),
+ 	};
+ 	char controlbuf[DSERVER_RPC_HOOKS_CMSG_SPACE(sizeof(int) * (DSERVER_RPC_REPLY_MAX_FD_COUNT + 1))];
+-	size_t fd_count = ((reply->msg_control && reply->msg_controllen >= sizeof(dserver_rpc_hooks_cmsghdr_t)) ? (((dserver_rpc_hooks_cmsghdr_t*)reply->msg_control)->cmsg_len - LINUX_CMSG_ALIGN(sizeof(dserver_rpc_hooks_cmsghdr_t))) : 0) / sizeof(int);
++	// descriptors carried by the reply being pushed back: validated, never derived from raw cmsg_len arithmetic
++	long int received_fds = dserver_rpc_hooks_received_fd_count(reply);
++	size_t fd_count = 0;
++	if (received_fds > (long int)DSERVER_RPC_REPLY_MAX_FD_COUNT || received_fds < 0) {
++		dserver_rpc_hooks_printf("*** %d:%d: %s: unusable control data on pushed reply (fds=%ld), dropping descriptors ***\n", dserver_rpc_hooks_get_pid(), dserver_rpc_hooks_get_tid(), __func__, received_fds);
++		if (received_fds > 0 && reply->msg_control) {
++			const int* bad_fds = (const int*)DSERVER_RPC_HOOKS_CMSG_DATA((const dserver_rpc_hooks_cmsghdr_t*)reply->msg_control);
++			for (long int i = 0; i < received_fds; ++i) {
++				dserver_rpc_hooks_close_fd(bad_fds[i]);
++			}
++		}
++	} else {
++		fd_count = (size_t)received_fds;
++	}
+ 	dserver_rpc_hooks_msghdr_t callmsg = {
+ 		.msg_name = dserver_rpc_hooks_get_server_address(),
+ 		.msg_namelen = dserver_rpc_hooks_get_server_address_length(),
+@@ -50,7 +63,9 @@ void __dserver_rpc_hooks_push_reply(int socket, const dserver_rpc_hooks_msghdr_t
+ 	cmsg->cmsg_len = DSERVER_RPC_HOOKS_CMSG_LEN(sizeof(int) * (fd_count + 1));
+ 
+ 	// copy over the FDs from the reply
+-	memcpy(fds, DSERVER_RPC_HOOKS_CMSG_DATA((dserver_rpc_hooks_cmsghdr_t*)reply->msg_control), sizeof(int) * fd_count);
++	if (fd_count > 0) {
++		memcpy(fds, DSERVER_RPC_HOOKS_CMSG_DATA((dserver_rpc_hooks_cmsghdr_t*)reply->msg_control), sizeof(int) * fd_count);
++	}
+ 
+ 	long_status = sys_pipe(pipe_ends);
+ 	if (long_status < 0) {

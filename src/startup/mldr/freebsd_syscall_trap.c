@@ -2279,6 +2279,7 @@ dispatch_linux_syscall(unsigned int linux_nr,
         void *orig_ctl = mh->msg_control;
         socklen_t orig_ctllen = mh->msg_controllen;
         unsigned char big_ctl[512];
+        int ctrunc = 0;
         if (orig_ctl != NULL && orig_ctllen > 0) {
             mh->msg_control = big_ctl;
             mh->msg_controllen = sizeof(big_ctl);
@@ -2324,8 +2325,21 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 if (outlen > total)
                     outlen = total;
                 mldr_cmsg_convert(big_ctl, outlen, 0);
-                if (outlen > orig_ctllen)
-                    outlen = orig_ctllen;
+                if (outlen > orig_ctllen) {
+                    /* the guest's buffer cannot hold what arrived: like Linux, deliver none of it, say
+                     * MSG_CTRUNC, and close the descriptors so they do not leak */
+                    size_t o = 0;
+                    while (o + 16 <= outlen) {
+                        uint64_t l = *(uint64_t *)(big_ctl + o);
+                        if (l < 16 || o + l > outlen)
+                            break;
+                        for (size_t k = 0; k + sizeof(int) <= l - 16; k += sizeof(int))
+                            freebsd_raw_syscall(SYS_close, *(int *)(big_ctl + o + 16 + k), 0, 0, 0, 0, 0);
+                        o += (l + 7) & ~(size_t)7;
+                    }
+                    outlen = 0;
+                    ctrunc = 1;
+                }
                 memcpy(orig_ctl, big_ctl, outlen);
                 if (mldr_trap_log_enabled && outlen >= 20) {
                     fprintf(stderr, "[traplog] recvmsg-cmsg controllen=%zu len=%llu level=%d type=%d fd0=%d\n",
@@ -2336,11 +2350,26 @@ dispatch_linux_syscall(unsigned int linux_nr,
                 }
             }
             mh->msg_control = orig_ctl;
-            mh->msg_controllen = (socklen_t)outlen;
+            /* A failed receive (EINTR above all) leaves the msghdr as the caller built it, as on Linux.
+             * Writing 0 here made the caller's retry pass a zero-length control buffer, and the kernel
+             * then dropped the SCM_RIGHTS descriptor of the next message. */
+            mh->msg_controllen = (r >= 0) ? (socklen_t)outlen : orig_ctllen;
+        }
+        if (r >= 0) {
+            /* msg_flags: FreeBSD MSG_* values differ from Linux's (EOR 0x8/0x80, TRUNC 0x10/0x20,
+             * CTRUNC 0x20/0x08), and the guest tests the Linux ones */
+            int nf = mh->msg_flags, lf = nf & 0x7;
+            if (nf & 0x8)  lf |= 0x80;
+            if (nf & 0x10) lf |= 0x20;
+            if (nf & 0x20) lf |= 0x08;
+            if (ctrunc)    lf |= 0x08;
+            mh->msg_flags = lf;
         }
 
         if (orig_name != NULL && orig_namelen > 0) {
-            if (r >= 0 && mh->msg_namelen >= offsetof(struct sockaddr_un, sun_path)) {
+            if (r < 0) {
+                mh->msg_namelen = orig_namelen;
+            } else if (mh->msg_namelen >= offsetof(struct sockaddr_un, sun_path)) {
                 size_t path_len = mh->msg_namelen - offsetof(struct sockaddr_un, sun_path);
                 size_t avail = (orig_namelen > 2) ? (size_t)orig_namelen - 2 : 0;
                 if (path_len > avail) path_len = avail;
