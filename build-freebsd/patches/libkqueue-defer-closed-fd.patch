@@ -1,0 +1,158 @@
+diff --git a/src/common/kevent.c b/src/common/kevent.c
+index f5d53a2..ef350ee 100644
+--- a/src/common/kevent.c
++++ b/src/common/kevent.c
+@@ -362,6 +362,8 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
+      */
+     if (nchanges > 0) {
+         kqueue_lock(kq);
++        /* apply fd closes that were deferred while the lock was busy, so a reused fd number is not hit */
++        kqueue_drain_closed(kq);
+         rv = kevent_copyin(kq, changelist, nchanges, eventlist, nevents);
+         kqueue_unlock(kq);
+         dbg_printf("(%u) changelist: rv=%d", myid, rv);
+diff --git a/src/common/kqueue.c b/src/common/kqueue.c
+index 61cc9dc..baaca1b 100644
+--- a/src/common/kqueue.c
++++ b/src/common/kqueue.c
+@@ -16,6 +16,7 @@
+ 
+ #include <errno.h>
+ #include <fcntl.h>
++#include <poll.h>
+ #include <signal.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+@@ -110,8 +111,37 @@ kqueue_cmp(struct kqueue *a, struct kqueue *b)
+ }
+ #endif
+ 
++static pthread_mutex_t kq_pend_mtx = PTHREAD_MUTEX_INITIALIZER;
++
++/* Must hold the kq lock. Removes the fds whose close was deferred by kqueue_closed_fd(). */
++void kqueue_drain_closed(struct kqueue* kq)
++{
++    for (;;) {
++        int fd;
++        pthread_mutex_lock(&kq_pend_mtx);
++        if (kq->kq_pend_n == 0) {
++            pthread_mutex_unlock(&kq_pend_mtx);
++            return;
++        }
++        fd = kq->kq_pend_fds[--kq->kq_pend_n];
++        pthread_mutex_unlock(&kq_pend_mtx);
++
++        struct kevent64_s ev[2];
++        memset(ev, 0, sizeof(ev));
++        ev[0].ident = fd;
++        ev[0].flags = EV_DELETE | EV_RECEIPT;
++        ev[0].filter = EVFILT_READ;
++        ev[1].ident = fd;
++        ev[1].flags = EV_DELETE | EV_RECEIPT;
++        ev[1].filter = EVFILT_WRITE;
++        kevent_copyin_one(kq, &ev[0]);
++        kevent_copyin_one(kq, &ev[1]);
++    }
++}
++
+ void kqueue_cleanup(struct kqueue* kq)
+ {
++    kqueue_drain_closed(kq);
+     struct knote *next, *tmp;
+     for (next = kq->kq_tofree.lh_first; next != NULL; next = tmp)
+     {
+@@ -132,6 +162,7 @@ void
+ kqueue_free(struct kqueue *kq)
+ {
+ 	kqueue_cleanup(kq);
++	free(kq->kq_pend_fds);
+ 	// XXX: we should be doing this more efficiently (i.e. without walking through all open kqueues)
+ 	map_foreach(kqmap, kqueue_free_cb, kq);
+     filter_unregister_all(kq);
+@@ -244,11 +275,45 @@ kqueue_closed_fd(int fd)
+ 	for (size_t i = 0; i < context.kq_count; ++i) {
+ 		struct kqueue* kq = context.kqs_to_check[i];
+ 
+-		kqueue_lock(kq);
+-		// we don't care whether these operations succeed or not
+-		kevent_copyin_one(kq, &ev[0]);
+-		kevent_copyin_one(kq, &ev[1]);
+-		kqueue_unlock(kq);
++		// A thread inside kevent64 holds the kq lock while a filter's copyout waits on the server, so a
++		// blocking lock here would stall close() of any fd for as long as that wait lasts. Ordinary
++		// contention is short and the fd should be gone from the kqueue when close() returns (no event for
++		// a closed fd), so retry for a bounded time; if the lock is still busy, queue the fd and the holder
++		// removes it when it is done (kqueue_cleanup).
++		bool locked = kqueue_trylock(kq);
++		for (int tries = 0; !locked && tries < 20 && !kq->kq_pend_n; ++tries) {
++			// (a non-empty queue means an earlier close already found the holder stuck: do not wait again)
++			poll(NULL, 0, 1);
++			locked = kqueue_trylock(kq);
++		}
++		if (locked) {
++			// we don't care whether these operations succeed or not
++			kevent_copyin_one(kq, &ev[0]);
++			kevent_copyin_one(kq, &ev[1]);
++			kqueue_drain_closed(kq);
++			kqueue_unlock(kq);
++		} else {
++			bool queued = false;
++			pthread_mutex_lock(&kq_pend_mtx);
++			if (kq->kq_pend_n == kq->kq_pend_cap) {
++				size_t ncap = kq->kq_pend_cap ? kq->kq_pend_cap * 2 : 16;
++				int* nbuf = realloc(kq->kq_pend_fds, ncap * sizeof(int));
++				if (nbuf) {
++					kq->kq_pend_fds = nbuf;
++					kq->kq_pend_cap = ncap;
++				}
++			}
++			if (kq->kq_pend_n < kq->kq_pend_cap) {
++				kq->kq_pend_fds[kq->kq_pend_n++] = fd;
++				queued = true;
++			}
++			pthread_mutex_unlock(&kq_pend_mtx);
++			// the holder may have finished before the fd was queued; if the lock is free now, drain
++			if (queued && kqueue_trylock(kq)) {
++				kqueue_drain_closed(kq);
++				kqueue_unlock(kq);
++			}
++		}
+ 	}
+ 
+ 	// now release the references we added
+diff --git a/src/common/private.h b/src/common/private.h
+index 5c0718e..9caa3df 100644
+--- a/src/common/private.h
++++ b/src/common/private.h
+@@ -156,6 +156,10 @@ struct kqueue {
+     int             kq_nfds;
+     tracing_mutex_t kq_mtx;
+     volatile uint32_t kq_ref;
++    /* fds closed while the kq lock was busy (a thread can hold it across a blocking wait in a
++       filter's copyout); the lock holder removes them in kqueue_cleanup(). Guarded by kq_pend_mtx. */
++    int            *kq_pend_fds;
++    size_t          kq_pend_n, kq_pend_cap;
+ #if defined(KQUEUE_PLATFORM_SPECIFIC)
+     KQUEUE_PLATFORM_SPECIFIC;
+ #endif
+@@ -191,6 +195,12 @@ extern const struct kqueue_vtable kqops;
+  */
+ #define kqueue_lock(kq)     tracing_mutex_lock(&(kq)->kq_mtx)
+ #define kqueue_unlock(kq)   tracing_mutex_unlock(&(kq)->kq_mtx)
++#ifndef NDEBUG
++#define kqueue_trylock(kq)  (pthread_mutex_trylock(&(kq)->kq_mtx.mtx_lock) == 0 ? \
++    ((kq)->kq_mtx.mtx_owner = THREAD_ID, (kq)->kq_mtx.mtx_status = MTX_LOCKED, 1) : 0)
++#else
++#define kqueue_trylock(kq)  (pthread_mutex_trylock(&(kq)->kq_mtx) == 0)
++#endif
+ 
+ int kevent_copyin_one(struct kqueue *kq, const struct kevent64_s *src);
+ 
+@@ -223,6 +233,7 @@ void        kqueue_addref(struct kqueue *);
+ void        kqueue_delref(struct kqueue *);
+ // execute pending free() operations
+ void kqueue_cleanup(struct kqueue* kq);
++void kqueue_drain_closed(struct kqueue* kq);
+ 
+ struct map *map_new(size_t);
+ int         map_insert(struct map *, int, void *);
