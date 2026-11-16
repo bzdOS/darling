@@ -197,6 +197,13 @@ def provider_exports(overlay_root):
     """Names defined in the export trie of any closure provider."""
     defined = set()
     for path in closure_providers(overlay_root):
+        defined |= dylib_exports(path)
+    return defined
+
+
+def dylib_exports(path):
+    defined = set()
+    if True:
         r = subprocess.run(["llvm-objdump", "--macho", "--exports-trie", path],
                            capture_output=True, text=True)
         # Two line shapes define a name: "0x<addr> <name>" and, for an alias
@@ -243,6 +250,9 @@ def main():
     shadow = set()
     if overlay:
         shadow = (provider_exports(overlay) & set(names)) - explicit_names()
+        # GEN_EXTRA_PROVIDERS: dylibs the built image re-exports besides the libSystem closure
+        for extra in filter(None, os.environ.get("GEN_EXTRA_PROVIDERS", "").split(":")):
+            shadow |= (dylib_exports(extra) & set(names)) - explicit_names()
     # always-emit: a body name is emitted even when the installed export
     # list does not carry it — the forward that ends on it must find it here
     for extra in ASM_BODIES:

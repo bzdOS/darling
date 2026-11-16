@@ -68,6 +68,9 @@ for pair in "suppl:/usr/lib/supl.dylib" "cg-supl:/usr/lib/suppl.dylib"; do
     for prov in $(python3 "${SRC}/build-freebsd/gen-cg-supl.py" --providers "${OVERLAY}"); do
         REEXPORTS="${REEXPORTS} -reexport_library ${prov}"
     done
+    if [ "$name" = suppl ]; then
+        for x in $(echo "${GEN_EXTRA_PROVIDERS:-}" | tr : " "); do REEXPORTS="${REEXPORTS} -reexport_library ${x}"; done
+    fi
     ld64.lld -dylib -arch x86_64 -platform_version macos 10.12 10.12 \
         -undefined dynamic_lookup \
         ${REEXPORTS} \

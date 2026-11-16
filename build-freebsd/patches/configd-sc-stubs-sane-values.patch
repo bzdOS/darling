@@ -1,0 +1,130 @@
+diff --git a/darling/src/SystemConfiguration.fproj/stubs.c b/darling/src/SystemConfiguration.fproj/stubs.c
+index 1f31c08..bf32a51 100644
+--- a/darling/src/SystemConfiguration.fproj/stubs.c
++++ b/darling/src/SystemConfiguration.fproj/stubs.c
+@@ -2,6 +2,13 @@
+ 
+ #define STUB() printf("STUB %s\n", __func__)
+ 
++/* Without configd there is no store: answer with a real object where callers dereference the result
++ * (the reachability "object" is an empty dictionary, reported reachable) instead of NULL. */
++static CFTypeRef scStubObject(void)
++{
++	return CFDictionaryCreate(NULL, NULL, NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++}
++
+ const CFStringRef kSCDynamicStoreUseSessionKeys = CFSTR("UseSessionKeys");
+ 
+ CFTypeID SCNetworkConnectionGetTypeID(void)
+@@ -58,50 +65,44 @@ CFTypeID SCNetworkReachabilityGetTypeID(void)
+ 
+ Boolean SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachabilityRef ref, CFRunLoopRef rl, CFStringRef rlMode)
+ {
+-    STUB();
+-	return 0;
++	return TRUE;
+ }
+ 
+ Boolean SCNetworkReachabilityUnscheduleFromRunLoop(SCNetworkReachabilityRef ref, CFRunLoopRef rl, CFStringRef rlMode)
+ {
+-    STUB();
+-	return 0;
++	return TRUE;
+ }
+ 
+ Boolean SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef target, SCNetworkReachabilityCallBack cb, SCNetworkReachabilityContext* ctxt)
+ {
+-    STUB();
+-	return 0;
++	return TRUE;
+ }
+ 
+ Boolean SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags* flags)
+ {
+-    STUB();
+-	return 0;
++	if (flags)
++		*flags = kSCNetworkReachabilityFlagsReachable;
++	return TRUE;
+ }
+ 
+ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithName(CFAllocatorRef allocator, const char* nodeName)
+ {
+-    STUB();
+-	return NULL;
++	return (SCNetworkReachabilityRef) scStubObject();
+ }
+ 
+ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddressPair(CFAllocatorRef allocator, const struct sockaddr* localAddress, const struct sockaddr* remoteAddress)
+ {
+-    STUB();
+-	return NULL;
++	return (SCNetworkReachabilityRef) scStubObject();
+ }
+ 
+ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddress(CFAllocatorRef allocator, const struct sockaddr* remoteAddress)
+ {
+-    STUB();
+-	return NULL;
++	return (SCNetworkReachabilityRef) scStubObject();
+ }
+ 
+ CFStringRef SCDynamicStoreKeyCreateNetworkGlobalEntity(CFAllocatorRef allocator, CFStringRef domain, CFStringRef entity)
+ {
+-	STUB();
+-	return NULL;
++	return CFStringCreateWithFormat(allocator, NULL, CFSTR("%@/Network/Global/%@"), domain, entity);
+ }
+ 
+ CFPropertyListRef SCDynamicStoreCopyValue(SCDynamicStoreRef store, CFStringRef key)
+@@ -140,8 +141,7 @@ Boolean SCDynamicStoreSetNotificationKeys(SCDynamicStoreRef store, CFArrayRef __
+ }
+ 
+ CFStringRef SCDynamicStoreKeyCreateComputerName(CFAllocatorRef allocator) {
+-	STUB();
+-	return NULL;
++	return CFStringCreateWithCString(allocator, "Setup:/System", kCFStringEncodingUTF8);
+ };
+ 
+ Boolean SCPreferencesSetComputerName(SCPreferencesRef	prefs, CFStringRef __nullable	name, CFStringEncoding	nameEncoding) {
+@@ -155,11 +155,36 @@ Boolean SCPreferencesSetLocalHostName(SCPreferencesRef	prefs, CFStringRef __null
+ };
+ 
+ CFStringRef SCDynamicStoreKeyCreateHostNames(CFAllocatorRef allocator) {
+-	STUB();
+-	return NULL;
++	return CFStringCreateWithCString(allocator, "Setup:/System", kCFStringEncodingUTF8);
+ };
+ 
+ CFStringRef SCDynamicStoreKeyCreateNetworkInterfaceEntity(CFAllocatorRef allocator, CFStringRef domain, CFStringRef ifname, CFStringRef entity) {
+-	STUB();
+-	return NULL;
++	if (entity)
++		return CFStringCreateWithFormat(allocator, NULL, CFSTR("%@/Network/Interface/%@/%@"), domain, ifname, entity);
++	return CFStringCreateWithFormat(allocator, NULL, CFSTR("%@/Network/Interface/%@"), domain, ifname);
+ };
++
++CFStringRef SCDynamicStoreKeyCreateProxies(CFAllocatorRef allocator)
++{
++	return CFStringCreateWithCString(allocator, "State:/Network/Global/Proxies", kCFStringEncodingUTF8);
++}
++
++const char* SCErrorString(int status)
++{
++	return status ? "SystemConfiguration error" : "Success";
++}
++
++CFArrayRef SCNetworkInterfaceCopyAll(void)
++{
++	return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
++}
++
++CFStringRef SCNetworkInterfaceGetBSDName(SCNetworkInterfaceRef interface)
++{
++	return NULL;
++}
++
++CFStringRef SCNetworkInterfaceGetHardwareAddressString(SCNetworkInterfaceRef interface)
++{
++	return NULL;
++}
