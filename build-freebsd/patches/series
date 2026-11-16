@@ -15,4 +15,3 @@ xnu xnu-sysctl-hv-vmm-proc-translated.patch
 xnu xnu-sysctl-string-nul.patch
 xnu xnu-emu-shm-sem-flags.patch
 configd configd-sc-stubs-sane-values.patch
-libkqueue libkqueue-defer-closed-fd.patch

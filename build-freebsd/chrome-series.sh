@@ -1,5 +1,6 @@
 #!/bin/sh
 # chrome-series.sh - N-run Chrome series with an md5 gate and a one-line SERIES summary.
+# usage: chrome-series.sh --core-selftest   (no Chrome: segfaulting sudo process x2, checks core written and only newest kept)
 # usage: chrome-series.sh PREFIX N [TIMEOUT]    logs: $DARLING_BUILD_DIR/chrome-sr-<PREFIX>*.log
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR CHROME_APP (as for chrome-sr-batch.sh);
 #      EXPECT_MLDR_MD5  if set and different from the installed mldr, exit 1 before running.
@@ -9,6 +10,19 @@
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
+# --core-selftest: sudo process that segfaults twice under the core-wrap.sh setup; checks a core appears and only the newest is kept
+if [ "$1" = "--core-selftest" ]; then
+	CORE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/core-selftest.XXXXXX") || exit 1
+	export CORE_DIR CORE_LIMIT_KB=${CORE_LIMIT_KB:-2097152}
+	W=$(cd "$(dirname "$0")" && pwd)/core-wrap.sh
+	# the core name is %N (process name), so use two names for the two crashes
+	for i in 1 2; do cp /bin/sh "$CORE_DIR/crasher$i"; sudo -n env CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" sh "$W" run "$CORE_DIR/crasher$i" -c 'kill -SEGV $$' 2>/dev/null; sleep 1; done
+	n=$(ls "$CORE_DIR"/*.core 2>/dev/null | wc -l)
+	out=$(sh "$W" prune); m=$(ls "$CORE_DIR"/*.core 2>/dev/null | wc -l)
+	sudo -n rm -rf "$CORE_DIR"
+	if [ "$n" -ge 2 ] && [ "$m" -eq 1 ]; then echo "CORE-SELFTEST pass (cores before=$n after_prune=$m limit_kb=$CORE_LIMIT_KB)"; exit 0; fi
+	echo "CORE-SELFTEST fail (cores before=$n after_prune=$m) $out"; exit 1
+fi
 # exclusive run lock: one probe/Chrome run at a time; nested calls (DARLING_LOCK_HELD) do not re-lock
 if [ -z "$DARLING_LOCK_HELD" ]; then
 	: "${DARLING_BUILD_DIR:?}"
@@ -30,22 +44,12 @@ leftover_report() {
 trap leftover_report EXIT
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
-# Core files (a Mach core can be 14 GB): cap the size of any core this series' processes dump (ulimit -c, KB;
-# CORE_LIMIT_KB, default 2 GiB; 0 = none) and keep at most one core, the newest, found afterwards in the build dir
-# or the working directory; the others are deleted at exit. Delete the kept one after use (CORES line shows it).
-CORE_LIMIT_KB=${CORE_LIMIT_KB:-2097152}
-ulimit -c "$CORE_LIMIT_KB" 2>/dev/null
-CORE_MARK=$(mktemp "${TMPDIR:-/tmp}/series-core-mark.XXXXXX")
-cores_prune() {
-	_cs=$(find "$DARLING_BUILD_DIR" "$PWD" -maxdepth 1 -name '*.core' -type f -newer "$CORE_MARK" 2>/dev/null | xargs -r ls -t 2>/dev/null)
-	_n=0; _kept=""
-	for _f in $_cs; do
-		_n=$((_n+1))
-		if [ $_n -eq 1 ]; then _kept="$_f ($(du -h "$_f" | cut -f1))"; else rm -f "$_f" 2>/dev/null || sudo -n rm -f "$_f"; fi
-	done
-	rm -f "$CORE_MARK"
-	echo "CORES new=$_n kept=${_kept:-none} limit_kb=$CORE_LIMIT_KB"
-}
+# Core files (a Mach core can be 14 GB): sudo resets the core limit to 0, so chrome-wl-run.sh runs the guest via
+# core-wrap.sh, which sets ulimit -c to CORE_LIMIT_KB (default and maximum 2 GiB) and cds to CORE_DIR
+# (default $DARLING_BUILD_DIR/cores; kern.corefile %N.core lands in the cwd). At exit only the newest core is
+# kept, older ones are deleted (CORES line shows it). Delete the kept one after use.
+export CORE_LIMIT_KB=${CORE_LIMIT_KB:-2097152} CORE_DIR=${CORE_DIR:-$DARLING_BUILD_DIR/cores}
+cores_prune() { sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" prune; }
 MLDR=$DARLING_BUILD_DIR/dserver/mldr-real/mldr
 DS=$DARLING_BUILD_DIR/dserver/darlingserver
 M=$(md5 -q "$MLDR" 2>/dev/null || md5sum "$MLDR" | cut -d' ' -f1)
