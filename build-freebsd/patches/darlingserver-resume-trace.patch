@@ -1,0 +1,140 @@
+diff --git a/src/thread.cpp b/src/thread.cpp
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -31,6 +31,8 @@
+ 
+ #include <darlingserver/duct-tape.h>
+ #include <atomic>
++#include <mutex>
++#include <set>
+ 
+ #include <sys/syscall.h>
+ 
+@@ -363,6 +365,17 @@
+ 
+ static const auto microthreadLog = DarlingServer::Log("microthread");
+ 
++// Diagnostic counters (no behaviour change); read from a debugger via the dsdiag_* globals.
++#define DSDIAG(n) std::atomic<unsigned long> dsdiag_##n{0};
++DSDIAG(resume_calls) DSDIAG(resume_early_not_suspended) DSDIAG(resume_scheduled)
++DSDIAG(suspend_calls) DSDIAG(suspend_after_early_resume)
++DSDIAG(dowork_calls) DSDIAG(dowork_deferred) DSDIAG(dowork_already_running) DSDIAG(dowork_terminating)
++DSDIAG(dowork_dead) DSDIAG(dowork_top_return) DSDIAG(dowork_resume_ctx) DSDIAG(dowork_no_pending_call) DSDIAG(dowork_new_call)
++#undef DSDIAG
++// threads that saw resume() while !_suspended and have not suspended/resumed since
++static std::mutex dsdiagMutex;
++static std::set<const void*> dsdiagEarly;
++
+ // this runs in the context of the microthread (i.e. with the microthread's stack active)
+ void DarlingServer::Thread::microthreadWorker() {
+ #if DSERVER_ASAN
+@@ -427,8 +440,10 @@
+ 	//       but we know what reasonable compilers (i.e. GCC and Clang) do with it and we're specifically targeting Clang, so it's okay for us.
+ 
+ 	_rwlock.lock();
++	++dsdiag_dowork_calls;
+ 
+ 	if (_deferralState != DeferralState::NotDeferred) {
++		++dsdiag_dowork_deferred;
+ 		microthreadLog.debug() << _tid << "(" << _nstid << "): execution was deferred" << microthreadLog.endLog;
+ 		_deferralState = DeferralState::DeferredPending;
+ 		_rwlock.unlock();
+@@ -436,6 +451,8 @@
+ 	}
+ 
+ 	if (_running) {
++		++dsdiag_dowork_already_running;
++		microthreadLog.debug() << "DIAG doWork tid=" << _tid << " exit=already-running suspended=" << _suspended << microthreadLog.endLog;
+ 		// this is probably an error
+ 		microthreadLog.warning() << _tid << "(" << _nstid << "): attempt to re-run already running microthread on another thread" << microthreadLog.endLog;
+ 		_rwlock.unlock();
+@@ -443,12 +460,16 @@
+ 	}
+ 
+ 	if (_terminating) {
++		++dsdiag_dowork_terminating;
++		microthreadLog.debug() << "DIAG doWork tid=" << _tid << " exit=terminating" << microthreadLog.endLog;
+ 		goto doneWorking;
+ 	}
+ 
+ 	if (_dead && !_activeCall) {
+ 		// should be impossible, since this should be handled in `notifyDead`, but just in case
+ 		_terminating = true;
++		++dsdiag_dowork_dead;
++		microthreadLog.debug() << "DIAG doWork tid=" << _tid << " exit=dead-no-call" << microthreadLog.endLog;
+ 		goto doneWorking;
+ 	}
+ 
+@@ -473,6 +494,7 @@
+ #endif
+ 
+ 		_rwlock.lock();
++		++dsdiag_dowork_top_return;
+ 
+ 		if (!_suspended || _continuationCallback) {
+ 			// we discard the old stack when either:
+@@ -508,6 +530,8 @@
+ 				microthreadLog.info() << _tid << "(" << _nstid << "): thread was suspended with a pending call override and is now resuming with a pending call" << microthreadLog.endLog;
+ 			}
+ 			// we were in the middle of processing a call and we need to resume now
++			++dsdiag_dowork_resume_ctx;
++			microthreadLog.debug() << "DIAG doWork tid=" << _tid << " resume-context" << microthreadLog.endLog;
+ 			_suspended = false;
+ 			_resumeContext.uc_link = &backToThreadTopContext;
+ 			_rwlock.unlock();
+@@ -536,8 +560,11 @@
+ 		} else {
+ 			if (!_pendingCall) {
+ 				// if we don't actually have a pending call, we have nothing to do
++				++dsdiag_dowork_no_pending_call;
++				microthreadLog.debug() << "DIAG doWork tid=" << _tid << " exit=no-pending-call suspended=" << _suspended << microthreadLog.endLog;
+ 				goto doneWorking;
+ 			}
++			++dsdiag_dowork_new_call;
+ 			_suspended = false;
+ 			_rwlock.unlock();
+ 
+@@ -628,6 +655,15 @@
+ 	_rwlock.lock();
+ 	_suspended = true;
+ 	_rwlock.unlock();
++	++dsdiag_suspend_calls;
++	{
++		std::lock_guard<std::mutex> dl(dsdiagMutex);
++		bool early = dsdiagEarly.erase(this) > 0;
++		if (early) {
++			++dsdiag_suspend_after_early_resume;
++		}
++		microthreadLog.debug() << "DIAG suspend tid=" << _tid << " nstid=" << _nstid << " early-resume-seen=" << early << " continuation=" << (continuationCallback ? 1 : 0) << microthreadLog.endLog;
++	}
+ 
+ 	unlockMeWhenSuspending = unlockMe;
+ 
+@@ -668,13 +704,27 @@
+ };
+ 
+ void DarlingServer::Thread::resume() {
++	++dsdiag_resume_calls;
+ 	{
+ 		std::shared_lock lock(_rwlock);
+ 		if (!_suspended) {
+ 			// maybe we should throw an error here?
++			++dsdiag_resume_early_not_suspended;
++			{
++				std::lock_guard<std::mutex> dl(dsdiagMutex);
++				dsdiagEarly.insert(this);
++			}
++			auto cur = currentThreadVar;
++			microthreadLog.debug() << "DIAG resume tid=" << _tid << " nstid=" << _nstid << " EARLY-not-suspended running=" << _running << " caller-tid=" << (cur ? cur->_tid : -1) << " ret=" << __builtin_return_address(0) << microthreadLog.endLog;
+ 			return;
+ 		}
+ 	}
++	++dsdiag_resume_scheduled;
++	{
++		std::lock_guard<std::mutex> dl(dsdiagMutex);
++		dsdiagEarly.erase(this);
++	}
++	microthreadLog.debug() << "DIAG resume tid=" << _tid << " nstid=" << _nstid << " scheduled ret=" << __builtin_return_address(0) << microthreadLog.endLog;
+ 
+ 	Server::sharedInstance().scheduleThread(shared_from_this());
+ };

@@ -282,6 +282,18 @@ def dump_async(target, proc, info, P, C, maxf):
                 except Exception as e:
                     P("    (deref failed %s)" % e)
 
+def dump_diag(target, proc, P):
+    P("--- dsdiag counters (resume/suspend/doWork trace) ---")
+    sc = target.FindGlobalVariables("dsdiag_", 0)
+    out = []
+    for nm in ("resume_calls","resume_early_not_suspended","resume_scheduled","suspend_calls","suspend_after_early_resume","dowork_calls","dowork_deferred","dowork_already_running","dowork_terminating","dowork_dead","dowork_top_return","dowork_resume_ctx","dowork_no_pending_call","dowork_new_call"):
+        v = _gv(target, "dsdiag_" + nm)
+        if v is None:
+            out.append("%s=?" % nm); continue
+        x = _field(v.GetNonSyntheticValue(), "__a_", "__a_value") if v.GetNonSyntheticValue() is not None else None
+        out.append("%s=%s" % (nm, _u(x) if x is not None else str(v.GetValue() or v.GetSummary())))
+    P("  " + " ".join(out))
+
 def dump_workqueue(target, proc, P):
     P("--- server work queue (Server::scheduleThread) ---")
     sp = _gv(target, "sharedInstancePointer")
@@ -293,6 +305,7 @@ def dump_workqueue(target, proc, P):
     srv = sp.Dereference()
     wq = _field(srv, "_workQueue")
     items = _field(wq, "_workItems", "c", "__size_", "__value_")
+    P("  _workItems raw: %s" % str(_field(wq, "_workItems")).replace("\n", " ")[:400])
     P("  queued work items=%s threadsAvailable=%s workers=%s dying=%s" % (_u(items) if items is not None else "?", _u(_field(wq, "_threadsAvailable")), _field(wq, "_workerThreads").GetNumChildren(), _u(_field(wq, "_dying"))))
 
 def dump_kqchans(target, proc, info, P):
@@ -478,6 +491,7 @@ def dsdump(debugger, command, result, internal_dict):
         P("")
     for title, fn in (("psynch ksyn wait queues", lambda: dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf)),
                       ("kernelAsync", lambda: dump_async(target, proc, info, P, C, maxf)),
+                      ("dsdiag", lambda: dump_diag(target, proc, P)),
                       ("workqueue", lambda: dump_workqueue(target, proc, P)),
                       ("kqchans", lambda: dump_kqchans(target, proc, info, P))):
         P("--- %s ---" % title)
