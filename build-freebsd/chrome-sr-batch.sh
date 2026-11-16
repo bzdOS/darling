@@ -26,6 +26,16 @@ SWAYPID=$!
 i=0; while [ ! -S "$XR/wayland-1" ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
 ls "$XR" | grep -q wayland || { echo "sway did not start"; kill $SWAYPID; exit 1; }
 export WAYLAND_DISPLAY=$(ls "$XR" | grep -E '^wayland-[0-9]+$' | head -1)
+# SEAT_INPUT=1: give the series sway a virtual keyboard and pointer (seat capabilities 3 instead of 0)
+# with $SEAT_INPUT_BIN (default $DARLING_BUILD_DIR/conjure-wayland-input, built from conjure-wayland-input.c);
+# the devices live only while that process does, it is stopped with the sway. Default: off.
+CONJPID=""
+if [ "${SEAT_INPUT:-0}" = 1 ]; then
+	"${SEAT_INPUT_BIN:-$DARLING_BUILD_DIR/conjure-wayland-input}" > "$RUN/conjure.log" 2>&1 &
+	CONJPID=$!
+	sleep 1
+	swaymsg -t get_seats 2>/dev/null | grep -o "\"capabilities\": *[0-9]*" | sed "s/^/seat /"
+fi
 : "${CHROME_APP:?host path of the .app bundle}"; export CHROME_APP
 export DARLING_GUEST_EXPOSE=$XR DARLING_GUEST_MKDIR=/wlprofile DARLING_GUEST_COPY="$RUN/page.html=/wlpage/page.html"
 export CHROME_ARGS="--no-sandbox --user-data-dir=/wlprofile --disable-gpu --no-first-run --no-default-browser-check --disable-background-networking --disable-component-update --disable-sync --disable-breakpad ${CHROME_EXTRA_ARGS} file:///wlpage/page.html"
@@ -50,5 +60,6 @@ while [ $valid -lt "$N" ] && [ $i -le $((2*N)) ]; do
 	sh "$DARLING_SRC_DIR/build-freebsd/chrome-run-summary.sh" "$L"
 	i=$((i+1))
 done
+[ -n "$CONJPID" ] && kill $CONJPID 2>/dev/null
 kill $SWAYPID 2>/dev/null; sleep 1; kill -9 $SWAYPID 2>/dev/null
 echo "BATCH-DONE $P valid=$valid"
