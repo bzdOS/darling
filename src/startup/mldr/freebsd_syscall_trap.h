@@ -38,6 +38,16 @@ void setup_macos_syscall_trap(void);
  */
 int mldr_setup_thread_signal_stack(void);
 
+/*
+ * purpose:   Call fn(arg) as a guest signal handler. If the native signal was
+ *            delivered on mldr's own signal stack, switch to the guest's stack
+ *            first: the interrupted guest rsp minus the red zone, or the top of
+ *            the guest's registered sigaltstack when sa_onstack is set and one
+ *            exists. The handler never runs on mldr's stack.
+ * input:     intr_rsp — rsp of the interrupted context; sa_onstack — guest asked SA_ONSTACK.
+ */
+void mldr_call_guest_handler(uintptr_t intr_rsp, int sa_onstack, void (*fn)(void *), void *arg);
+
 #if defined(__x86_64__)
 /*
  * purpose:   Rewrite the fixed-signature raw-Linux-syscall trampolines
