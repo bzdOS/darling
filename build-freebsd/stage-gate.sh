@@ -1,0 +1,31 @@
+#!/bin/sh
+# stage-gate.sh - md5 gate: built vs overlay vs staged copy for mldr and every rebuilt stub image.
+# usage: stage-gate.sh            Env: DARLING_BUILD_DIR DARLING_OVERLAY; STAGED_OVERLAY (default /tmp/darling-local-overlay)
+# mldr is run straight from $DARLING_BUILD_DIR/dserver/mldr-real/mldr (no overlay or staged copy), so its line is
+# the installed md5 only. Stub images: the list is stub-data/images.txt (written by build-stub-data.sh); the built
+# file is stub-data/<basename with '.' -> '_'> where one exists. A staged copy that differs from the overlay is
+# stale (launch runs with DARLING_KEEP_LOCAL=1 do not restage): it is refreshed from the overlay and re-checked.
+# A built image that differs from the overlay (built, not installed) or a staged copy that stays different is a failure.
+# Output: one "STAGECHK" line; exit 1 on any mismatch.
+: "${DARLING_BUILD_DIR:?}" "${DARLING_OVERLAY:?}"
+SO="${STAGED_OVERLAY:-/tmp/darling-local-overlay}"; W="$DARLING_BUILD_DIR/stub-data"
+m() { md5 -q "$1" 2>/dev/null || echo none; }
+ML=$(m "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
+n=0; bad=""; fixed=""; sel=""
+while read -r p; do
+	[ -n "$p" ] || continue
+	r=${p#"$DARLING_OVERLAY"/}; base=$(basename "$p" | tr . _)
+	o=$(m "$p"); s=$(m "$SO/$r"); b=$o
+	[ -f "$W/$base" ] && b=$(m "$W/$base")
+	if [ "$o" != "$s" ] && [ "$b" = "$o" ] && [ -f "$p" ]; then
+		/usr/local/bin/sudo -n cp -p "$p" "$SO/$r" 2>/dev/null && { fixed="$fixed $r"; s=$(m "$SO/$r"); }
+	fi
+	n=$((n+1))
+	if [ "$o" != "$s" ] || [ "$o" != "$b" ]; then bad="$bad $r(built=$b overlay=$o staged=$s)"; fi
+	case "$r" in */Security.framework/*|usr/lib/AppKitExtras.dylib|usr/lib/FoundationExtras.dylib|usr/lib/IOKitExtras.dylib)
+		sel="$sel $(basename "$r")=$o" ;; esac
+done < "$W/images.txt"
+if [ -z "$bad" ] && [ "$ML" != none ]; then
+	echo "STAGECHK ok images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
+fi
+echo "STAGECHK FAIL images=$n mldr=$ML mismatches:${bad:- none}"; exit 1
