@@ -1,0 +1,35 @@
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -1253,6 +1253,23 @@
+ 	return std::move(*reply);
+ };
+ 
++// The S2C mmap request is executed by the guest through its Linux-ABI syscall layer, so its flags travel in
++// Linux numbering. The server builds them from host constants, which differ on non-Linux hosts
++// (e.g. MAP_ANONYMOUS is 0x20 on Linux but 0x1000 elsewhere): translate them, or an anonymous request
++// would be read as a file mapping of fd -1 and fail with EBADF.
++static int _guestMmapFlags(int hostFlags) {
++	enum { GUEST_MAP_SHARED = 0x1, GUEST_MAP_PRIVATE = 0x2, GUEST_MAP_FIXED = 0x10, GUEST_MAP_ANONYMOUS = 0x20, GUEST_MAP_FIXED_NOREPLACE = 0x100000 };
++	int flags = 0;
++	if (hostFlags & MAP_SHARED) flags |= GUEST_MAP_SHARED;
++	if (hostFlags & MAP_PRIVATE) flags |= GUEST_MAP_PRIVATE;
++	if (hostFlags & MAP_FIXED) flags |= GUEST_MAP_FIXED;
++	if (hostFlags & MAP_ANONYMOUS) flags |= GUEST_MAP_ANONYMOUS;
++#ifdef MAP_FIXED_NOREPLACE
++	if (hostFlags & MAP_FIXED_NOREPLACE) flags |= GUEST_MAP_FIXED_NOREPLACE;
++#endif
++	return flags;
++};
++
+ uintptr_t DarlingServer::Thread::_mmap(uintptr_t address, size_t length, int protection, int flags, int fd, off_t offset, int& outErrno) {
+ 	// XXX: not sure if we want to force all allocations in 32-bit processes to be in the 32-bit address space.
+ 	//      for now, we leave it up to the caller.
+@@ -1276,7 +1293,7 @@
+ 	call->address = address;
+ 	call->length = length;
+ 	call->protection = protection;
+-	call->flags = flags;
++	call->flags = _guestMmapFlags(flags);
+ 	call->fd = (fd < 0) ? -1 : 0;
+ 	call->offset = offset;
+ 

@@ -1,0 +1,21 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/ulock_wait.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/ulock_wait.c
+index f26ec28..9eff560 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/ulock_wait.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/ulock_wait.c
+@@ -51,6 +51,16 @@ long sys_ulock_wait(uint32_t operation, void* addr, uint64_t value, uint32_t tim
+ 	else
+ 		return no_errno ? -(EINVAL | 0x800) : -EINVAL;
+ 
++	if (ret == -LINUX_EINTR && no_errno)
++	{
++		// With ULF_NO_ERRNO the caller expects the error as a negative return value, but the
++		// syscall stub sends every value in [-4095, -1] through cerror(), which returns -1 and so
++		// reads as EPERM: os_unfair_lock_lock_slow() and libdispatch then trap on it. An
++		// interrupted wait is a legitimate spurious wakeup (the callers re-check their word and
++		// loop), so report it as a wakeup, like the futex return values above.
++		return 1;
++	}
++
+ 	if (ret < 0)
+ 	{
+ 		ret = errno_linux_to_bsd(ret);

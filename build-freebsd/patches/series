@@ -17,3 +17,6 @@ xnu xnu-sysctl-string-nul.patch
 xnu xnu-emu-shm-sem-flags.patch
 configd configd-sc-stubs-sane-values.patch
 darlingserver darlingserver-resume-pending-wakeup.patch
+darlingserver darlingserver-s2c-mmap-guest-flags.patch
+darlingserver darlingserver-send-peer-gone.patch
+xnu xnu-ulock-wait-eintr.patch
