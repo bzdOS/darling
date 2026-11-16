@@ -4132,6 +4132,31 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
         (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
     fflush(stderr);
 
+    /* Guest frame-pointer walk (guarded reads, cannot fault). */
+    {
+        char site[256];
+        uintptr_t fp = (uintptr_t)mc->mc_rbp;
+        mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
+        fprintf(stderr,
+            "[darling-mldr] fatal stack: signal=%d rip=0x%llx addr=%p\n"
+            "[darling-mldr]   at %s rip=0x%llx\n",
+            signo, (unsigned long long)mc->mc_rip, info->si_addr, site,
+            (unsigned long long)mc->mc_rip);
+        for (int i = 0; i < 24 && fp != 0 && (fp & 7) == 0; i++) {
+            uint64_t nfp = 0, ret = 0;
+            if (!mldr_dump_read_guarded(fp, &nfp) ||
+                !mldr_dump_read_guarded(fp + 8, &ret) || ret == 0)
+                break;
+            mldr_describe_addr((uintptr_t)ret, site, sizeof(site));
+            fprintf(stderr, "[darling-mldr]   at %s rip=0x%llx\n", site,
+                (unsigned long long)ret);
+            if (nfp <= fp)
+                break;
+            fp = (uintptr_t)nfp;
+        }
+        fflush(stderr);
+    }
+
     /* DIAG (Chrome dyld-init crash hunt): backtrace_symbols on the live stack
      * identifies WHICH library the bad-jump frame lives in. */
     {
@@ -4320,6 +4345,7 @@ setup_macos_syscall_trap(void)
     sa_crash.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGBUS,  &sa_crash, NULL);
     sigaction(SIGSEGV, &sa_crash, NULL);
+    sigaction(SIGABRT, &sa_crash, NULL);
 #endif
 }
 
