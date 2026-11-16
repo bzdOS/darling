@@ -1892,6 +1892,87 @@ mldr_note_mapping(void *base, size_t size, int fd, bool executable)
 }
 #endif /* __x86_64__ */
 
+
+#include "crash_dump.h"
+
+/*
+ * purpose:  MLDR_ABORT_TRACE=1: when the guest kills itself with SIGABRT,
+ *           print the guest frame-pointer chain (raw addresses, up to 32) and
+ *           any text that rdi/rsi/rdx or the first stack slots point to, so
+ *           the CHECK message of a Chromium abort is on record.
+ * input:    mc — saved guest context (may be NULL)
+ * sideEffects: writes to stderr; all reads are guarded and cannot fault.
+ */
+static void
+mldr_abort_trace(const mcontext_t *mc)
+{
+    /* One buffer, one write(2): several guest threads can abort at once and
+     * their lines must not interleave. */
+    static __thread char out[12288];
+    size_t len = 0;
+#define AP(...) do { if (len < sizeof(out)) { int _n = snprintf(out + len, sizeof(out) - len, __VA_ARGS__); \
+                     if (_n > 0) len += (size_t)_n; } } while (0)
+    if (mc == NULL)
+        return;
+    AP("[darling-mldr] ABORT-TRACE rip=0x%llx rsp=0x%llx rbp=0x%llx\n",
+       (unsigned long long)mc->mc_rip, (unsigned long long)mc->mc_rsp,
+       (unsigned long long)mc->mc_rbp);
+    AP("[darling-mldr] ABORT-FRAME 0 0x%llx\n", (unsigned long long)mc->mc_rip);
+    uintptr_t fp = (uintptr_t)mc->mc_rbp;
+    for (int i = 1; i < 32 && fp != 0 && (fp & 7) == 0; i++) {
+        uint64_t nfp = 0, ret = 0;
+        if (!mldr_dump_read_guarded(fp, &nfp) ||
+            !mldr_dump_read_guarded(fp + 8, &ret) || ret == 0)
+            break;
+        AP("[darling-mldr] ABORT-FRAME %d 0x%llx\n", i, (unsigned long long)ret);
+        if (nfp <= fp)
+            break;
+        fp = (uintptr_t)nfp;
+    }
+    uint64_t vals[3 + 16];
+    char names[3 + 16][12];
+    int nv = 0;
+    vals[nv] = (uint64_t)mc->mc_rdi; snprintf(names[nv++], 12, "rdi");
+    vals[nv] = (uint64_t)mc->mc_rsi; snprintf(names[nv++], 12, "rsi");
+    vals[nv] = (uint64_t)mc->mc_rdx; snprintf(names[nv++], 12, "rdx");
+    for (int i = 0; i < 16; i++) {
+        uint64_t w = 0;
+        if (!mldr_dump_read_guarded((uintptr_t)mc->mc_rsp + 8 * (uintptr_t)i, &w))
+            break;
+        vals[nv] = w; snprintf(names[nv++], 12, "sp+%d", 8 * i);
+    }
+    for (int i = 0; i < nv; i++) {
+        char buf[264];
+        int n = 0, done = 0;
+        if (vals[i] < 0x10000)
+            continue;
+        for (; n < 256 && !done; n += 8) {
+            uint64_t w = 0;
+            if (!mldr_dump_read_guarded((uintptr_t)vals[i] + (uintptr_t)n, &w))
+                break;
+            memcpy(buf + n, &w, 8);
+            char *z = memchr(&w, 0, 8);
+            if (z) { n += (int)(z - (char *)&w); done = 1; break; }
+        }
+        if (n > 256) n = 256;
+        int ok = n >= 4;
+        for (int k = 0; k < n && ok; k++) {
+            unsigned char c = (unsigned char)buf[k];
+            if (!((c >= 32 && c < 127) || c == '\n' || c == '\t')) ok = 0;
+        }
+        if (!ok)
+            continue;
+        buf[n] = '\0';
+        for (int k = 0; k < n; k++)
+            if (buf[k] == '\n') buf[k] = ' ';
+        AP("[darling-mldr] ABORT-STR %s=0x%llx \"%s\"\n", names[i],
+           (unsigned long long)vals[i], buf);
+    }
+#undef AP
+    if (len >= sizeof(out)) len = sizeof(out) - 1;
+    freebsd_raw_syscall(SYS_write, 2, (long)out, (long)len, 0, 0, 0);
+}
+
 /*
  * purpose:  Translate a raw Linux x86-64 syscall (as made directly by the
  *           upstream dyld/libdyld.dylib overlay binary, which was compiled
@@ -3096,6 +3177,11 @@ dispatch_linux_syscall(unsigned int linux_nr,
     case LINUX_SYS_wait4:
         return freebsd_raw_syscall(SYS_wait4, a1, a2, a3, a4, 0, 0);
     case LINUX_SYS_kill:
+        if (a2 == SIGABRT && (a1 == 0 || a1 == (long)getpid())) {
+            const char *e = getenv("MLDR_ABORT_TRACE");
+            if (e != NULL && e[0] == '1')
+                mldr_abort_trace(mc);
+        }
         return freebsd_raw_syscall(SYS_kill, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_rt_sigaction:
         /* Was a passthrough, which cannot work: the two struct sigaction
