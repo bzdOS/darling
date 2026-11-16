@@ -7,6 +7,7 @@ darlingserver darlingserver-rpc-log.patch
 darlingserver darlingserver-sendsignal-log.patch
 darlingserver darlingserver-skip-fork-wait.patch
 darlingserver darlingserver-task-info-flavor.patch
+darlingserver darlingserver-thread-suspend-lock.patch
 objc4 objc4-realized-rw-size.patch
 xnu xnu-dserver-rpc-recv-validate.patch
 xnu xnu-fork-failure.patch

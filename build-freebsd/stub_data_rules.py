@@ -69,8 +69,35 @@ def class_names(names):
     return sorted(out)
 
 
-def data_asm(name, size=DATA_SIZE):
-    """Assembly for one zero-filled, exported data object."""
+# Names of the string constants (CFStringRef / NSString *): the object is a pointer to a constant
+# CFString whose text is the name, not NULL. A NULL key or value crashes the callers that put a
+# constant in a dictionary (+[NSDictionary dictionaryWithObjects:forKeys:count:] throws, CFDictionaryGetValue
+# hashes NULL). Struct constants (CMTime) and objects (kCGColor*, callbacks) are not in this set.
+STRING_CONST = re.compile(
+    r"^_k(SC|Sec|LS|UT|AX|AV|UN|CT|VT|CMF|CMS|CVI|CVP|CVV|CFP|CFN|CFStream|CGColorSpace|CGImage|CGDisplay|CGWindow|CGPDF|CAGravity|CAFilter|CAMedia|CATransition)[A-Za-z]"
+    r"|^_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$")
+NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$")
+
+
+def is_string_const(name):
+    return bool(STRING_CONST.match(name)) and not NOT_STRING.search(name)
+
+
+def data_asm(name, size=DATA_SIZE, strings=False):
+    """Assembly for one exported data object: zero filled, or for a string constant a pointer to a
+    constant CFString (text = the name without its underscore). The CFString isa is
+    ___CFConstantStringClassReference, found by flat lookup: only for an image linked with
+    -undefined dynamic_lookup and no dependency that would make the linker bind the isa two-level
+    (strings=True); anything else keeps zero filled objects."""
+    if strings and is_string_const(name):
+        lab = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        return [".section __TEXT,__cstring,cstring_literals", "L_s_%s:" % lab,
+                '    .asciz "%s"' % name[1:],
+                ".section __DATA,__cfstring", ".p2align 3", "L_cf_%s:" % lab,
+                "    .quad ___CFConstantStringClassReference", "    .long 0x7c8", "    .long 0",
+                "    .quad L_s_%s" % lab, "    .quad %d" % (len(name) - 1),
+                ".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":",
+                "    .quad L_cf_%s" % lab, ".space %d, 0" % (size - 8)]
     return [".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":",
             ".space %d, 0" % size]
 
