@@ -34,7 +34,17 @@ while read -r p; do
 done <<EOT
 $(cat "$W/images.txt"; for x in $EXTRA_IMAGES; do grep -qx "$DARLING_OVERLAY/$x" "$W/images.txt" || echo "$DARLING_OVERLAY/$x"; done)
 EOT
+# CoreFoundation must carry its initializer (LC_ROUTINES or a __mod_init_func entry for ___CFInitialize): cfinit-check.sh --static.
+# STAGE_GATE_CFINIT_RUN=1 also runs the guest probe (CFINIT-VERDICT line; it starts its own darlingserver, so it is off by default).
+HERE=$(cd "$(dirname "$0")" && pwd); SRCD="${DARLING_SRC_DIR:-$(cd "$HERE/.." && pwd)}"
+if ! DARLING_SRC_DIR="$SRCD" sh "$HERE/cfinit-check.sh" --static >/dev/null 2>&1; then
+	echo "STAGECHK FAIL cfinit=FAIL (CoreFoundation has no LC_ROUTINES and no ___CFInitialize __mod_init_func entry; see build-freebsd/cfinit-check.sh)"; exit 1
+fi
+if [ "${STAGE_GATE_CFINIT_RUN:-0}" = 1 ]; then
+	cfv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/cfinit-check.sh" 2>&1 | grep -a "^CFINIT-VERDICT" | tail -1); echo "$cfv"
+	case "$cfv" in "CFINIT-VERDICT pass"*) ;; *) echo "STAGECHK FAIL cfinit=FAIL"; exit 1;; esac
+fi
 if [ -z "$bad" ] && [ "$ML" != none ]; then
-	echo "STAGECHK ok images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
+	echo "STAGECHK ok cfinit=ok images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
 fi
 echo "STAGECHK FAIL images=$n mldr=$ML mismatches:${bad:- none}"; exit 1

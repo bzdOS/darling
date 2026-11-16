@@ -1,7 +1,7 @@
 #!/bin/sh
 # Rebuild only CoreFoundation.dylib (after editing src/external/corefoundation/*)
 # and install it into $OVERLAY. Mirrors the CoreFoundation section of the
-# Darling CMakeLists (cf_c_sources + cf_sources, -init ___CFInitialize,
+# Darling CMakeLists (cf_c_sources + cf_sources, __CFInitialize via cf-init-ctor.s,
 # -alias_list, -sectcreate __UNICODE, -reexported_symbols_list).
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,6 +21,7 @@ CF_FLAGS="${CF_FLAGS} -include ${CF}/CoreFoundation_Prefix.h -include ${CF}/macr
 CF_FLAGS="${CF_FLAGS} -I${SDK_FLAT}/corefoundation-headers"
 CF_FLAGS="${CF_FLAGS} -I${CF}/include -I${CF}/src -I${SRC}/src/external/foundation/src -I${SRC}/src/external/foundation/include"
 CF_FLAGS="${CF_FLAGS} -I${SRC}/src/frameworks/CoreServices/include"
+CF_FLAGS="${CF_FLAGS} -I${SRC}/build-freebsd/cf-stubs/include"
 CF_FLAGS="${CF_FLAGS} -F${SDK_FLAT}/Frameworks"
 CF_FLAGS="${CF_FLAGS} -include ${SRC}/build-freebsd/cf-stubs/cf-deritem-force.h"
 CF_FLAGS="${CF_FLAGS} -DCF_BUILDING_CF -DDEPLOYMENT_TARGET_MACOSX=1 -DU_SHOW_DRAFT_API=1 -DU_SHOW_CPLUSPLUS_API=0"
@@ -58,7 +59,9 @@ PYEOF
 # not listed in cf_c_sources upstream; include it explicitly.
 echo "CFCalendarConstants.c" >> "${BUILD}/cf_sources.txt"
 
-cf_objs=""
+# ___CFInitialize registered as the first __mod_init_func entry (ld64.lld ignores -init; see cf-init-ctor.s).
+clang -target x86_64-apple-macos10.12 -c "${SRC}/build-freebsd/cf-stubs/cf-init-ctor.s" -o "${BUILD}/cf-init-ctor.o"
+cf_objs="${BUILD}/cf-init-ctor.o"
 while IFS= read -r rel; do
     [ -z "${rel}" ] && continue
     case "${rel}" in
@@ -111,7 +114,6 @@ printf '_OBJC_CLASS_$___NSCFConstantString\n_OBJC_METACLASS_$___NSCFConstantStri
 ld64.lld ${LD_FLAGS} -dylib \
     -install_name /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation \
     -compatibility_version 150.0.0 -current_version 255.0.0 \
-    -init ___CFInitialize \
     -alias_list "${CF}/SymbolAliases" \
     -sectcreate __UNICODE __csbitmaps "${CF}/CFCharacterSetBitmaps.bitmap" \
     -sectcreate __UNICODE __properties "${CF}/CFUniCharPropertyDatabase.data" \
