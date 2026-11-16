@@ -16,6 +16,16 @@ if [ -z "$DARLING_LOCK_HELD" ]; then
 	[ $rc -eq 75 ] && { echo "LOCK busy"; exit 1; }
 	exit $rc
 fi
+# On every exit: count darlingservers of our prefixes (this launcher's unique /tmp/darling-run.* or the
+# old fixed one); print LEFTOVER dservers=<n> last and exit 1 if n>0.
+leftover_report() {
+	_rc=$?
+	LEFT=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)darlingserver$/ && ($3 ~ /^\/tmp\/darling-run\./ || $3 == "/tmp/darling-dynamic-smoke-fresh") {n++} END{print n+0}')
+	echo "LEFTOVER dservers=$LEFT"
+	[ "$LEFT" -eq 0 ] || exit 1
+	exit $_rc
+}
+trap leftover_report EXIT
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
 MLDR=$DARLING_BUILD_DIR/dserver/mldr-real/mldr

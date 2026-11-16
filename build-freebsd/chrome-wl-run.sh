@@ -41,11 +41,13 @@ S=$1; T=$2; shift 2
 : "${CHROME_APP:?}" "${XDG_RUNTIME_DIR:?}" "${WAYLAND_DISPLAY:?}"
 LOG=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S.log
 [ -e "$LOG" ] && { echo "exists $LOG"; exit 1; }
+. "$DARLING_SRC_DIR/build-freebsd/dserver-prefix.sh"
+dsp_new || exit 1
 START=$(date +%s)
 echo "WRAPPER_START=$START timeout=$T" > "$LOG"
 /usr/local/bin/sudo -n env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
-  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" \
+  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" DARLING_PREFIX="$DARLING_PREFIX" \
   DARLING_TEST_BINARY=chrome-macho \
   DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
   DARLING_TRAP_LOG=1 \
@@ -56,5 +58,7 @@ echo "WRAPPER_START=$START timeout=$T" > "$LOG"
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then mkdir -p "$CORE_DIR"; ulimit -c unlimited; cd "$CORE_DIR"; fi; exec "$@"' sh \
   timeout --foreground -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" >> "$LOG" 2>&1
-echo "WRAPPER_RC=$?" >> "$LOG"
+RC=$?
+dsp_reap
+echo "WRAPPER_RC=$RC" >> "$LOG"
 echo "WRAPPER_DURATION=$(( $(date +%s) - START ))s TIMEOUT=${T}s" >> "$LOG"

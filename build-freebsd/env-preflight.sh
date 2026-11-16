@@ -11,7 +11,8 @@ pf_fail() { echo "PREFLIGHT fail $*"; exit 1; }
 : "${DARLING_BUILD_DIR:?}"
 # 1. leftover servers/mldr from previous runs
 L=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)(darlingserver|mldr)$/ && $0 ~ /\/tmp\/darling-/ {printf "%s ", $1}')
-[ -z "$PREFLIGHT_IGNORE" ] || L=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)(darlingserver|mldr)$/ && $0 ~ /\/tmp\/darling-/' | grep -Ev "$PREFLIGHT_IGNORE" | awk '{printf "%s ", $1}')
+# PREFLIGHT_IGNORE never hides our own servers (/tmp/darling-run.* or the old fixed prefix)
+[ -z "$PREFLIGHT_IGNORE" ] || L=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)(darlingserver|mldr)$/ && $0 ~ /\/tmp\/darling-/' | grep -Ev "$PREFLIGHT_IGNORE|/tmp/darling-run\.|/tmp/darling-dynamic-smoke-fresh" | awk '{printf "%s ", $1}')$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)(darlingserver|mldr)$/ && ($0 ~ /\/tmp\/darling-run\./ || $0 ~ /\/tmp\/darling-dynamic-smoke-fresh/) {printf "%s ", $1}')
 [ -z "$L" ] || pf_fail "live darlingserver/mldr under /tmp/darling-*: pids $L"
 # 2. darlingserver md5
 if [ -n "$EXPECT_DSERVER_MD5" ]; then

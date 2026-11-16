@@ -44,8 +44,14 @@
 #include <sys/un.h>
 #include <dirent.h>
 
-#define PREFIX        "/tmp/darling-dynamic-smoke-fresh"
-#define SOCK_PATH     PREFIX "/.darlingserver.sock"
+/* Per-run darlingserver prefix: DARLING_PREFIX (must be /tmp/darling-run.*, made
+ * by the run script, which also kills the server and removes the directory) or a
+ * fresh mkdtemp directory. Never shared between runs, so cleanup can only ever
+ * touch this run's own server. */
+static char g_prefix[256];
+static char g_sock_path[300];
+#define PREFIX        g_prefix
+#define SOCK_PATH     g_sock_path
 #define LOCAL_OVERLAY "/tmp/darling-local-overlay"
 
 /* Fallback for the harnesses that do not derive a staging list (run-smoke, the
@@ -466,12 +472,27 @@ static const char *src_dir(void) {
     return getenv("DARLING_SRC_DIR");
 }
 
+static void cleanup_prefix(void) {
+    /* Kill only the darlingserver bound to this run's unique prefix (its argv is
+     * "darlingserver <prefix> <uid> <gid> <pipe> <fix_perms>"), wait until it is
+     * gone, and only then remove the prefix. A live server's prefix is never removed. */
+    char cmd[600];
+    if (strncmp(g_prefix, "/tmp/darling-run.", 17) != 0) return;
+    snprintf(cmd, sizeof(cmd), "pkill -9 -f '^darlingserver %s ' 2>/dev/null", g_prefix);
+    (void)system(cmd);
+    snprintf(cmd, sizeof(cmd), "pgrep -f '^darlingserver %s ' >/dev/null 2>&1", g_prefix);
+    int i;
+    for (i = 0; i < 50; i++) {
+        if (system(cmd) != 0) break;
+        usleep(100000);
+    }
+    if (i == 50) { fprintf(stderr, "darlingserver for %s still alive, prefix kept\n", g_prefix); return; }
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_prefix);
+    (void)system(cmd);
+}
+
 static void cleanup(void) {
-    /* Only the darlingserver bound to our own prefix (its argv is
-     * "darlingserver <prefix> <uid> <gid> <pipe> <fix_perms>"): other users of the
-     * machine run their own darlingservers, which must survive our start and exit. */
-    system("pkill -9 -f ^darlingserver  PREFIX   2>/dev/null");
-    system("rm -rf " PREFIX);
+    cleanup_prefix();
     /* DARLING_KEEP_LOCAL=1: keep the staged local overlay between runs. Staging
      * the frameworks takes minutes; the staged files are not modified by a run
      * (the launcher binary is copied again each start). Default: wipe. */
@@ -541,6 +562,17 @@ int main(void) {
         return 1;
     }
 
+    const char *pe = getenv("DARLING_PREFIX");
+    if (pe && strncmp(pe, "/tmp/darling-run.", 17) == 0 && strlen(pe) < sizeof(g_prefix))
+        snprintf(g_prefix, sizeof(g_prefix), "%s", pe);
+    else {
+        snprintf(g_prefix, sizeof(g_prefix), "/tmp/darling-run.XXXXXX");
+        if (!mkdtemp(g_prefix)) { perror("mkdtemp"); return 1; }
+        chmod(g_prefix, 0755);
+    }
+    snprintf(g_sock_path, sizeof(g_sock_path), "%s/.darlingserver.sock", g_prefix);
+    printf("prefix        : %s\n", g_prefix);
+
     char dserver[512], mldr[512], binary[512];
 
     /* DARLING_TEST_BINARY selects which generated test binary to run —
@@ -570,7 +602,8 @@ int main(void) {
 
     time_t launch_t0 = time(NULL);
     fprintf(stderr, "[launch] STAGING begin t=0 epoch=%ld\n", (long)launch_t0);
-    cleanup();
+    if (getenv("DARLING_KEEP_LOCAL") == NULL)
+        system("rm -rf " LOCAL_OVERLAY);
     mkdir(PREFIX, 0755);
 
     /*
