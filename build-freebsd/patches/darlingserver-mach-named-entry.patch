@@ -1,6 +1,121 @@
+diff --git a/duct-tape/internal-include/darlingserver/duct-tape/memory.h b/duct-tape/internal-include/darlingserver/duct-tape/memory.h
+index d0a83c0..11ebb41 100644
+--- a/duct-tape/internal-include/darlingserver/duct-tape/memory.h
++++ b/duct-tape/internal-include/darlingserver/duct-tape/memory.h
+@@ -22,6 +22,9 @@ typedef struct dtape_map_shared_entry {
+ 	uint64_t size;
+ 	uint64_t page_offset;
+ 	dtape_map_shared_descriptor_t* descriptor;
++	// the most a memory entry made from this mapping may grant (VM_PROT_*), i.e. the
++	// max_protection the mapping was made with
++	int protection;
+ } dtape_map_shared_entry_t;
+ 
+ typedef RB_HEAD(dtape_map_shared_entry_head, dtape_map_shared_entry) dtape_map_shared_entry_head_t;
+diff --git a/duct-tape/src/kernelrpc_stubs.c b/duct-tape/src/kernelrpc_stubs.c
+index 0a8597d..4ce8937 100644
+--- a/duct-tape/src/kernelrpc_stubs.c
++++ b/duct-tape/src/kernelrpc_stubs.c
+@@ -36,74 +36,76 @@ extern kern_return_t mach_vm_read(vm_map_t, mach_vm_address_t,
+ /* current_task() is a macro expanding to current_task_fast() in kern/task.h */
+ 
+ /* ── mach_vm trap wrappers ───────────────────────────────────────────────── */
++/* The MIG server stubs (mach_vm.defs, `target_task : vm_map_t`) convert the task port to a
++ * vm_map_t before calling these, so the first argument IS the map, not a task. */
+ 
+-kern_return_t _kernelrpc_mach_vm_allocate_external(task_t task,
++kern_return_t _kernelrpc_mach_vm_allocate_external(vm_map_t map,
+     mach_vm_address_t *addr, mach_vm_size_t size, int flags)
+ {
+-    return mach_vm_allocate_kernel(task->map, (mach_vm_offset_t *)addr,
++    return mach_vm_allocate_kernel(map, (mach_vm_offset_t *)addr,
+         size, flags, 0 /* VM_KERN_MEMORY_NONE */);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_deallocate(task_t task,
++kern_return_t _kernelrpc_mach_vm_deallocate(vm_map_t map,
+     mach_vm_address_t start, mach_vm_size_t size)
+ {
+-    return vm_deallocate(task->map, (vm_offset_t)start, (vm_size_t)size);
++    return vm_deallocate(map, (vm_offset_t)start, (vm_size_t)size);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_protect(task_t task,
++kern_return_t _kernelrpc_mach_vm_protect(vm_map_t map,
+     mach_vm_address_t address, mach_vm_size_t size,
+     boolean_t set_maximum, vm_prot_t new_protection)
+ {
+-    return mach_vm_protect(task->map, address, size, set_maximum, new_protection);
++    return mach_vm_protect(map, address, size, set_maximum, new_protection);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_map_external(task_t task,
++kern_return_t _kernelrpc_mach_vm_map_external(vm_map_t map,
+     mach_vm_address_t *address, mach_vm_size_t size, mach_vm_offset_t mask,
+     int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy,
+     vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance)
+ {
+-    return mach_vm_map_external(task->map, (mach_vm_offset_t *)address, size,
++    return mach_vm_map_external(map, (mach_vm_offset_t *)address, size,
+         mask, flags, port, offset, copy, cur_protection, max_protection,
+         inheritance);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_remap_external(task_t target_task,
++kern_return_t _kernelrpc_mach_vm_remap_external(vm_map_t target_map,
+     mach_vm_address_t *target_address, mach_vm_size_t size,
+-    mach_vm_offset_t mask, int flags, task_t src_task,
++    mach_vm_offset_t mask, int flags, vm_map_t src_map,
+     mach_vm_address_t src_address, boolean_t copy,
+     vm_prot_t *cur_protection, vm_prot_t *max_protection,
+     vm_inherit_t inheritance)
+ {
+-    return mach_vm_remap_external(target_task->map,
++    return mach_vm_remap_external(target_map,
+         (mach_vm_offset_t *)target_address, size, mask, flags,
+-        src_task->map, src_address, copy, cur_protection, max_protection,
++        src_map, src_address, copy, cur_protection, max_protection,
+         inheritance);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_remap_new_external(task_t target_task,
++kern_return_t _kernelrpc_mach_vm_remap_new_external(vm_map_t target_map,
+     mach_vm_address_t *target_address, mach_vm_size_t size,
+     mach_vm_offset_t mask, int flags, mach_port_t src_tport,
+     mach_vm_address_t memory_address, boolean_t copy,
+     vm_prot_t *cur_protection, vm_prot_t *max_protection,
+     vm_inherit_t inheritance)
+ {
+-    return mach_vm_remap_new_external(target_task->map,
++    return mach_vm_remap_new_external(target_map,
+         (mach_vm_offset_t *)target_address, size, mask, flags,
+         src_tport, memory_address, copy, cur_protection, max_protection,
+         inheritance);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_purgable_control(task_t task,
++kern_return_t _kernelrpc_mach_vm_purgable_control(vm_map_t map,
+     mach_vm_address_t address, vm_purgable_t control, int *state)
+ {
+-    return mach_vm_purgable_control(task->map, address, control, state);
++    return mach_vm_purgable_control(map, address, control, state);
+ }
+ 
+-kern_return_t _kernelrpc_mach_vm_read(task_t task,
++kern_return_t _kernelrpc_mach_vm_read(vm_map_t map,
+     mach_vm_address_t addr, mach_vm_size_t size,
+     vm_offset_t *data, mach_msg_type_number_t *data_size)
+ {
+-    return mach_vm_read(task->map, addr, size, (pointer_t *)data, data_size);
++    return mach_vm_read(map, addr, size, (pointer_t *)data, data_size);
+ }
+ 
+ /* ── host page size ─────────────────────────────────────────────────────── */
+diff --git a/duct-tape/src/memory.c b/duct-tape/src/memory.c
+index f1cc2e2..394a681 100644
 --- a/duct-tape/src/memory.c
 +++ b/duct-tape/src/memory.c
-@@ -135,6 +135,7 @@
+@@ -135,6 +135,7 @@ static dtape_map_shared_entry_t* dtape_map_shared_entry_create(uint64_t address,
  	shared_entry->size = size;
  	shared_entry->page_offset = page_offset;
  	shared_entry->descriptor = descriptor;
@@ -8,16 +123,10 @@
  
  	dtape_map_shared_descriptor_retain(descriptor);
  
-@@ -528,14 +529,206 @@
+@@ -528,8 +529,206 @@ kern_return_t mach_vm_allocate_kernel(vm_map_t map, mach_vm_offset_t* addr, mach
  	}
  };
  
--kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
--	// Memory entries are not implemented. The stub used to abort the whole server
--	// (dtape_stub_unsafe), taking every guest process with it the first time a program
--	// asked for a shareable region; report the failure to the caller instead.
--	if (object_handle) {
--		*object_handle = IP_NULL;
 +// ---- Mach named memory entries (host shared-memory objects) ----
 +//
 +// A named entry is a port (IKOT_NAMED_ENTRY) whose kobject is a vm_named_entry. The entry
@@ -34,8 +143,7 @@
 +static dtape_map_shared_descriptor_t* dtape_named_entry_descriptor(vm_named_entry_t entry) {
 +	if (entry->is_object || entry->is_sub_map || entry->is_copy) {
 +		return NULL;
- 	}
--	return KERN_NOT_SUPPORTED;
++	}
 +	return (dtape_map_shared_descriptor_t*)entry->backing.copy;
 +};
 +
@@ -114,7 +222,8 @@
 +//   any of the above with a parent entry: sub-window of the parent (page aligned offset)
 +// Not supported: MAP_MEM_VM_COPY, purgable, ledger, caching modes, 'ONLY', data-address variants,
 +// and VM_SHARE of memory that is not backed by a named entry (returns KERN_NOT_SUPPORTED).
-+kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
+ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
+-	dtape_stub_unsafe();
 +	const uint64_t page_size = sysconf(_SC_PAGESIZE);
 +	const uint64_t supported_flags = MAP_MEM_NAMED_CREATE | MAP_MEM_VM_SHARE;
 +	uint64_t flags = permission & MAP_MEM_FLAGS_MASK;
@@ -222,7 +331,7 @@
  };
  
  kern_return_t mach_memory_entry_access_tracking(ipc_port_t entry_port, int* access_tracking, uint32_t* access_tracking_reads, uint32_t* access_tracking_writes) {
-@@ -598,8 +791,81 @@
+@@ -592,8 +791,81 @@ kern_return_t mach_vm_machine_attribute(vm_map_t map, mach_vm_address_t addr, ma
  	dtape_stub_unsafe();
  };
  
@@ -305,7 +414,7 @@
  	return KERN_SUCCESS;
  };
  
-@@ -1458,6 +1724,9 @@
+@@ -1452,6 +1724,9 @@ mach_destroy_memory_entry(
  			assert(named_entry->backing.copy->cpy_hdr.nentries == 1);
  #endif // __DARLING__
  			vm_map_copy_discard(named_entry->backing.copy);
@@ -315,112 +424,3 @@
  		} else {
  			assert(named_entry->backing.copy == VM_MAP_COPY_NULL);
  		}
---- a/duct-tape/src/kernelrpc_stubs.c
-+++ b/duct-tape/src/kernelrpc_stubs.c
-@@ -36,74 +36,76 @@
- /* current_task() is a macro expanding to current_task_fast() in kern/task.h */
- 
- /* ── mach_vm trap wrappers ───────────────────────────────────────────────── */
-+/* The MIG server stubs (mach_vm.defs, `target_task : vm_map_t`) convert the task port to a
-+ * vm_map_t before calling these, so the first argument IS the map, not a task. */
- 
--kern_return_t _kernelrpc_mach_vm_allocate_external(task_t task,
-+kern_return_t _kernelrpc_mach_vm_allocate_external(vm_map_t map,
-     mach_vm_address_t *addr, mach_vm_size_t size, int flags)
- {
--    return mach_vm_allocate_kernel(task->map, (mach_vm_offset_t *)addr,
-+    return mach_vm_allocate_kernel(map, (mach_vm_offset_t *)addr,
-         size, flags, 0 /* VM_KERN_MEMORY_NONE */);
- }
- 
--kern_return_t _kernelrpc_mach_vm_deallocate(task_t task,
-+kern_return_t _kernelrpc_mach_vm_deallocate(vm_map_t map,
-     mach_vm_address_t start, mach_vm_size_t size)
- {
--    return vm_deallocate(task->map, (vm_offset_t)start, (vm_size_t)size);
-+    return vm_deallocate(map, (vm_offset_t)start, (vm_size_t)size);
- }
- 
--kern_return_t _kernelrpc_mach_vm_protect(task_t task,
-+kern_return_t _kernelrpc_mach_vm_protect(vm_map_t map,
-     mach_vm_address_t address, mach_vm_size_t size,
-     boolean_t set_maximum, vm_prot_t new_protection)
- {
--    return mach_vm_protect(task->map, address, size, set_maximum, new_protection);
-+    return mach_vm_protect(map, address, size, set_maximum, new_protection);
- }
- 
--kern_return_t _kernelrpc_mach_vm_map_external(task_t task,
-+kern_return_t _kernelrpc_mach_vm_map_external(vm_map_t map,
-     mach_vm_address_t *address, mach_vm_size_t size, mach_vm_offset_t mask,
-     int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy,
-     vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance)
- {
--    return mach_vm_map_external(task->map, (mach_vm_offset_t *)address, size,
-+    return mach_vm_map_external(map, (mach_vm_offset_t *)address, size,
-         mask, flags, port, offset, copy, cur_protection, max_protection,
-         inheritance);
- }
- 
--kern_return_t _kernelrpc_mach_vm_remap_external(task_t target_task,
-+kern_return_t _kernelrpc_mach_vm_remap_external(vm_map_t target_map,
-     mach_vm_address_t *target_address, mach_vm_size_t size,
--    mach_vm_offset_t mask, int flags, task_t src_task,
-+    mach_vm_offset_t mask, int flags, vm_map_t src_map,
-     mach_vm_address_t src_address, boolean_t copy,
-     vm_prot_t *cur_protection, vm_prot_t *max_protection,
-     vm_inherit_t inheritance)
- {
--    return mach_vm_remap_external(target_task->map,
-+    return mach_vm_remap_external(target_map,
-         (mach_vm_offset_t *)target_address, size, mask, flags,
--        src_task->map, src_address, copy, cur_protection, max_protection,
-+        src_map, src_address, copy, cur_protection, max_protection,
-         inheritance);
- }
- 
--kern_return_t _kernelrpc_mach_vm_remap_new_external(task_t target_task,
-+kern_return_t _kernelrpc_mach_vm_remap_new_external(vm_map_t target_map,
-     mach_vm_address_t *target_address, mach_vm_size_t size,
-     mach_vm_offset_t mask, int flags, mach_port_t src_tport,
-     mach_vm_address_t memory_address, boolean_t copy,
-     vm_prot_t *cur_protection, vm_prot_t *max_protection,
-     vm_inherit_t inheritance)
- {
--    return mach_vm_remap_new_external(target_task->map,
-+    return mach_vm_remap_new_external(target_map,
-         (mach_vm_offset_t *)target_address, size, mask, flags,
-         src_tport, memory_address, copy, cur_protection, max_protection,
-         inheritance);
- }
- 
--kern_return_t _kernelrpc_mach_vm_purgable_control(task_t task,
-+kern_return_t _kernelrpc_mach_vm_purgable_control(vm_map_t map,
-     mach_vm_address_t address, vm_purgable_t control, int *state)
- {
--    return mach_vm_purgable_control(task->map, address, control, state);
-+    return mach_vm_purgable_control(map, address, control, state);
- }
- 
--kern_return_t _kernelrpc_mach_vm_read(task_t task,
-+kern_return_t _kernelrpc_mach_vm_read(vm_map_t map,
-     mach_vm_address_t addr, mach_vm_size_t size,
-     vm_offset_t *data, mach_msg_type_number_t *data_size)
- {
--    return mach_vm_read(task->map, addr, size, (pointer_t *)data, data_size);
-+    return mach_vm_read(map, addr, size, (pointer_t *)data, data_size);
- }
- 
- /* ── host page size ─────────────────────────────────────────────────────── */
---- a/duct-tape/internal-include/darlingserver/duct-tape/memory.h
-+++ b/duct-tape/internal-include/darlingserver/duct-tape/memory.h
-@@ -22,6 +22,9 @@
- 	uint64_t size;
- 	uint64_t page_offset;
- 	dtape_map_shared_descriptor_t* descriptor;
-+	// the most a memory entry made from this mapping may grant (VM_PROT_*), i.e. the
-+	// max_protection the mapping was made with
-+	int protection;
- } dtape_map_shared_entry_t;
- 
- typedef RB_HEAD(dtape_map_shared_entry_head, dtape_map_shared_entry) dtape_map_shared_entry_head_t;

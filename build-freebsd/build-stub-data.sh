@@ -17,6 +17,8 @@
 # Usage: DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... [CHROME_APP=...] \
 #        sh build-freebsd/build-stub-data.sh [--install]
 set -e
+# apply build-freebsd/patches/series to the submodule trees (idempotent; fails the build on conflict)
+sh "$(dirname "$0")/apply-patches.sh" || exit 1
 SRC="${DARLING_SRC_DIR:?}"; OV="${DARLING_OVERLAY:?}"; BD="${DARLING_BUILD_DIR:?}"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 W="$BD/stub-data"

@@ -6,6 +6,8 @@
 # Flags: set CFDBG=1 MLDRTACE=1 etc as env vars (forwarded to smoke).
 
 set -e
+# apply build-freebsd/patches/series to the submodule trees (idempotent; fails the build on conflict)
+sh "$(dirname "$0")/apply-patches.sh" || exit 1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"

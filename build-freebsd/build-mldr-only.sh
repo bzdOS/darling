@@ -9,6 +9,8 @@
 #                        installed into a place nothing reads and the next run used the old binary.
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 set -e
+# apply build-freebsd/patches/series to the submodule trees (idempotent; fails the build on conflict)
+sh "$(dirname "$0")/apply-patches.sh" || exit 1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # No default for DARLING_BUILD_DIR (see above): refuse to guess an install directory.
