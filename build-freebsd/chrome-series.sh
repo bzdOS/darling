@@ -3,10 +3,11 @@
 # usage: chrome-series.sh PREFIX N [TIMEOUT]    logs: $DARLING_BUILD_DIR/chrome-sr-<PREFIX>*.log
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR CHROME_APP (as for chrome-sr-batch.sh);
 #      EXPECT_MLDR_MD5  if set and different from the installed mldr, exit 1 before running.
+#      CHROME_EXTRA_ARGS  extra Chrome flags (exported to chrome-sr-batch.sh, inserted before the URL).
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
-P=${1:?}; N=${2:?}; T=${3:-120}
+export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
 MLDR=$DARLING_BUILD_DIR/dserver/mldr-real/mldr
 DS=$DARLING_BUILD_DIR/dserver/darlingserver
@@ -30,5 +31,5 @@ for L in "$DARLING_BUILD_DIR"/chrome-sr-"$P"*.log; do
 done
 top="rc?x0"
 [ -n "$rcs" ] && top=$(printf '%s\n' $rcs | sort | uniq -c | sort -rn | awk 'NR==1{print "rc" $2 "x" $1}')
-echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top mldr=$M"
+echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top mldr=$M args=\"$CHROME_EXTRA_ARGS\""
 [ "$valid" -gt 0 ]
