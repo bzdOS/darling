@@ -4148,6 +4148,15 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
     ucontext_t *uctx = (ucontext_t *)uctx_void;
     mcontext_t *mc   = &uctx->uc_mcontext;
 
+    {
+        char mk[] = "[darling-mldr] CRASH-HANDLER-ENTER signal=000\n";
+        int sn = signo > 999 ? 999 : (signo < 0 ? 0 : signo);
+        mk[sizeof(mk) - 3] = '0' + sn % 10;
+        mk[sizeof(mk) - 4] = '0' + (sn / 10) % 10;
+        mk[sizeof(mk) - 5] = '0' + sn / 100;
+        freebsd_raw_syscall(SYS_write, 2, (long)mk, (long)(sizeof(mk) - 1), 0, 0, 0);
+    }
+
     fprintf(stderr,
         "[darling-mldr] FATAL signal %d (code=%d) at addr=%p\n"
         /* survive-window slice: name the sender — si_pid is the killer for
@@ -4172,6 +4181,31 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
         (unsigned long long)mc->mc_r12, (unsigned long long)mc->mc_r13,
         (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
     fflush(stderr);
+
+    /* Guest frame-pointer walk (guarded reads, cannot fault). */
+    {
+        char site[256];
+        uintptr_t fp = (uintptr_t)mc->mc_rbp;
+        mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
+        fprintf(stderr,
+            "[darling-mldr] fatal stack: signal=%d rip=0x%llx addr=%p\n"
+            "[darling-mldr]   at %s rip=0x%llx\n",
+            signo, (unsigned long long)mc->mc_rip, info->si_addr, site,
+            (unsigned long long)mc->mc_rip);
+        for (int i = 0; i < 24 && fp != 0 && (fp & 7) == 0; i++) {
+            uint64_t nfp = 0, ret = 0;
+            if (!mldr_dump_read_guarded(fp, &nfp) ||
+                !mldr_dump_read_guarded(fp + 8, &ret) || ret == 0)
+                break;
+            mldr_describe_addr((uintptr_t)ret, site, sizeof(site));
+            fprintf(stderr, "[darling-mldr]   at %s rip=0x%llx\n", site,
+                (unsigned long long)ret);
+            if (nfp <= fp)
+                break;
+            fp = (uintptr_t)nfp;
+        }
+        fflush(stderr);
+    }
 
     /* DIAG (Chrome dyld-init crash hunt): backtrace_symbols on the live stack
      * identifies WHICH library the bad-jump frame lives in. */
@@ -4205,6 +4239,11 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
      * the same question honestly, per word. */
     mldr_dump_guarded_stack("guest stack dump at rsp",
                             (uintptr_t)mc->mc_rsp, MLDR_STACK_DUMP_WORDS);
+
+    /* Chain to the guest's recorded disposition (handler), if any. */
+    if ((signo == SIGSEGV || signo == SIGBUS || signo == SIGABRT) &&
+        mldr_sat_chain_fatal(signo, info, uctx_void))
+        return;
 
     /* Re-raise as default action so the process terminates with correct signal */
     struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
@@ -4361,6 +4400,7 @@ setup_macos_syscall_trap(void)
     sa_crash.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGBUS,  &sa_crash, NULL);
     sigaction(SIGSEGV, &sa_crash, NULL);
+    sigaction(SIGABRT, &sa_crash, NULL);
 #endif
 }
 

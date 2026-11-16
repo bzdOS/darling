@@ -162,5 +162,6 @@ long mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
  * (SIGTRAP) — the registered handler value (SIG_DFL/IGN/ERR or a pointer),
  * or NULL when nothing is registered. For the SIGTRAP registration audit. */
 void *mldr_sat_sigtrap_disposition(void);
+int mldr_sat_chain_fatal(int native_signo, siginfo_t *info, void *uctx);
 
 #endif /* DARLING_FREEBSD */
