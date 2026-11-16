@@ -6,11 +6,15 @@
 # file is stub-data/<basename with '.' -> '_'> where one exists. A staged copy that differs from the overlay is
 # stale (launch runs with DARLING_KEEP_LOCAL=1 do not restage): it is refreshed from the overlay and re-checked.
 # A built image that differs from the overlay (built, not installed) or a staged copy that stays different is a failure.
+# The gated set is images.txt plus EXTRA_IMAGES (own-generator images that images.txt omits).
 # Output: one "STAGECHK" line; exit 1 on any mismatch.
 : "${DARLING_BUILD_DIR:?}" "${DARLING_OVERLAY:?}"
 SO="${STAGED_OVERLAY:-/tmp/darling-local-overlay}"; W="$DARLING_BUILD_DIR/stub-data"
 m() { md5 -q "$1" 2>/dev/null || echo none; }
 ML=$(m "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
+# images with their own generator that build-stub-data.sh leaves out of images.txt but whose md5 is still gated
+# (SystemConfigurationExtras.dylib: build-sc-stubs.sh; it was counted until it was excluded from images.txt)
+EXTRA_IMAGES="usr/lib/SystemConfigurationExtras.dylib"
 n=0; bad=""; fixed=""; sel=""
 while read -r p; do
 	[ -n "$p" ] || continue
@@ -24,7 +28,9 @@ while read -r p; do
 	if [ "$o" != "$s" ] || [ "$o" != "$b" ]; then bad="$bad $r(built=$b overlay=$o staged=$s)"; fi
 	case "$r" in */Security.framework/*|usr/lib/AppKitExtras.dylib|usr/lib/FoundationExtras.dylib|usr/lib/IOKitExtras.dylib)
 		sel="$sel $(basename "$r")=$o" ;; esac
-done < "$W/images.txt"
+done <<EOT
+$(cat "$W/images.txt"; for x in $EXTRA_IMAGES; do grep -qx "$DARLING_OVERLAY/$x" "$W/images.txt" || echo "$DARLING_OVERLAY/$x"; done)
+EOT
 if [ -z "$bad" ] && [ "$ML" != none ]; then
 	echo "STAGECHK ok images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
 fi
