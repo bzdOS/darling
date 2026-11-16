@@ -381,6 +381,10 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
 	"${STAGED_OVERLAY}/usr/lib/native/libGL.dylib" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+# NULL-safe CGColor accessors (idempotent binary patch), applied to the staged link output so the staged and the
+# persisted copy carry the same bytes; stage-gate.sh checks it (cgpatch=).
+python3 "$(dirname "$0")/cg-color-nullsafe.py" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" || exit 1
 # Persist into $OVERLAY -- see the Onyx2D persist step above for why.
 mkdir -p "${OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A"
 cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \

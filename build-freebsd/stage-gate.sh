@@ -44,7 +44,17 @@ if [ "${STAGE_GATE_CFINIT_RUN:-0}" = 1 ]; then
 	cfv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/cfinit-check.sh" 2>&1 | grep -a "^CFINIT-VERDICT" | tail -1); echo "$cfv"
 	case "$cfv" in "CFINIT-VERDICT pass"*) ;; *) echo "STAGECHK FAIL cfinit=FAIL"; exit 1;; esac
 fi
+# CoreGraphics must carry the NULL-safe CGColor accessors (cg-color-nullsafe.py); overlay and staged copy are both checked.
+cgp=ok; CGR=System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+for f in "$DARLING_OVERLAY/$CGR" "$SO/$CGR"; do
+	[ -f "$f" ] || continue
+	python3 "$HERE/cg-color-nullsafe.py" --check "$f" >/dev/null 2>&1 || cgp=FAIL
+done
+[ -f "$DARLING_OVERLAY/$CGR" ] || cgp=FAIL
+if [ "$cgp" = FAIL ]; then
+	echo "STAGECHK FAIL cgpatch=FAIL (CoreGraphics CGColor accessors not NULL-safe; run build-freebsd/cg-color-nullsafe.py on the overlay and staged copy)"; exit 1
+fi
 if [ -z "$bad" ] && [ "$ML" != none ]; then
-	echo "STAGECHK ok cfinit=ok images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
+	echo "STAGECHK ok cfinit=ok cgpatch=$cgp images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
 fi
 echo "STAGECHK FAIL images=$n mldr=$ML mismatches:${bad:- none}"; exit 1

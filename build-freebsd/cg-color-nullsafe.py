@@ -11,7 +11,8 @@ answers 0 (0.0 for the alpha) for NULL. Each forwarder is rewritten in place, in
 The patch is exact and verified: only a forwarder that still has the stock bytes is rewritten, one already rewritten is
 left alone, any other body stops the run. The image is kept as <image>.pre-cgcolor the first time.
 
-Usage: cg-color-nullsafe.py <CoreGraphics image>      Output: CG-COLOR-NULLSAFE patched=<n> already=<n> names=<list>"""
+Usage: cg-color-nullsafe.py <CoreGraphics image>          Output: CG-COLOR-NULLSAFE patched=<n> already=<n> names=<list>
+       cg-color-nullsafe.py --check <CoreGraphics image>  read-only; one line CG-COLOR-NULLSAFE-CHECK ok|FAIL, rc 1 on FAIL"""
 import os
 import shutil
 import struct
@@ -36,10 +37,25 @@ def symbols(path):
 
 
 def main():
-    if len(sys.argv) != 2:
+    check = len(sys.argv) == 3 and sys.argv[1] == "--check"
+    if len(sys.argv) != 2 and not check:
         print(__doc__)
         return 2
-    path = sys.argv[1]
+    path = sys.argv[-1]
+    if check:
+        try:
+            sy = symbols(path)
+            d = open(path, "rb").read()
+            bad = [n for n in NAMES if sy.get("_CGColor" + n) is None
+                   or d[sy["_CGColor" + n]:sy["_CGColor" + n] + len(NEW_HEAD)] != NEW_HEAD]
+        except Exception as e:
+            print("CG-COLOR-NULLSAFE-CHECK FAIL %s" % e)
+            return 1
+        if bad:
+            print("CG-COLOR-NULLSAFE-CHECK FAIL not null-safe: %s" % ",".join(bad))
+            return 1
+        print("CG-COLOR-NULLSAFE-CHECK ok names=%d" % len(NAMES))
+        return 0
     sy = symbols(path)
     d = bytearray(open(path, "rb").read())
     patched, already = [], []
