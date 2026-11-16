@@ -28,6 +28,8 @@
 # mldr, which hands the whole environment to the guest. DARLING_TEST_ARGS
 # becomes the guest's argv[1..].
 #
+# CORE_DIR (optional): inside sudo (which resets the core limit to 0) raise ulimit -c and cd there, so
+# core files (kern.corefile %N.core, in the cwd) land outside the repo.
 # CHROME_LOG_PREFIX (default chrome-wl) names the log: $DARLING_BUILD_DIR/<prefix>-SUFFIX.log
 #
 # Other useful NAME=val arguments: DARLING_KEEP_LOCAL=1 (do not re-stage the
@@ -43,7 +45,7 @@ START=$(date +%s)
 echo "WRAPPER_START=$START timeout=$T" > "$LOG"
 /usr/local/bin/sudo -n env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
-  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" \
+  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" \
   DARLING_TEST_BINARY=chrome-macho \
   DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
   DARLING_TRAP_LOG=1 \
@@ -52,6 +54,7 @@ echo "WRAPPER_START=$START timeout=$T" > "$LOG"
   DARLING_GUEST_EXPOSE="$DARLING_GUEST_EXPOSE" \
   DARLING_GUEST_MKDIR="$DARLING_GUEST_MKDIR" DARLING_GUEST_COPY="$DARLING_GUEST_COPY" \
   "$@" CHROME_APP="$CHROME_APP" \
+  sh -c 'if [ -n "$CORE_DIR" ]; then mkdir -p "$CORE_DIR"; ulimit -c unlimited; cd "$CORE_DIR"; fi; exec "$@"' sh \
   timeout --foreground -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" >> "$LOG" 2>&1
 echo "WRAPPER_RC=$?" >> "$LOG"
 echo "WRAPPER_DURATION=$(( $(date +%s) - START ))s TIMEOUT=${T}s" >> "$LOG"
