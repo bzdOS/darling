@@ -15934,3 +15934,16 @@ confirmed by a run.
 - The `-61` hangs of the spawn-only probe (1 of 12 after, 4 of 8 earlier with an idle worker): server
   side state of two threads waiting in call 62 (`semaphore_timedwait`) with the server idle.
 - Anything past the registry roundtrip.
+### Addendum (canonical config F baseline provenance)
+
+Measured on HEAD `f4c9f0baf` (branch `task/sig-suspend`), darlingserver md5 `eb90b5f18b79442791b0e24b509cdaba` (matches §(5) etalon), dirty `src/*` submodules in working tree: 27 (mldr build reads `src/external/darlingserver/generated-rpc`, submodule dirty — tracked separately). Three clean rebuilds of mldr from the same sources via `build-mldr-only.sh` (BUILD_RC 0 each): first clean md5 `7591977b9f14458ea0d9aa5c3a9c66b3` (hash recorded earlier; byte file not saved), second `6c8be8b88ed73e2d0df7542cfe9c3464`, third/canonical installed `d7db96f00df875b1f1bd52e23a8bbcb2` — not byte-deterministic (`cmp -l` clean2 vs clean3: 40629 differing-byte records, same size 763528). `mldr.sigreentry-fixed2` remains `cd0b7446e365e830208b919f6eb51f85` as recorded in §(5); `mldr.sigreentry-fixed` (exact-site) `d770013d4dc6bfbbefff6794186b8307`.
+
+| binary (mldr md5) | git HEAD | dirty src/* count | config F result (12x, 180s, 1500/100) | per-run signature notes |
+| --- | --- | --- | --- | --- |
+| `cd0b7446e365e830208b919f6eb51f85` (sigreentry-fixed2 / §(5) line) | f4c9f0baf context | n/r (historical) | 12/12 fail (etalon in text) | SEGV in guest pthread code, `pthread_t was corrupted` / progress stuck (see §(6)) |
+| `21c43ac63a4a88dffb1e1e59f050b1b9` (staged at run time, backup before rebuild) | f4c9f0baf tree | 27 | 12/12 OK, valid=12 ok=12 bad=0 (`SUMMARY baseline-r2`) | all `rc=0 PROBE-OK [none]`, no SEGV/pthread_t-corruption markers |
+| `7591977b9f14458ea0d9aa5c3a9c66b3` (clean rebuild from f4c9f0baf, hash-only) | f4c9f0baf | 27 | 11/12 ok, bad=1 (`SUMMARY baseline-fresh: N=12 valid=12 ok=11 bad=1`) | bad run2: `rc=124 180s/180s BAD [*** dserver_rpc_interrupt_enter failed with code -61 ***]`, `std::__1::system_error`, genuine SIGILL + FATAL signal 4 (libsystem_kernel.dylib+0x2933a), no SEGV offset / no `pthread_t was corrupted`; other 11 PROBE-OK |
+
+Staged `21c43ac6` provenance: backup mtime `2026-11-15T12:08:49Z`, size 763528; mldr sources newest at `2026-11-15T12:08:23Z` (sigaction_translate.c, freebsd_syscall_trap.c) so install time is plausible vs sources, but `/tmp/mldr-build-*` dirs present include 12:08-era build (`/tmp/mldr-build-19839`, 2026-11-15 12:08) with no preserved artifact mapping and no recorded build log linking it to `21c43ac6`; `mldr.sigreentry-fixed2` is `cd0b7446` (11:19). Origin of `21c43ac6` is not established from available artifacts — treated as unknown; prior 12/12-OK reference to it is discarded for baseline claims.
+
+Conclusion: the §(6) text "fails every time after the fixes" was tied to binaries of uncertain provenance; canonical baseline is a clean rebuild whose md5 is recorded in the run header. A clean rebuild from the same f4c9f0baf sources gave `bad=1/12` (run2: -61/system_error/SIGILL-FATAL4, not the SEGV/pthread_t-corrupted signature of §(6)).
