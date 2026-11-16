@@ -11,7 +11,7 @@ dsp_reap() {
 	while :; do
 		_pids=$(ps -axww -o pid,command | awk -v k="darlingserver $_p " 'index($0,k){printf "%s ",$1}')
 		[ -n "$_pids" ] || break
-		[ $_i -lt 50 ] || { echo "dsp_reap: server pids $_pids for $_p still alive, prefix kept"; return 1; }
+		[ $_i -lt 600 ] || { echo "dsp_reap: server pids $_pids for $_p still alive, prefix kept"; return 1; }
 		/usr/local/bin/sudo -n kill -9 $_pids 2>/dev/null
 		_i=$((_i+1)); sleep 0.1
 	done
