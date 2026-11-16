@@ -58,6 +58,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "crash_dump.h"
@@ -78,30 +79,80 @@
 static sigjmp_buf           dump_probe_jmp;
 static volatile sig_atomic_t dump_probe_active;
 
+/* One probe at a time, process-wide.
+ *
+ * The probe swaps the process-wide SIGSEGV/SIGBUS disposition and uses the
+ * one dump_probe_jmp above, and mldr runs guarded reads on any guest thread
+ * (the trap handlers call them on every emulated xchg/call site). Two things
+ * went wrong when two threads overlapped, and both end in a SIGSEGV with no
+ * handler output at all:
+ *   1. A genuine guest fault on another thread, taken while a probe window
+ *      was open, was delivered to dump_probe_handler. With the probe flag set
+ *      it longjmp'd into the OTHER thread's jmp_buf; with it clear it reset
+ *      the disposition to SIG_DFL and re-raised. Either way the mldr crash
+ *      handler never ran and the process died of the guest's own fault.
+ *   2. Two overlapping probes each "restore the previous handler": the second
+ *      one saved dump_probe_handler as its "previous" and put it back last,
+ *      leaving the probe handler installed for good.
+ * Fix: a spin lock serialises the windows (so exactly one saved disposition
+ * exists and is restored), the probe records which thread owns it, and a
+ * fault on any other thread is passed to the disposition that was installed
+ * before the window opened. */
+static volatile int          dump_probe_lock;
+static volatile long         dump_probe_owner;
+static struct sigaction      dump_probe_prev_segv, dump_probe_prev_bus;
+
+static long
+dump_self_tid(void)
+{
+    long tid = 0;
+    /* raw syscall: no TLS, no libthr, safe on a thread whose fsbase is the guest's */
+    syscall(SYS_thr_self, &tid);
+    return tid;
+}
+
 /*
- * purpose:  Catch a fault raised by a probe read, and jump out of it.
- * input:    signo — the signal raised; si, uctx — passed through unused.
- * output:   siglongjmp back into mldr_dump_read_guarded, or, if no probe is
- *           running, the process dies of the signal it was given.
- * sideEffects: does not return.
+ * purpose:  Catch a fault raised by a probe read, and jump out of it; hand a
+ *           fault that is not this thread's probe to the previous handler.
+ * input:    signo, si, uctx — as delivered.
+ * output:   siglongjmp back into mldr_dump_read_guarded for the owner thread's
+ *           probe; otherwise calls the disposition that was installed before
+ *           the window opened (or, if that was SIG_DFL/SIG_IGN, the process
+ *           dies of the signal it was given).
+ * sideEffects: does not return for the owner's probe.
  */
 static void
 dump_probe_handler(int signo, siginfo_t *si, void *uctx)
 {
-    (void)si;
-    (void)uctx;
-
-    if (dump_probe_active) {
+    if (dump_probe_active && dump_probe_owner == dump_self_tid()) {
         dump_probe_active = 0;
         siglongjmp(dump_probe_jmp, 1);
     }
 
-    struct sigaction sa_dfl;
-    memset(&sa_dfl, 0, sizeof(sa_dfl));
-    sa_dfl.sa_handler = SIG_DFL;
-    sigemptyset(&sa_dfl.sa_mask);
-    sigaction(signo, &sa_dfl, NULL);
-    raise(signo);
+    {
+        const struct sigaction *prev =
+            (signo == SIGBUS) ? &dump_probe_prev_bus : &dump_probe_prev_segv;
+
+        if ((prev->sa_flags & SA_SIGINFO) && prev->sa_sigaction != NULL &&
+            prev->sa_sigaction != dump_probe_handler) {
+            prev->sa_sigaction(signo, si, uctx);
+            return;
+        }
+        if (!(prev->sa_flags & SA_SIGINFO) && prev->sa_handler != SIG_DFL &&
+            prev->sa_handler != SIG_IGN) {
+            prev->sa_handler(signo);
+            return;
+        }
+    }
+
+    {
+        struct sigaction sa_dfl;
+        memset(&sa_dfl, 0, sizeof(sa_dfl));
+        sa_dfl.sa_handler = SIG_DFL;
+        sigemptyset(&sa_dfl.sa_mask);
+        sigaction(signo, &sa_dfl, NULL);
+        raise(signo);
+    }
 }
 
 /*
@@ -121,7 +172,7 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
 {
     static long page_size; /* 0 until the first call */
     char resident = 0;      /* mincore's vec is a char*, and bit 0 = resident */
-    struct sigaction sa_probe, sa_saved_segv, sa_saved_bus;
+    struct sigaction sa_probe;
     int saved_segv_ok, saved_bus_ok;
 
     if (addr == 0 || addr >= MLDR_STACK_MAX_ADDR)
@@ -145,21 +196,27 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
      * read itself is guarded. Both handlers are saved and restored: this runs
      * inside the crash handler, and leaving a probe handler installed would
      * make every later fault in the process jump into a dead jmp_buf. */
+    while (__sync_lock_test_and_set(&dump_probe_lock, 1))
+        ; /* another thread's window is open; it is a handful of instructions */
+    dump_probe_owner = dump_self_tid();
     memset(&sa_probe, 0, sizeof(sa_probe));
     sa_probe.sa_sigaction = dump_probe_handler;
     sigemptyset(&sa_probe.sa_mask);
     sa_probe.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    saved_segv_ok = (sigaction(SIGSEGV, &sa_probe, &sa_saved_segv) == 0);
-    saved_bus_ok = (sigaction(SIGBUS, &sa_probe, &sa_saved_bus) == 0);
-    if (!saved_segv_ok && !saved_bus_ok)
+    saved_segv_ok = (sigaction(SIGSEGV, &sa_probe, &dump_probe_prev_segv) == 0);
+    saved_bus_ok = (sigaction(SIGBUS, &sa_probe, &dump_probe_prev_bus) == 0);
+    if (!saved_segv_ok && !saved_bus_ok) {
+        __sync_lock_release(&dump_probe_lock);
         return 0;
+    }
 
     if (sigsetjmp(dump_probe_jmp, 1) != 0) {
         /* Faulted. dump_probe_handler already cleared the active flag. */
         if (saved_segv_ok)
-            sigaction(SIGSEGV, &sa_saved_segv, NULL);
+            sigaction(SIGSEGV, &dump_probe_prev_segv, NULL);
         if (saved_bus_ok)
-            sigaction(SIGBUS, &sa_saved_bus, NULL);
+            sigaction(SIGBUS, &dump_probe_prev_bus, NULL);
+        __sync_lock_release(&dump_probe_lock);
         return 0;
     }
 
@@ -168,9 +225,10 @@ mldr_dump_read_guarded(uintptr_t addr, volatile uint64_t *out)
     dump_probe_active = 0;
 
     if (saved_segv_ok)
-        sigaction(SIGSEGV, &sa_saved_segv, NULL);
+        sigaction(SIGSEGV, &dump_probe_prev_segv, NULL);
     if (saved_bus_ok)
-        sigaction(SIGBUS, &sa_saved_bus, NULL);
+        sigaction(SIGBUS, &dump_probe_prev_bus, NULL);
+    __sync_lock_release(&dump_probe_lock);
     return 1;
 }
 
