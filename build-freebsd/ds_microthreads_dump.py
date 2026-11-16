@@ -5,6 +5,10 @@
 # tid/nstid, process, state, the saved microthread context (_resumeContext) with a call-return-address stack scan
 # of its microthread stack (frame pointers are not reliable), and, for threads parked in dtape_mutex_lock /
 # dtape_condvar_wait, the queue head, the mutex owner (a dtape thread, resolved to a Thread) and the other waiters.
+# Further sections: ksyn (psynch) wait queues per process and the shared table (user address, owner and waiter
+# threads, whether the owner is in the live registry, its saved stack); the kernelAsync queue, its semaphore and the
+# runner threads (wait state of each); the server work queue; per-process kqchans with notification-deferral and
+# outbox state.
 import lldb
 
 def _u(v):
@@ -119,6 +123,216 @@ def _field(v, *names):
             return None
     return v
 
+# ---- psynch ksyn wait queues, deferred kernel work, kqchan state -----------------------------------------------
+def _gv(target, name):
+    v = target.FindFirstGlobalVariable(name)
+    return v if v.IsValid() else None
+
+def _foff(t, *path):
+    off = 0
+    for n in path:
+        found = None
+        for f in t.fields:
+            if f.name == n:
+                found = f
+        if not found:
+            return None
+        off += found.GetOffsetInBytes()
+        t = found.GetType()
+    return off
+
+def dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf):
+    kt = target.FindFirstType("ksyn_wait_queue")
+    if not kt.IsValid():
+        P("ksyn_wait_queue type not found (no debug info for the duct-tape pthread code)")
+        return
+    ft = target.FindFirstType("dtape_task")
+    o_hash = _foff(kt, "kw_hash"); o_addr = _foff(kt, "kw_addr"); o_owner = _foff(kt, "kw_owner")
+    o_type = _foff(kt, "kw_type"); o_inq = _foff(kt, "kw_inqueue"); o_io = _foff(kt, "kw_iocount")
+    o_l = _foff(kt, "kw_lword"); o_u = _foff(kt, "kw_uword"); o_s = _foff(kt, "kw_sword")
+    o_pf = _foff(kt, "kw_pflags"); o_fake = _foff(kt, "kw_fakecount")
+    o_q0 = _foff(kt, "kw_ksynqueues")
+    qt = target.FindFirstType("ksyn_queue")
+    qsz = qt.GetByteSize()
+    o_qcnt = _foff(qt, "ksynq_count")
+    # ksyn_waitq_element is opaque in the shared headers; layout from pthread/kern_internal.h
+    o_el_next = 0; o_el_thr = 24; o_el_lseq = 36
+    o_ph = _foff(ft, "p_pthhash")
+    mask_v = _gv(target, "pthhash")
+    mask = _u(mask_v) if mask_v else None
+    gh = _gv(target, "pth_glob_hashtbl")
+    P("pthhash mask=%s (hash table is shared by hashinit calls: last caller wins), pth_glob_hashtbl=%s" % ("%#x" % mask if mask is not None else "?", "%#x" % _u(gh) if gh else "?"))
+    def rd32(a):
+        b = _mem(proc, a, 4)
+        return int.from_bytes(b, "little") if b else None
+    def thr_desc(dt_addr):
+        d = thread_of_dt(dt_addr)
+        if d:
+            return "tid=%d(%s)" % (d["tid"], "susp" if d["suspended"] else ("run" if d["running"] else "idle"))
+        return "%#x(no Thread)" % dt_addr
+    tables = []
+    if gh and _u(gh):
+        tables.append(("global", _u(gh)))
+    seenp = set()
+    for d in info:
+        if d.get("dtask") and d["dtask"] not in seenp:
+            seenp.add(d["dtask"])
+            ph = _rd64(proc, d["dtask"] + o_ph)
+            if ph:
+                tables.append(("pid=%s %s" % (d["pid"], d["exe"]), ph))
+    owners = {}
+    total = 0
+    for label, tbl in tables:
+        if mask is None:
+            continue
+        for b in range(mask + 1):
+            kw = _rd64(proc, tbl + b * 8)
+            guard = 0
+            while kw and guard < 4096:
+                guard += 1
+                total += 1
+                addr = _rd64(proc, kw + o_addr)
+                own = _rd64(proc, kw + o_owner)
+                inq = rd32(kw + o_inq); io = rd32(kw + o_io); ty = rd32(kw + o_type)
+                l = rd32(kw + o_l); u = rd32(kw + o_u); s = rd32(kw + o_s); pf = rd32(kw + o_pf)
+                ws = []
+                for qi in range(2):
+                    qa = kw + o_q0 + qi * qsz
+                    cur = _rd64(proc, qa)
+                    n = 0
+                    while cur and n < 512:
+                        th = _rd64(proc, cur + o_el_thr)
+                        ls = rd32(cur + o_el_lseq)
+                        ws.append("%s:%s@seq%#x" % ("RW"[qi] if ty is not None and ty >= 2 else "M", thr_desc(th - xoff) if th else "none", ls or 0))
+                        cur = _rd64(proc, cur + o_el_next); n += 1
+                if inq or ws or own:
+                    P("kwq %#x [%s] uaddr=%#x type=%s owner_thread=%#x inqueue=%s iocount=%s pflags=%#x lword=%#x uword=%#x sword=%#x" % (kw, label, addr or 0, ty, own or 0, inq, io, pf or 0, l or 0, u or 0, s or 0))
+                    if own:
+                        od = thread_of_dt(own - xoff)
+                        P("   owner: %s" % (("Thread tid=%d nstid=%d pid=%s state=%s dead=%s" % (od["tid"], od["nstid"], od["pid"], "suspended" if od["suspended"] else ("running" if od["running"] else "idle/not-scheduled"), od["dead"])) if od else "NOT IN LIVE THREAD REGISTRY (stale kw_owner reference)"))
+                        if od:
+                            owners[od["tid"]] = od
+                    P("   waiters: %s" % (" ".join(ws) if ws else "(none)"))
+                kw = _rd64(proc, kw + o_hash)
+    P("(%d kwq scanned across %d tables)" % (total, len(tables)))
+    for tid, od in sorted(owners.items()):
+        P("owner tid=%d: state=%s defer=%d term=%s" % (tid, "suspended" if od["suspended"] else ("running" if od["running"] else "idle"), od["defer"], od["term"]))
+        for i, (a, s) in enumerate(stacks.get(tid) or []):
+            P("   #%d %#x %s" % (i, a, s))
+        if not stacks.get(tid):
+            P("   (no saved microthread stack)")
+
+def dtape_wait_state(target, dt):
+    ty = target.FindFirstType("dtape_thread")
+    if not dt or not ty.IsValid():
+        return "?"
+    v = target.CreateValueFromAddress("dth", lldb.SBAddress(dt, target), ty)
+    x = _field(v, "xnu_thread")
+    if x is None:
+        return "?"
+    return "xnu state=%#x wait_result=%d wait_event=%#x" % (_u(_field(x, "state")), _u(_field(x, "wait_result")), _u(_field(x, "wait_event")))
+
+def dump_async(target, proc, info, P, C, maxf):
+    P("--- deferred kernel work (Thread::kernelAsync, thread.cpp) ---")
+    for nm in ("kernelAsyncRunnerQueue", "kernelAsyncRunnersAvailable", "permanentKernelAsyncRunners", "kernelAsyncRunnerQueueSempahore"):
+        v = None
+        sc = target.FindGlobalVariables(nm, 4)
+        for i in range(sc.GetSize()):
+            v = sc.GetValueAtIndex(i); break
+        if v is None or not v.IsValid():
+            P("  %s: not found" % nm); continue
+        if nm == "kernelAsyncRunnerQueue":
+            nv = v.GetNonSyntheticValue()
+            c = nv.GetChildMemberWithName("c")
+            sz = _field(nv, "c", "__size_", "__value_")
+            P("  %s: queued=%s" % (nm, _u(sz) if sz is not None else "?(fields: %s)" % [c.GetChildAtIndex(j).GetName() for j in range(c.GetNumChildren())]))
+        elif nm == "kernelAsyncRunnersAvailable":
+            P("  %s=%d" % (nm, _u(v)))
+        elif nm == "permanentKernelAsyncRunners":
+            P("  %s: size=%d" % (nm, v.GetNumChildren()))
+            for j in range(v.GetNumChildren()):
+                e = v.GetChildAtIndex(j)
+                tp = e.GetChildMemberWithName("__ptr_")
+                if not tp.IsValid():
+                    tp = e
+                th = tp.Dereference()
+                tid = _u(_field(th, "_tid"))
+                susp = bool(_u(_field(th, "_suspended"))); run = bool(_u(_field(th, "_running")))
+                P("    runner[%d] Thread %#x tid=%d nstid=%d state=%s dead=%s term=%s in_registry=%s" % (j, _u(tp), tid, _u(_field(th, "_nstid")), "suspended(parked)" if susp else ("running" if run else "idle"), bool(_u(_field(th, "_dead"))), bool(_u(_field(th, "_terminating"))), any(d["addr"] == _u(tp) for d in info)))
+                P("      flags: deferralState=%d running=%s pendingCall=%#x continuationCb=%#x; %s" % (_u(_field(th, "_deferralState")), run, _u(_field(th, "_pendingCall", "__ptr_")), _u(_field(th, "_continuationCallback")), dtape_wait_state(target, _u(_field(th, "_dtapeThread")))))
+                mc = _field(th, "_resumeContext", "uc_mcontext")
+                if susp and mc is not None:
+                    lo = _u(_field(th, "_stack", "base")); hi = lo + _u(_field(th, "_stack", "size"))
+                    for k, (a, sy) in enumerate(C.scan(_u(_field(mc, "mc_rip")), _u(_field(mc, "mc_rsp")), lo, hi, maxf, _u(_field(mc, "mc_rbp")))):
+                        P("      #%d %#x %s" % (k, a, sy))
+        else:
+            sp = _u(v)
+            P("  %s=%#x" % (nm, sp))
+            if sp:
+                try:
+                    xs = _u(_field(v.Dereference(), "xnu_semaphore"))
+                    st = target.FindFirstType("semaphore")
+                    if xs and st.IsValid():
+                        sv = target.CreateValueFromAddress("sem", lldb.SBAddress(xs, target), st)
+                        P("    xnu semaphore %#x: count=%s active=%s" % (xs, _field(sv, "count").GetValue(), _field(sv, "active").GetValue()))
+                        wq = _field(sv, "waitq")
+                        P("    waitq: %s" % str(wq).replace("\n", " ")[:700])
+                    else:
+                        P("    semaphore: %s" % str(v.Dereference()).replace("\n", " ")[:600])
+                except Exception as e:
+                    P("    (deref failed %s)" % e)
+
+def dump_workqueue(target, proc, P):
+    P("--- server work queue (Server::scheduleThread) ---")
+    sp = _gv(target, "sharedInstancePointer")
+    if sp is None:
+        sc = target.FindGlobalVariables("sharedInstancePointer", 2)
+        sp = sc.GetValueAtIndex(0) if sc.GetSize() else None
+    if sp is None or not _u(sp):
+        P("  server instance not found"); return
+    srv = sp.Dereference()
+    wq = _field(srv, "_workQueue")
+    items = _field(wq, "_workItems", "c", "__size_", "__value_")
+    P("  queued work items=%s threadsAvailable=%s workers=%s dying=%s" % (_u(items) if items is not None else "?", _u(_field(wq, "_threadsAvailable")), _field(wq, "_workerThreads").GetNumChildren(), _u(_field(wq, "_dying"))))
+
+def dump_kqchans(target, proc, info, P):
+    P("--- kqchans (per process _kqchannels) ---")
+    seen = set()
+    for d in info:
+        pa = d.get("procaddr")
+        if not pa or pa in seen:
+            continue
+        seen.add(pa)
+        pv = d["procval"]
+        km = pv.GetChildMemberWithName("_kqchannels")
+        if not km.IsValid():
+            continue
+        n = km.GetNumChildren()
+        if n == 0:
+            continue
+        P("process pid=%s %s: %d kqchans" % (d["pid"], d["exe"], n))
+        # libc++ unordered_map node: next@0 hash@8 key@16 shared_ptr(ptr@24); first node pointer at table+16
+        node = _rd64(proc, km.GetLoadAddress() + 16)
+        kqt = target.FindFirstType("DarlingServer::Kqchan")
+        while node:
+            key = _rd64(proc, node + 16)
+            kaddr = _rd64(proc, node + 24)
+            node = _rd64(proc, node)
+            if not kaddr:
+                continue
+            kq = target.CreateValueFromAddress("kq", lldb.SBAddress(kaddr, target), kqt)
+            ptr = target.CreateValueFromData("kqp", lldb.SBData.CreateDataFromUInt64Array(target.GetByteOrder(), 8, [kaddr]), target.GetBasicType(lldb.eBasicTypeUnsignedLong))
+            dyn = kq.GetDynamicValue(lldb.eDynamicCanRunTarget)
+            tn = dyn.GetTypeName() if dyn and dyn.IsValid() else "?"
+            def ct(box):
+                m = _field(kq, box, "_messages")
+                return m.GetNumChildren() if m is not None and m.IsValid() else -1
+            de = _field(kq, "_deferredNotification", "__engaged_")
+            P("  kqchan %#x key=%#x type=%s debugID=%d canSend=%s canSendNotification=%s deferNotification=%s deferredNotificationHeld=%s notificationCount=%d outbox=%d inbox=%d" % (
+                _u(ptr), key, tn, _u(_field(kq, "_debugID")), bool(_u(_field(kq, "_canSend"))),
+                bool(_u(_field(kq, "_canSendNotification"))), bool(_u(_field(kq, "_deferNotification"))),
+                bool(_u(de)) if de is not None else "?", _u(_field(kq, "_notificationCount")), ct("_outbox"), ct("_inbox")))
+
 def dsdump(debugger, command, result, internal_dict):
     target = debugger.GetSelectedTarget()
     proc = target.GetProcess()
@@ -171,6 +385,8 @@ def dsdump(debugger, command, result, internal_dict):
         if pr is not None and _u(pr):
             pd = pr.Dereference()
             d["pid"] = _u(_field(pd, "_pid"))
+            d["procaddr"] = _u(pr); d["procval"] = pd
+            d["dtask"] = _u(_field(pd, "_dtapeTask"))
             d["nspid"] = _u(_field(pd, "_nspid"))
             ex = _field(pd, "_executablePath")
             d["exe"] = ex.GetSummary() if ex else None
@@ -215,7 +431,7 @@ def dsdump(debugger, command, result, internal_dict):
         st = "dead" if d["dead"] else ("suspended(parked)" if d["suspended"] else ("running" if d["running"] else "idle/not-scheduled"))
         P("=== Thread %s tid=%d nstid=%d pid=%s exe=%s state=%s defer=%d term=%s" % (
             "%#x" % d["addr"], d["tid"], d["nstid"], d["pid"], d["exe"], st, d["defer"], d["term"]))
-        P("    pendingCall=%#x activeCall=%#x contCallback=%#x dtape_thread=%#x" % (d["pending"], d["active"], d["cont"], d["dt"]))
+        P("    pendingCall=%#x activeCall=%#x contCallback=%#x dtape_thread=%#x %s" % (d["pending"], d["active"], d["cont"], d["dt"], dtape_wait_state(target, d["dt"])))
         fr = stacks.get(d["tid"])
         if fr:
             P("    saved context rip=%#x rsp=%#x rbp=%#x  (frame-pointer walk; frames without fp, e.g. libc, end the chain)" % (d["rip"], d["rsp"], d["rbp"]))
@@ -260,6 +476,15 @@ def dsdump(debugger, command, result, internal_dict):
         else:
             P("    (no saved microthread context: %s)" % ("running now" if d["running"] else "not parked"))
         P("")
+    for title, fn in (("psynch ksyn wait queues", lambda: dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf)),
+                      ("kernelAsync", lambda: dump_async(target, proc, info, P, C, maxf)),
+                      ("workqueue", lambda: dump_workqueue(target, proc, P)),
+                      ("kqchans", lambda: dump_kqchans(target, proc, info, P))):
+        P("--- %s ---" % title)
+        try:
+            fn()
+        except Exception as e:
+            P("  section failed: %r" % (e,))
     # owners' stacks summary
     P("--- real OS thread backtraces ---")
     for i in range(proc.GetNumThreads()):
