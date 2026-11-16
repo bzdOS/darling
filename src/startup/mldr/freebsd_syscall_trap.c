@@ -1997,6 +1997,15 @@ dispatch_linux_syscall(unsigned int linux_nr,
             const int *hd = (const int *)mh->msg_iov[0].iov_base;
             fprintf(stderr, "[traplog] sendmsg fd=%ld callnum=%d pid=%d tid=%d len=%zu\n",
                     (long)a1, hd[0], hd[1], hd[2], (size_t)mh->msg_iov[0].iov_len);
+            if (hd[0] == 4 && mh->msg_iov[0].iov_len >= 32) {
+                /* kprintf: show the text (step 57) */
+                const uint64_t *kb = (const uint64_t *)((const char *)mh->msg_iov[0].iov_base + 16);
+                uint64_t kw = 0;
+                if (mldr_dump_read_guarded((uintptr_t)kb[0], &kw)) {
+                    int kl = kb[1] > 100 ? 100 : (int)kb[1];
+                    fprintf(stderr, "[traplog] kprintf-text tid=%d \"%.*s\"\n", hd[2], kl, (const char *)kb[0]);
+                }
+            }
             fflush(stderr);
         }
         mldr_cmsg_convert(mh->msg_control, (size_t)mh->msg_controllen, 1);
@@ -3090,6 +3099,38 @@ dispatch_linux_syscall(unsigned int linux_nr,
              */
             sigdelset(&nset, SIGILL);
             sigdelset(&nset, SIGSYS);
+
+            /*
+             * Step 57. The guest's sigset is 8 bytes, but its real-time signals
+             * (thread_suspend = 65, S2C = 66) are FreeBSD 65..126: a SETMASK
+             * built from a saved guest mask has no bit for them, so the RPC
+             * layer's atomic_end (SETMASK to the mask atomic_begin read) cleared
+             * the block on 65 that the kernel had applied for the duration of the
+             * signal-65 handler. The pending next signal 65 was delivered right
+             * there, nested inside the handler, and the nesting never unwound.
+             * For SETMASK keep the current state of every native signal the guest
+             * mask cannot express.
+             */
+            if (freebsd_how == SIG_SETMASK) {
+                sigset_t cur, repr;
+                sigemptyset(&cur);
+                sigemptyset(&repr);
+                if (freebsd_raw_syscall(SYS_sigprocmask, SIG_BLOCK, 0, (long)&cur, 0, 0, 0) == 0) {
+                    for (int ls = 1; ls <= 64; ls++) {
+                        int nn = mldr_linux_signo_to_freebsd(ls);
+                        if (nn > 0)
+                            sigaddset(&repr, nn);
+                    }
+                    for (int nn = 1; nn <= 126; nn++) {
+                        if (!sigismember(&repr, nn) && sigismember(&cur, nn)
+                            && nn != SIGILL && nn != SIGSYS) {
+                            sigaddset(&nset, nn);
+                            if (mldr_trap_log_enabled && nn >= 65)
+                                fprintf(stderr, "[traplog] sigprocmask SETMASK keeps native %d blocked\n", nn);
+                        }
+                    }
+                }
+            }
         }
 
         long r = freebsd_raw_syscall(SYS_sigprocmask, freebsd_how,

@@ -523,6 +523,13 @@ mldr_sys_rt_sigaction(int linux_signo, const void *act, void *oldact,
          * execution — never honor a guest request to block either. */
         sigdelset(&native_new.sa_mask, SIGILL);
         sigdelset(&native_new.sa_mask, SIGSYS);
+        /* Step 57: the guest's 8-byte sa_mask cannot name signals 65/66
+         * (thread_suspend, S2C). Its RT handlers ask to block both while one
+         * of them runs (sigexc.c handle_rt_signal); honor that natively. */
+        if (native_signo == SAT_RT_FIRST || native_signo == SAT_RT_FIRST + 1) {
+            sigaddset(&native_new.sa_mask, SAT_RT_FIRST);
+            sigaddset(&native_new.sa_mask, SAT_RT_FIRST + 1);
+        }
 
         pnew = &native_new;
     }
