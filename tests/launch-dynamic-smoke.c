@@ -758,6 +758,26 @@ int main(void) {
             printf("etc cached locally: %s/etc\n", LOCAL_OVERLAY);
         }
 
+        /* Time zone data. tzload() opens /etc/localtime and /var/db/timezone/zoneinfo/<zone> through the
+         * overlay. With neither staged every localtime()/tzset() fails all of them and (libc resets its cached
+         * mtime on failure) retries all of them on the next call: a storm of opens, and a deep tzload frame
+         * (a struct state on the stack) on every thread that formats a time. Staged for the data like etc above:
+         * the zoneinfo tree as it is (its symlinks stay symlinks), the /etc/localtime symlink, which the
+         * regular-file copy of etc skips, and /usr/share/zoneinfo -> /var/db/timezone/zoneinfo (CoreFoundation's TZDIR). */
+        char tz_src[512];
+        snprintf(tz_src, sizeof(tz_src), "%s/private/var/db/timezone", od);
+        struct stat tz_st;
+        if (stat(tz_src, &tz_st) == 0) {
+            char tz_cmd[1536];
+            snprintf(tz_cmd, sizeof(tz_cmd),
+                     "mkdir -p '%s/var/db' && cd '%s/private/var/db' && pax -rw timezone '%s/var/db' && "
+                     "mkdir -p '%s/etc' && cp -P '%s/private/etc/localtime' '%s/etc/localtime' && "
+                     "mkdir -p '%s/usr/share' && ln -sfn /var/db/timezone/zoneinfo '%s/usr/share/zoneinfo'",
+                     LOCAL_OVERLAY, od, LOCAL_OVERLAY, LOCAL_OVERLAY, od, LOCAL_OVERLAY, LOCAL_OVERLAY, LOCAL_OVERLAY);
+            if (system(tz_cmd) == 0)
+                printf("time zone data cached locally: %s/var/db/timezone\n", LOCAL_OVERLAY);
+        }
+
         /* Copy the Mach-O test binary too — it's on the same 9p mount */
         char local_binary[512];
         snprintf(local_binary, sizeof(local_binary), "%s/%s", LOCAL_OVERLAY, test_bin);
