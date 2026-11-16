@@ -8,6 +8,14 @@
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
+# exclusive run lock: one probe/Chrome run at a time; nested calls (DARLING_LOCK_HELD) do not re-lock
+if [ -z "$DARLING_LOCK_HELD" ]; then
+	: "${DARLING_BUILD_DIR:?}"
+	DARLING_LOCK_HELD=1 lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" sh "$0" "$@"
+	rc=$?
+	[ $rc -eq 75 ] && { echo "LOCK busy"; exit 1; }
+	exit $rc
+fi
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
 MLDR=$DARLING_BUILD_DIR/dserver/mldr-real/mldr

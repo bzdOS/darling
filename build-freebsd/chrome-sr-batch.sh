@@ -5,6 +5,14 @@
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR CHROME_APP. Starts its own sway (private 0700
 # XDG_RUNTIME_DIR, headless, pixman) for the batch and stops it afterwards. Runs without GUEST-EXEC are
 # invalid and repeated (up to 2N attempts). Prints chrome-run-summary.sh lines.
+# exclusive run lock: one probe/Chrome run at a time; nested calls (DARLING_LOCK_HELD) do not re-lock
+if [ -z "$DARLING_LOCK_HELD" ]; then
+	: "${DARLING_BUILD_DIR:?}"
+	DARLING_LOCK_HELD=1 lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" sh "$0" "$@"
+	rc=$?
+	[ $rc -eq 75 ] && { echo "LOCK busy"; exit 1; }
+	exit $rc
+fi
 P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
 RUN=/tmp/sr56-run
