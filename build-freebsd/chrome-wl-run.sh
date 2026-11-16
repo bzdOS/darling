@@ -75,7 +75,16 @@ BGP=$!
 LEAD=${CHROME_SR_DUMP_LEAD:-40}
 [ "$LEAD" -lt "$T" ] || LEAD=$((T-1))
 DUMPED=0
+SEGVP=""
+# CHROME_SR_SEGV=1: once the launcher logs GUEST-EXEC pid=, guest-segv-catch.sh attaches to that pid (dtrace probe on that pid; no ptrace) and writes <log base>-segv.txt ending in a SEGV-VERDICT line. Off by default; the guest is otherwise unchanged.
 while kill -0 $BGP 2>/dev/null; do
+	if [ -z "$SEGVP" ] && [ "${CHROME_SR_SEGV:-0}" = 1 ]; then
+		G2=$(grep -a 'GUEST-EXEC pid=' "$LOG" | tail -1 | sed 's/.*GUEST-EXEC pid=\([0-9]*\).*/\1/')
+		if [ -n "$G2" ]; then
+			sh "${CHROME_SR_SEGVCATCH:-$DARLING_SRC_DIR/build-freebsd/guest-segv-catch.sh}" "$G2" "$LOG" > "$BASE-segv.txt" 2>&1 &
+			SEGVP=$!
+		fi
+	fi
 	if [ $DUMPED -eq 0 ] && [ "${CHROME_SR_DUMP:-1}" != 0 ] && [ $(( $(date +%s) - START )) -ge $((T-LEAD)) ]; then
 		DUMPED=1
 		SPID=$(grep -a '^\[launch\] DSERVER pid=' "$LOG" | tail -1 | sed 's/.*pid=\([0-9]*\).*/\1/')
@@ -88,6 +97,7 @@ while kill -0 $BGP 2>/dev/null; do
 	sleep 1
 done
 wait $BGP
+[ -n "$SEGVP" ] && wait $SEGVP
 RC=$(cat "$RCF" 2>/dev/null); RC=${RC:-1}
 rm -f "$RCF"
 # server log (only with CHROME_SR_SERVER_LOG), copied before the prefix is removed; capped at 100 MB (tail)
