@@ -117,6 +117,24 @@ elif [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ]; then echo "PORT-CONSTRUCT-VERDICT skipp
 # ~2 min, so off by default); needs tests/suspend-wake-probe-macho (build-suspend-wake-probe.sh).
 if [ "${STAGE_GATE_SUSPEND_RUN:-0}" = 1 ]; then gate_probe SUSPEND-WAKE run-suspend-wake-probe.sh
 elif [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ]; then echo "SUSPEND-WAKE-VERDICT skipped (RUN=0)"; fi
+# SUSPEND-RWLOCK / SUSPEND-MUTEX / SUSPEND-CV (STAGE_GATE_SUSPEND_<RWLOCK|MUTEX|CV>_RUN=1, default 0): a thread thread_suspend()ed while blocked
+#   in psynch_rw_rdlock / psynch_mutexwait / psynch_cvwait gets EINTR from the server; the line is
+#   "SUSPEND-<KIND> confirmed= iters= eintr=E retry_same_seq=R invariant_broken=I hung=y|n pass=y|n" (probes/suspend-run.sh, SR_KIND=rwlock|mutex|cv).
+#   pass: eintr>0 and invariant_broken=0 and hung=n and (rwlock, mutex: every interrupted call repeated, retry_same_seq==eintr;
+#   cv: libpthread makes EINTR a spurious wakeup, no repeat required). Needs the darlingserver with the psynch ring and the BSD EINTR sign fix.
+#   Skipped when the run lock is busy; RUN-INVALID is not a failure.
+gate_suspend() {
+	_s=$(SR_KIND="$1" sh "$HERE/probes/suspend-build.sh" >/dev/null 2>&1; if [ -n "$DARLING_LOCK_HELD" ]; then SR_KIND="$1" DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/suspend-run.sh" 2>/dev/null
+	else lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" env DARLING_LOCK_HELD=1 SR_KIND="$1" DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/suspend-run.sh" 2>/dev/null; [ $? -eq 75 ] && echo "$2 skipped lock-busy"; fi | grep -a "^$2 \|^RUN-INVALID" | tail -1)
+	echo "${_s:-$2 fail no-verdict}"
+	case "$_s" in *" pass=y"|*"skipped"*|RUN-INVALID*) ;; *) echo "STAGECHK FAIL $3=FAIL"; stage_fail;; esac
+}
+if [ "${STAGE_GATE_SUSPEND_RWLOCK_RUN:-0}" = 1 ]; then gate_suspend rwlock SUSPEND-RWLOCK suspend-rwlock
+elif [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ]; then echo "SUSPEND-RWLOCK skipped (RUN=0)"; fi
+if [ "${STAGE_GATE_SUSPEND_MUTEX_RUN:-0}" = 1 ]; then gate_suspend mutex SUSPEND-MUTEX suspend-mutex
+elif [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ]; then echo "SUSPEND-MUTEX skipped (RUN=0)"; fi
+if [ "${STAGE_GATE_SUSPEND_CV_RUN:-0}" = 1 ]; then gate_suspend cv SUSPEND-CV suspend-cv
+elif [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ]; then echo "SUSPEND-CV skipped (RUN=0)"; fi
 # STAGE_GATE_WINDOW_RUN=1 also runs the window draw probe (WINDOW-DRAW-VERDICT line: an NSWindow with a red background must
 # map in an own headless sway and show that colour in a grim snapshot; own sway and darlingserver, off by default).
 if [ "${STAGE_GATE_WINDOW_RUN:-0}" = 1 ]; then

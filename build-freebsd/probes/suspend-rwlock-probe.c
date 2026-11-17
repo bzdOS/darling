@@ -35,10 +35,11 @@ static void spin(int n) { for (volatile int i = 0; i < n; i++) ; }
 static void *writer(void *p) {
     (void)p;
     unsigned r = 12345;
+    int whold = 3 * envi("SR_SUSP_US", 200) + 300;
     while (!stop_all) {
         pthread_rwlock_wrlock(&lk);
         __sync_fetch_and_add(&win, 1);
-        spin(2000);
+        usleep(whold);          /* inside longer than the longest suspension (SR_SUSP_US), so an early return is seen */
         __sync_fetch_and_sub(&win, 1);
         pthread_rwlock_unlock(&lk);
         r = r * 1103515245 + 12345;
