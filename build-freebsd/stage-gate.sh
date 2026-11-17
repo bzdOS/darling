@@ -77,6 +77,10 @@ gate_probe() { # name script
 [ "${STAGE_GATE_CATXKEYS_RUN:-1}" = 1 ] && { _c=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/catx-keys-probe.sh" 2>&1 | grep -a "^CATX-KEYS" | tail -1); echo "${_c:-CATX-KEYS fail no-verdict}"; case "$_c" in "CATX-KEYS pass"*) ;; *) echo "STAGECHK FAIL catx-keys=FAIL"; exit 1;; esac; }
 #   NULL-CONST: no string constant (NSString * / CFStringRef) that the Chrome framework or its helpers import is a zero object in the image that provides it
 [ "${STAGE_GATE_NULLCONST_RUN:-1}" = 1 ] && { _n=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/null-const-probe.sh" 2>&1 | grep -a "^NULL-CONST" | tail -1); echo "${_n:-NULL-CONST fail no-verdict}"; case "$_n" in "NULL-CONST pass"*) ;; *) echo "STAGECHK FAIL null-const=FAIL"; exit 1;; esac; }
+#   PTATTACH: concurrent PT_ATTACH on one pid must not fail (probes/ptattach-build.sh builds tests/ptattach-probe-macho; probes/ptattach-run.sh
+#          prints PTATTACH pass|fail calls= fail=; needs the darlingserver with the memory-access serialization). Runs under the shared run lock.
+[ "${STAGE_GATE_PTATTACH_RUN:-1}" = 1 ] && { _p=$(sh "$HERE/probes/ptattach-build.sh" >/dev/null 2>&1; if [ -n "$DARLING_LOCK_HELD" ]; then DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/ptattach-run.sh" 2>/dev/null
+	else lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" env DARLING_LOCK_HELD=1 DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/ptattach-run.sh" 2>/dev/null; [ $? -eq 75 ] && echo "PTATTACH skipped lock-busy"; fi | grep -a "^PTATTACH" | tail -1); echo "${_p:-PTATTACH fail no-verdict}"; case "$_p" in "PTATTACH pass"*|"PTATTACH skipped"*) ;; *) echo "STAGECHK FAIL ptattach=FAIL"; exit 1;; esac; }
 #   FONT-FAMILIES: [[NSDisplay currentDisplay] allFontFamilyNames] answers a non-empty set and does not raise "only defined for abstract class";
 #          needs the AppKit Wayland backend with cocotron-wayland-font-families deployed, so default 0 until then (font-families-probe.sh).
 [ "${STAGE_GATE_FONTFAMILIES_RUN:-1}" = 1 ] && gate_probe FONT-FAMILIES font-families-probe.sh
