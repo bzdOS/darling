@@ -73,32 +73,133 @@ def class_names(names):
 
 
 # Names of the string constants (CFStringRef / NSString *): the object is a pointer to a constant
-# CFString whose text is the name, not NULL. A NULL key or value crashes the callers that put a
-# constant in a dictionary (+[NSDictionary dictionaryWithObjects:forKeys:count:] throws, CFDictionaryGetValue
-# hashes NULL). Struct constants (CMTime) and objects (kCGColor*, callbacks) are not in this set.
+# CFString, not NULL. A NULL key or value crashes the callers that put a constant in a dictionary
+# (+[NSDictionary dictionaryWithObjects:forKeys:count:] throws, CFDictionaryGetValue hashes NULL).
+# Struct constants (CMTime, CATransform3D, callbacks), numbers (kCLLocationAccuracy*) and
+# non-string objects (UTType *) are not in this set.
 STRING_CONST = re.compile(
     r"^_k(SC|Sec|LS|UT|AX|AV|UN|CT|VT|CMF|CMS|CVI|CVP|CVV|CFP|CFN|CFStream|CFProxy|MA|CGColorSpace|CGImage|CGDisplay|CGWindow|CGPDF|CAGravity|CAFilter|CAMedia|CATransition|CATransaction)[A-Za-z]"
     r"|^_k[A-Z][A-Za-z0-9_]*(Notification|NotificationName|Key|Domain)$"
-    r"|^_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$")
-NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$")
+    r"|^_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$"
+    # constants of the frameworks the Chrome framework imports (string typed in their headers)
+    r"|^_(GCController[A-Za-z]*Notification|VNBarcodeSymbology|UTTagClass|MPMediaItemProperty|MPNowPlayingInfoProperty|GCHapticsLocality"
+    r"|MTLCommonCounter|MTLDevice[A-Za-z]*Notification|AVCaptureDeviceType|AVCaptureDevice[A-Za-z]*Notification"
+    r"|AVCaptureSession[A-Za-z]*(Key|Notification)|AVMediaType|AVVideo|AVLayerVideoGravity"
+    r"|CBAdvertisementData|CBCentralManagerScanOption|CHHaptic(Dynamic|Event)|CIDetector(Accuracy|Type)"
+    r"|CADynamicRange|ASAuthorization|ASWebAuthenticationSession|AXPrefers|NSAccessibility(SearchDirection|[A-Za-z]*Subrole)"
+    r"|NSTouchBarItemIdentifier|NSUserActivityType|UNNotification(Attachment|Default|Dismiss))"
+    r"|^_k(TISProperty|IOSurface|MIDIProperty|MDItem|DADiskDescriptionWatch)[A-Za-z]"
+    r"|^__kLSOpen[A-Za-z]")
+NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$|^_AVSpeechUtterance|^_kIOMainPortDefault$|^_UTType[A-Z]")
+
+# {name: (text, source)}; source is cocotron-code, sdk-doc-from-memory or (absent from the table) symbol-name.
+# Text of a string constant whose value is not its name. Priority: the cocotron definition
+# (src/external/cocotron: only the CATransaction key is defined there, and its text is the name
+# without the underscore, the same as the default), then the macOS value from the SDK headers or
+# documentation, else the name without its underscore.
+STRING_VALUES = {
+    "_kCATransactionDisableActions": ("kCATransactionDisableActions", "cocotron-code"),
+    "_kIOSurfaceAllocSize": ("IOSurfaceAllocSize", "sdk-doc-from-memory"),
+    "_kIOSurfaceBytesPerElement": ("IOSurfaceBytesPerElement", "sdk-doc-from-memory"),
+    "_kIOSurfaceBytesPerRow": ("IOSurfaceBytesPerRow", "sdk-doc-from-memory"),
+    "_kIOSurfaceHeight": ("IOSurfaceHeight", "sdk-doc-from-memory"),
+    "_kIOSurfacePixelFormat": ("IOSurfacePixelFormat", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneBytesPerElement": ("IOSurfacePlaneBytesPerElement", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneBytesPerRow": ("IOSurfacePlaneBytesPerRow", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneHeight": ("IOSurfacePlaneHeight", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneInfo": ("IOSurfacePlaneInfo", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneOffset": ("IOSurfacePlaneOffset", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneSize": ("IOSurfacePlaneSize", "sdk-doc-from-memory"),
+    "_kIOSurfacePlaneWidth": ("IOSurfacePlaneWidth", "sdk-doc-from-memory"),
+    "_kIOSurfaceWidth": ("IOSurfaceWidth", "sdk-doc-from-memory"),
+    "_kTISPropertyInputSourceID": ("TISPropertyInputSourceID", "sdk-doc-from-memory"),
+    "_kTISPropertyUnicodeKeyLayoutData": ("TISPropertyUnicodeKeyLayoutData", "sdk-doc-from-memory"),
+    "_kMIDIPropertyDisplayName": ("displayName", "sdk-doc-from-memory"),
+    "_kMIDIPropertyManufacturer": ("manufacturer", "sdk-doc-from-memory"),
+    "_kMIDIPropertyUniqueID": ("uniqueID", "sdk-doc-from-memory"),
+    "_kMIDIPropertyDriverVersion": ("driver version", "sdk-doc-from-memory"),
+    "_AVMediaTypeAudio": ("soun", "sdk-doc-from-memory"),
+    "_AVMediaTypeVideo": ("vide", "sdk-doc-from-memory"),
+    "_AVMediaTypeMuxed": ("muxx", "sdk-doc-from-memory"),
+    "_AVVideoCodecTypeJPEG": ("jpeg", "sdk-doc-from-memory"),
+    "_UTTagClassFilenameExtension": ("public.filename-extension", "sdk-doc-from-memory"),
+    "_UTTagClassMIMEType": ("public.mime-type", "sdk-doc-from-memory"),
+    "_UNNotificationDefaultActionIdentifier": ("com.apple.UNNotificationDefaultActionIdentifier", "sdk-doc-from-memory"),
+    "_UNNotificationDismissActionIdentifier": ("com.apple.UNNotificationDismissActionIdentifier", "sdk-doc-from-memory"),
+    "_ASAuthorizationErrorDomain": ("com.apple.AuthenticationServices.AuthorizationError", "sdk-doc-from-memory"),
+    "_ASWebAuthenticationSessionErrorDomain": ("com.apple.AuthenticationServices.WebAuthenticationSession", "sdk-doc-from-memory"),
+    "_NSAccessibilityTabButtonSubrole": ("AXTabButton", "sdk-doc-from-memory"),
+    "_kSecAttrAccount": ("acct", "sdk-doc-from-memory"),
+    "_kSecAttrApplicationTag": ("atag", "sdk-doc-from-memory"),
+    "_kSecAttrKeyType": ("type", "sdk-doc-from-memory"),
+    "_kSecAttrType": ("type", "sdk-doc-from-memory"),
+    "_kSecAttrLabel": ("labl", "sdk-doc-from-memory"),
+    "_kSecAttrTokenID": ("tkid", "sdk-doc-from-memory"),
+    "_kSecAttrAccessibleWhenUnlockedThisDeviceOnly": ("aku", "sdk-doc-from-memory"),
+    "_kSecClassCertificate": ("cert", "sdk-doc-from-memory"),
+    "_kSecMatchLimitAll": ("m_LimitAll", "sdk-doc-from-memory"),
+    "_kSecPrivateKeyAttrs": ("private", "sdk-doc-from-memory"),
+    "_kSecReturnAttributes": ("r_Attributes", "sdk-doc-from-memory"),
+    "_kSecReturnData": ("r_Data", "sdk-doc-from-memory"),
+    "_kSecValueData": ("v_Data", "sdk-doc-from-memory"),
+    "_kSecCodeInfoCertificates": ("certificates", "sdk-doc-from-memory"),
+    "_kSecKeyAlgorithmECDSASignatureDigestX962SHA1": ("algid:sign:ECDSA:digest-X962:SHA1", "sdk-doc-from-memory"),
+    "_kSecKeyAlgorithmECDSASignatureMessageX962SHA256": ("algid:sign:ECDSA:message-X962:SHA256", "sdk-doc-from-memory"),
+    "_kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512": ("algid:sign:RSA:digest-PKCS1v15:SHA512", "sdk-doc-from-memory"),
+    "_kSecKeyAlgorithmRSASignatureDigestPSSSHA384": ("algid:sign:RSA:digest-PSS:SHA384:SHA384", "sdk-doc-from-memory"),
+}
 
 
 def is_string_const(name):
     return bool(STRING_CONST.match(name)) and not NOT_STRING.search(name)
 
 
+def string_value(name):
+    """text of the CFString a string constant points to"""
+    return STRING_VALUES[name][0] if name in STRING_VALUES else name[1:]
+
+
+def string_source(name):
+    """where the text of a string constant comes from"""
+    return STRING_VALUES[name][1] if name in STRING_VALUES else "symbol-name"
+
+
+# Images no stub generator rewrites (they have their own generator or are real system libraries);
+# rebuild-stub-data.py skips them, so the caller passes the whole stub list.
+EXCLUDE_IMAGES = re.compile(
+    r"(/usr/lib/(suppl|cg-supl|SystemConfigurationExtras)\.dylib$"
+    r"|/OpenDirectory\.framework/|/usr/lib/system/)")
+
+
+def is_excluded_image(path):
+    return bool(EXCLUDE_IMAGES.search(path))
+
+
+# Data names the injected image (darling-extras.dylib) must not export: the framework that owns the
+# constant is a stand-in of its own (OpenDirectory) and exports it first-class; the injected image comes
+# first in the flat lookup order and its zero object would hide that one. Data counterpart of
+# SHADOW_FROM in rebuild-stub-data.py.
+INJECTED_DATA_SHADOW = re.compile(
+    r"^_k(ODAttributeType(AllAttributes|AltSecurityIdentities|MetaRecordName|RecordName)|ODRecordTypeUsers)$")
+
+
+def is_injected_data_shadow(name):
+    return bool(INJECTED_DATA_SHADOW.match(name))
+
+
 def data_asm(name, size=DATA_SIZE, strings=False):
     """Assembly for one exported data object: zero filled, or for a string constant a pointer to a
-    constant CFString (text = the name without its underscore). The CFString isa is
+    constant CFString (text = string_value(name)). The CFString isa is
     ___CFConstantStringClassReference; the image must be linked against CF_INSTALL (-needed_library)
     so the isa is a two-level bind (strings=True); anything else keeps zero filled objects."""
     if strings and is_string_const(name):
         lab = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        text = string_value(name)
         return [".section __TEXT,__cstring,cstring_literals", "L_s_%s:" % lab,
-                '    .asciz "%s"' % name[1:],
+                '    .asciz "%s"' % text,
                 ".section __DATA,__cfstring", ".p2align 3", "L_cf_%s:" % lab,
                 "    .quad ___CFConstantStringClassReference", "    .long 0x7c8", "    .long 0",
-                "    .quad L_s_%s" % lab, "    .quad %d" % (len(name) - 1),
+                "    .quad L_s_%s" % lab, "    .quad %d" % len(text),
                 ".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":",
                 "    .quad L_cf_%s" % lab, ".space %d, 0" % (size - 8)]
     return [".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":",

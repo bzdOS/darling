@@ -115,9 +115,25 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--data-list")
     ap.add_argument("--install", action="store_true")
+    ap.add_argument("--chrome-providers", metavar="CHROME_ROOT",
+                    help="also rebuild the stub images that provide a string constant the Chrome images under "
+                         "CHROME_ROOT import as a zero object (data-only stubs are not in the stub list)")
     ap.add_argument("images", nargs="+")
     a = ap.parse_args()
     ov = a.overlay.rstrip("/")
+    if a.chrome_providers:
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(__file__))
+        sp = importlib.util.spec_from_file_location("dsc", os.path.join(here, "data-shadow-census.py"))
+        dsc = importlib.util.module_from_spec(sp)
+        sp.loader.exec_module(dsc)
+        have = {os.path.realpath(i if os.path.isabs(i) else os.path.join(ov, i)) for i in a.images}
+        for sym, prov, typ, who in dsc.chrome_imports(ov, a.chrome_providers, None):
+            p = os.path.join(ov, prov)
+            # stub sized images only: a real framework is never rewritten
+            if typ == "string" and os.path.realpath(p) not in have and os.path.getsize(p) <= 256 * 1024:
+                have.add(os.path.realpath(p))
+                a.images.append(p)
     datalist = set()
     if a.data_list and os.path.exists(a.data_list):
         datalist = {l.strip() for l in open(a.data_list) if l.strip()}
@@ -132,6 +148,8 @@ def main():
     rebuilt = 0
     for img in a.images:
         path = img if os.path.isabs(img) else os.path.join(ov, img)
+        if R.is_excluded_image(path):
+            continue
         ex = exports(path)
         info = load_info(path)
         provs = list(closure)
@@ -174,6 +192,10 @@ def main():
             shadow = sorted(n for n in funcs + datas if n in real)
             funcs = [n for n in funcs if n not in real]
             datas = [n for n in datas if n not in real]
+            # data names another stand-in owns (stub_data_rules.INJECTED_DATA_SHADOW)
+            dshadow = sorted(n for n in datas if R.is_injected_data_shadow(n))
+            datas = [n for n in datas if n not in dshadow]
+            shadow = sorted(set(shadow) | set(dshadow))
         if behaviors:
             defined = set()
             for bo in behaviors:
