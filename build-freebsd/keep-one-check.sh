@@ -3,8 +3,15 @@
 # usage: keep-one-check.sh           prints exactly one line: KEEP-ONE verdict=pass|fail <details>; exit 1 on fail
 #        keep-one-check.sh --clean-sockets  removes only stale /tmp/darling-mldr-<pid>-<fd> sockets (dead pid, >30 min); prints KEEP-ONE sockets removed=N kept_live=M
 #        keep-one-check.sh --list    prints the candidate paths (one per line); still deletes nothing
+#        keep-one-check.sh --apply   deletes exactly the paths --list prints, then prints the verdict again. Only paths whose
+#                                    realpath is inside <root>/build or <root>/backup; any other path: refuse, delete nothing, rc 4.
+#                                    Skipped (rc 3, "KEEP-ONE apply skipped: ...") while <root>/build/.darling-run.lock is held
+#                                    or a darlingserver/mldr process is alive. rc 2 on bad usage.
 # Env: KEEPONE_ROOT (default: parent of DARLING_BUILD_DIR; one of the two is required)  KEEPONE_MAX_GB (default 14)
 #      KEEPONE_ALLOW  extra build/ dir names (space separated globs) that are not experiment dirs
+#      KEEPONE_ALLOW_FILES  extra top-level build/ file globs never candidates; a glob matching suspend-<kind>-<stamp>.log or .dump
+#                           (e.g. suspend-cv-1117-133903.*) protects that pair and it does not count toward the limit below
+#      KEEPONE_SUSPEND_KEEP (default 3)  newest complete log+dump pairs kept per suspend-(rwlock|mutex|cv) kind; older ones are candidates
 # Checks:
 #  1. build/ top-level *.log *.png *.core core.* chrome-sr-* series-*.out *-series.out only from the latest two
 #     series (series = a series-<p>.out or <p>-series.out file, newest first by mtime; a chrome-sr-* file belongs
@@ -20,6 +27,15 @@ ROOT="${KEEPONE_ROOT:-$(dirname "${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR or K
 FOREIGN="${KEEPONE_FOREIGN:-alt2-r}"; AGE="${KEEPONE_MIN_AGE_MIN:-120}"
 MODE=check; [ "$1" = "--list" ] && MODE=list
 [ "$1" = "--clean-sockets" ] && MODE=clean
+[ "$1" = "--apply" ] && MODE=apply
+SKEEP="${KEEPONE_SUSPEND_KEEP:-3}"
+# --apply runs itself once under the run lock (lockf -t 0 as the series scripts do); lockf rc 73/75 = lock not available
+if [ $MODE = apply ] && [ -z "$KEEPONE_LOCKED" ]; then
+	[ -d "$B" ] || { echo "KEEP-ONE apply skipped: no $B"; exit 3; }
+	KEEPONE_LOCKED=1 lockf -t 0 "$B/.darling-run.lock" sh "$0" --apply; _rc=$?
+	case $_rc in 73|75) echo "KEEP-ONE apply skipped: $B/.darling-run.lock is held (a series is running)"; exit 3;; esac
+	exit $_rc
+fi
 # stale mldr RPC sockets: /tmp/darling-mldr-<pid>-<fd>, a socket, pid dead, older than 30 min (every condition re-checked per entry)
 stale_sock() { # $1 = path
 	[ -S "$1" ] || return 1
@@ -48,7 +64,8 @@ KEEP_INFRA="CMakeFiles Developer -I i386 x86_64 x86_64-apple-darwin20 dtape cg-s
 KEEP_PROBE="imageio imageio-probe suspend-rwlock-probe suspend-mutex-probe suspend-cv-probe suspend-wake-probe* window-draw* netsegv nullsrc unwind-resume v5store catx-kvc-probe eintr-prepost-probe psynch-ring-probe ptattach-probe semtw-probe port-construct-probe font-families-probe font-resolve-probe syscall482-probe throw-trace-selftest"
 KEEP_DIRS="$KEEP_SRC $KEEP_OUT $KEEP_INFRA $KEEP_PROBE $KEEPONE_ALLOW"
 # top-level build/ files that are never candidates: gate/probe output and the series fix20a, fix20, fix21, fix22
-KEEP_FILES="suspend-*.log suspend-*.dump window-draw* imageio-probe.log series-fix20*.out series-fix21*.out series-fix22*.out chrome-sr-fix20* chrome-sr-fix21* chrome-sr-fix22* $KEEPONE_ALLOW_FILES"
+# (suspend-(rwlock|mutex|cv)-* pairs are limited to the newest KEEPONE_SUSPEND_KEEP per kind, see section 1b)
+KEEP_FILES="window-draw* imageio-probe.log series-fix20*.out series-fix21*.out series-fix22*.out chrome-sr-fix20* chrome-sr-fix21* chrome-sr-fix22* $KEEPONE_ALLOW_FILES"
 # backup/ entries that are rollback points (named so in the handoff notes) or not yet understood; never candidates
 KEEP_BACKUPS="ImageIO ImageIO.pre-r5 ImageIO.real-r5.* stub-data-ImageIO.pre-r5 AppKitExtras.dylib.pre-b4-fontfamilies AppKitExtras.pre-resize darlingserver.pre-q1.* darlingserver.pre-b6.* darlingserver.pre-d2.* darlingserver.pre-d5.* darlingserver.pre-f1.* libdtape.a.pre-q1 libdtape.a.pre-b6 libdtape.a.pre-d5 stubdata-pre-b5 darling-extras.dylib.pre-ctresolve libsystem_kernel.pre-statfs-deploy.* $KEEPONE_ALLOW_BACKUPS"
 
@@ -88,12 +105,31 @@ if [ -d "$B" ]; then
 		chrome-sr-*) o=$(owner "$f");;
 		*) o="";;
 		esac
+		case "$f" in suspend-*) continue;; esac	# suspend-(rwlock|mutex|cv) handled in 1b, other suspend-* (wake probe) protected
 		[ -n "$FOREIGN" ] && case "$f" in *"$FOREIGN"*) continue;; esac
 		_k=0; set -f; for g in $KEEP_FILES; do case "$f" in $g) _k=1; break;; esac; done; set +f; [ $_k = 1 ] && continue
 		[ -n "$(find "$B/$f" -mmin -"$AGE" 2>/dev/null)" ] && continue
 		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
 		if [ -n "$o" ] && { [ "$o" = "$KEEP1" ] || [ "$o" = "$KEEP2" ]; }; then continue; fi
 		printf '%s\tlog\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
+	done >>"$T"
+fi
+
+# ---- 1b. suspend-(rwlock|mutex|cv) log+dump pairs: keep the newest $SKEEP complete pairs per kind (by stamp in the name) ----
+if [ -d "$B" ]; then
+	for k in rwlock mutex cv; do
+		_n=0
+		for st in $(cd "$B" && ls -p | grep -E "^suspend-$k-[0-9]+-[0-9]+\.(log|dump)\$" | sed -E 's/\.(log|dump)$//' | sort -ur); do
+			_k=0; set -f; for g in $KEEP_FILES; do case "$st.log" in $g) _k=1;; esac; case "$st.dump" in $g) _k=1;; esac; done; set +f
+			[ $_k = 1 ] && continue
+			if [ -f "$B/$st.log" ] && [ -f "$B/$st.dump" ]; then _n=$((_n+1)); [ $_n -le "$SKEEP" ] && continue; fi
+			for e in log dump; do
+				f=$st.$e; [ -f "$B/$f" ] || continue
+				[ -n "$(find "$B/$f" -mmin -"$AGE" 2>/dev/null)" ] && continue
+				case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
+				printf '%s\tlog\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
+			done
+		done
 	done >>"$T"
 fi
 
@@ -119,6 +155,32 @@ if [ -d "$BK" ]; then
 fi
 
 if [ "$MODE" = list ]; then cut -f3 "$T"; exit 0; fi
+
+# ---- --apply: delete exactly what --list prints, nothing outside <root>/build and <root>/backup ----
+if [ "$MODE" = apply ]; then
+	for _p in darlingserver mldr; do
+		pgrep -x "$_p" >/dev/null 2>&1 && { echo "KEEP-ONE apply skipped: live process $_p"; exit 3; }
+	done
+	RB=$(realpath "$B" 2>/dev/null); RK=$(realpath "$BK" 2>/dev/null)
+	bad=0
+	while IFS="$(printf '\t')" read -r _sz _ty _path; do
+		_rp=$(realpath "$_path" 2>/dev/null)
+		case "$_rp" in
+		""|"$RB"|"$RK") bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path (realpath '${_rp}')" >&2;;
+		"$RB"/*|"$RK"/*) ;;
+		*) bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, outside $RB and $RK" >&2;;
+		esac
+	done <"$T"
+	if [ $bad -gt 0 ]; then echo "KEEP-ONE apply refused: $bad path(s) outside allowed prefixes, nothing deleted"; exit 4; fi
+	fail=0; n=0
+	while IFS="$(printf '\t')" read -r _sz _ty _path; do
+		rm -rf "$_path" 2>/dev/null || sudo -n rm -rf "$_path" 2>/dev/null
+		if [ -e "$_path" ] || [ -L "$_path" ]; then fail=$((fail+1)); echo "KEEP-ONE apply failed: $_path" >&2; else n=$((n+1)); echo "removed $_path"; fi
+	done <"$T"
+	echo "KEEP-ONE apply removed=$n failed=$fail"
+	KEEPONE_LOCKED= sh "$0" || true
+	[ $fail = 0 ]; exit $?
+fi
 
 # ---- 4. total size ----
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
