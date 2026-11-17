@@ -1,0 +1,6 @@
+# --- SUSPEND-RWLOCK fragment for stage-gate.sh (not wired in): paste after the EINTR-PREPOST block. Needs the darlingserver
+# with the psynch ring. Prints "SUSPEND-RWLOCK confirmed=y|n iters=N eintr=E retry_same_seq=R invariant_broken=I hung=y|n": a reader
+# thread_suspend()ed while blocked in psynch_rw_rdlock must retry the interrupted call, never take the lock early and never hang, so
+# the gate passes only for confirmed=n, invariant_broken=0 and hung=n. Skipped when the run lock is busy; RUN-INVALID is not a failure.
+[ "${STAGE_GATE_SUSPEND_RWLOCK_RUN:-0}" = 1 ] && { _s=$(sh "$HERE/probes/suspend-rwlock-build.sh" >/dev/null 2>&1; if [ -n "$DARLING_LOCK_HELD" ]; then DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/suspend-rwlock-run.sh" 2>/dev/null
+	else lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" env DARLING_LOCK_HELD=1 DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/suspend-rwlock-run.sh" 2>/dev/null; [ $? -eq 75 ] && echo "SUSPEND-RWLOCK skipped lock-busy"; fi | grep -a "^SUSPEND-RWLOCK\|^RUN-INVALID" | tail -1); echo "${_s:-SUSPEND-RWLOCK fail no-verdict}"; case "$_s" in *" confirmed=n "*" invariant_broken=0 hung=n"*|*"skipped"*|RUN-INVALID*) ;; *) echo "STAGECHK FAIL suspend-rwlock=FAIL"; exit 1;; esac; }
