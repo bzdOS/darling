@@ -3,6 +3,7 @@
  * DYLD_INSERT_LIBRARIES; it only does anything when DARLING_THROW_TRACE is set in the environment. Lines on stderr:
  *   THROW-TRACE objc class=<C> name=<N> reason=<R> ret=0x<addr>
  *   THROW-TRACE cxx type=<mangled> ret=0x<addr>
+ *   THROW-TRACE unwind ret=0x<addr>   (every _Unwind_RaiseException caller, incl. statically linked libc++abi)
  * Built by throw-trace-hook.sh. */
 #include <stdlib.h>
 #include <string.h>
@@ -57,8 +58,20 @@ static void my_cxa_throw(void *obj, void *tinfo, void (*dtor)(void *))
 	__cxa_throw(obj, tinfo, dtor);
 	__builtin_unreachable();
 }
+extern int _Unwind_RaiseException(void *);
+/* Chrome statically links libc++abi, so its own C++ throws never bind __cxa_throw; they do import _Unwind_RaiseException. */
+static int my_unwind_raise(void *exc)
+{
+	if (on()) {
+		char buf[120];
+		int n = snprintf(buf, sizeof buf, "THROW-TRACE unwind ret=%p\n", __builtin_return_address(0));
+		if (n > 0) write(2, buf, n < (int)sizeof buf ? n : (int)sizeof buf - 1);
+	}
+	return _Unwind_RaiseException(exc);
+}
 struct interpose { void *replacement, *replacee; };
 __attribute__((used, section("__DATA,__interpose"))) static struct interpose interposers[] = {
 	{ (void *)my_objc_throw, (void *)objc_exception_throw },
 	{ (void *)my_cxa_throw, (void *)__cxa_throw },
+	{ (void *)my_unwind_raise, (void *)_Unwind_RaiseException },
 };
