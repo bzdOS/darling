@@ -66,6 +66,10 @@ gate_probe() { # name script
 # STAGE_GATE_SURVIVE_RUN=1 also runs the darlingserver survival probe (DSERVER-SURVIVE-VERDICT: malformed requests and a client killed
 # mid-call must not take the server down; about 75 s, so off by default); needs tests/dserver-survive-probe-macho.
 [ "${STAGE_GATE_SURVIVE_RUN:-0}" = 1 ] && gate_probe DSERVER-SURVIVE run-dserver-survive-probe.sh
+# STAGE_GATE_SUSPEND_RUN=1 also runs the suspend/resume lost-wakeup probe (SUSPEND-WAKE-VERDICT pass|fail n= stalls= starved=: a thread is
+# suspended/resumed while it waits on a Mach semaphore; fail = a wakeup never arrives, even with the suspender stopped; up to
+# ~2 min, so off by default); needs tests/suspend-wake-probe-macho (build-suspend-wake-probe.sh).
+[ "${STAGE_GATE_SUSPEND_RUN:-0}" = 1 ] && gate_probe SUSPEND-WAKE run-suspend-wake-probe.sh
 # STAGE_GATE_WINDOW_RUN=1 also runs the window draw probe (WINDOW-DRAW-VERDICT line: an NSWindow with a red background must
 # map in an own headless sway and show that colour in a grim snapshot; own sway and darlingserver, off by default).
 if [ "${STAGE_GATE_WINDOW_RUN:-0}" = 1 ]; then
