@@ -1,0 +1,412 @@
+diff --git a/duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h b/duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h
+new file mode 100644
+index 0000000..53fea7b
+--- /dev/null
++++ b/duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h
+@@ -0,0 +1,73 @@
++#ifndef _DARLINGSERVER_DUCT_TAPE_PSYNCH_RING_H_
++#define _DARLINGSERVER_DUCT_TAPE_PSYNCH_RING_H_
++
++// In-memory ring of psynch (pthread mutex / cond / rwlock) and thread suspend/resume events.
++// Off by default; the server enables it with DSERVER_PSYNCH_RING=1 (DSERVER_PSYNCH_RING_SIZE=<entries>,
++// default 4096). Nothing is logged: the buffer is read out of the live process (ds_microthreads_dump.py,
++// section "psynch ring"). When off the cost of a hook is one load and one branch.
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// one entry is exactly 128 bytes, little endian; seq is written last, 0 means empty slot
++struct dtape_psynch_ring_ent {
++	uint64_t seq;       //   0: 1-based global event number
++	uint64_t ts;        //   8: mach_absolute_time() (ns)
++	uint64_t uaddr;     //  16: user address of the lock / cv (0 for thread events)
++	uint32_t tid;       //  24: caller (guest thread id)
++	uint16_t op;        //  28: DTAPE_PSR_OP_*
++	uint16_t res;       //  30: DTAPE_PSR_RES_*
++	uint32_t l0, u0, s0; //  32: kwq lword/uword/sword before
++	uint32_t l1, u1, s1; //  44: kwq lword/uword/sword after
++	uint32_t arg0, arg1; //  56: op specific (see below)
++	uint16_t type;      //  64: kwq type (1 mutex, 2 cond, 4 rwlock), 0 for thread events
++	uint8_t qr, qw;     //  66: waiters in the read / write queue (saturating)
++	uint16_t nwake, nskip; // 68: threads woken / found no longer waiting (full counts)
++	uint32_t wake[6];   //  72: first woken guest thread ids
++	uint32_t skip[6];   //  96: first skipped guest thread ids
++	uint64_t aux;       // 120: op specific
++};
++
++// arg0/arg1/aux per op:
++//  RD_LOCK WR_LOCK RW_UNLOCK: arg0=lgenval arg1=ugenval aux=rw_wc | flags<<32
++//  RW_HANDLE_UNLOCK: arg0=rwtype arg1=flags aux=rw_wc | updatebits<<32
++//  MTX_WAIT MTX_DROP: arg0=mgen arg1=ugen aux=tid hint (wait) / returnbits (drop)
++//  CV_WAIT: arg0=cgen arg1=cugen aux=mgen|mugen<<32 ; CV_SIGNAL/CV_BROAD: arg0=cgen arg1=cugen aux=csgen|updatebits<<32
++//  *_CONT (a waiter coming back): arg0=errno arg1=return value
++//  THREAD_SUSPEND/THREAD_RESUME (thread_suspend/thread_resume): tid=caller arg0=target arg1=user_stop_count after
++//     aux=suspend_count after | result code<<32
++//  THREAD_PARK (suspend hook, before Thread::suspend): tid=thread arg0=1 if a continuation is used; the call may still
++//     absorb an earlier resume and return without parking
++//  THREAD_UNPARK (resume hook, before Thread::resume): tid=caller arg0=target
++enum {
++	DTAPE_PSR_OP_RD_LOCK = 1, DTAPE_PSR_OP_WR_LOCK, DTAPE_PSR_OP_RW_UNLOCK, DTAPE_PSR_OP_RW_HANDLE_UNLOCK,
++	DTAPE_PSR_OP_RD_CONT, DTAPE_PSR_OP_WR_CONT, DTAPE_PSR_OP_MTX_WAIT, DTAPE_PSR_OP_MTX_DROP, DTAPE_PSR_OP_MTX_CONT,
++	DTAPE_PSR_OP_CV_WAIT, DTAPE_PSR_OP_CV_SIGNAL, DTAPE_PSR_OP_CV_BROAD, DTAPE_PSR_OP_CV_CONT,
++	DTAPE_PSR_OP_THREAD_SUSPEND, DTAPE_PSR_OP_THREAD_RESUME, DTAPE_PSR_OP_THREAD_PARK, DTAPE_PSR_OP_THREAD_UNPARK,
++};
++enum {
++	DTAPE_PSR_RES_WAIT = 1, // caller is about to block
++	DTAPE_PSR_RES_GRANTED,  // call returned without blocking
++	DTAPE_PSR_RES_WOKEN,    // waiter returned after a wakeup
++	DTAPE_PSR_RES_DONE,     // unlock / drop / signal completed
++	DTAPE_PSR_RES_ERROR,    // waiter returned with an error (interrupt, timeout)
++	DTAPE_PSR_RES_PREPOST,  // unlock recorded as a prepost, nobody woken
++	DTAPE_PSR_RES_SPURIOUS, // unlock ignored: older than the last unlock
++};
++
++extern int dtape_psynch_ring_on;
++
++// mem must hold n entries (zeroed); n is rounded down to a power of two by the caller
++void dtape_psynch_ring_attach(struct dtape_psynch_ring_ent* mem, uint32_t n);
++void dtape_psynch_ring_rec(const struct dtape_psynch_ring_ent* e);
++// simple form for events without kwq state
++void dtape_psynch_ring_note(uint16_t op, uint16_t res, uint32_t tid, uint32_t arg0, uint32_t arg1, uint64_t aux);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // _DARLINGSERVER_DUCT_TAPE_PSYNCH_RING_H_
+diff --git a/duct-tape/pthread/kern_synch.c b/duct-tape/pthread/kern_synch.c
+index aa2b6d3..13ca856 100644
+--- a/duct-tape/pthread/kern_synch.c
++++ b/duct-tape/pthread/kern_synch.c
+@@ -39,2 +39,3 @@
+ #include <darlingserver/duct-tape/log.h>
++#include <darlingserver/duct-tape/psynch-ring.h>
+ #endif // __DARLING__
+@@ -192,2 +193,62 @@ typedef struct ksyn_wait_queue * ksyn_wait_queue_t;
+ 
++/* ---- psynch ring hooks (darlingserver/duct-tape/psynch-ring.h); each is one branch when the ring is off ---- */
++#define PSR_ON() __builtin_expect(dtape_psynch_ring_on != 0, 0)
++
++struct psr_st { uint32_t l, u, s; };
++struct psr_acc { uint16_t nwake, nskip; uint32_t wake[6], skip[6]; };
++static __thread struct psr_acc psr_acc;
++
++static inline void
++psr_snap(ksyn_wait_queue_t kwq, struct psr_st *st)
++{
++	st->l = kwq->kw_lword;
++	st->u = kwq->kw_uword;
++	st->s = kwq->kw_sword;
++}
++
++static inline void
++psr_acc_reset(void)
++{
++	__builtin_memset(&psr_acc, 0, sizeof(psr_acc));
++}
++
++static void
++psr_acc_add(uint64_t tid, int woken)
++{
++	if (woken) {
++		if (psr_acc.nwake < 6) psr_acc.wake[psr_acc.nwake] = (uint32_t)tid;
++		psr_acc.nwake++;
++	} else {
++		if (psr_acc.nskip < 6) psr_acc.skip[psr_acc.nskip] = (uint32_t)tid;
++		psr_acc.nskip++;
++	}
++}
++
++/* before == NULL: the state did not change (before = after). use_acc takes and clears the wakeup lists */
++static void
++psr_emit(int op, int res, ksyn_wait_queue_t kwq, const struct psr_st *before,
++		uint32_t a0, uint32_t a1, uint64_t aux, int use_acc)
++{
++	struct dtape_psynch_ring_ent e;
++	__builtin_memset(&e, 0, sizeof(e));
++	e.uaddr = kwq->kw_addr;
++	e.tid = (uint32_t)thread_tid(current_thread());
++	e.op = op;
++	e.res = res;
++	e.l1 = kwq->kw_lword; e.u1 = kwq->kw_uword; e.s1 = kwq->kw_sword;
++	e.l0 = before ? before->l : e.l1; e.u0 = before ? before->u : e.u1; e.s0 = before ? before->s : e.s1;
++	e.arg0 = a0; e.arg1 = a1; e.aux = aux;
++	e.type = kwq->kw_type & 0xff;
++	e.qr = kwq->kw_ksynqueues[KSYN_QUEUE_READ].ksynq_count > 255 ? 255 : kwq->kw_ksynqueues[KSYN_QUEUE_READ].ksynq_count;
++	e.qw = kwq->kw_ksynqueues[KSYN_QUEUE_WRITE].ksynq_count > 255 ? 255 : kwq->kw_ksynqueues[KSYN_QUEUE_WRITE].ksynq_count;
++	if (use_acc) {
++		e.nwake = psr_acc.nwake;
++		e.nskip = psr_acc.nskip;
++		__builtin_memcpy(e.wake, psr_acc.wake, sizeof(e.wake));
++		__builtin_memcpy(e.skip, psr_acc.skip, sizeof(e.skip));
++		psr_acc_reset();
++	}
++	dtape_psynch_ring_rec(&e);
++}
++
+ #define TID_ZERO (uint64_t)0
+@@ -559,4 +620,9 @@ _psynch_mutexdrop_internal(ksyn_wait_queue_t kwq, uint32_t mgen, uint32_t ugen,
+ 	thread_t old_owner = THREAD_NULL;
++	struct psr_st psr_b = { 0, 0, 0 };
+ 
+ 	ksyn_wqlock(kwq);
++	if (PSR_ON()) {
++		psr_snap(kwq, &psr_b);
++		psr_acc_reset();
++	}
+ 	kwq->kw_lastunlockseq = (ugen & PTHRW_COUNT_MASK);
+@@ -646,2 +712,5 @@ redrive:
+ 
++	if (PSR_ON()) {
++		psr_emit(DTAPE_PSR_OP_MTX_DROP, DTAPE_PSR_RES_DONE, kwq, &psr_b, mgen, ugen, returnbits, 1);
++	}
+ 	ksyn_wqunlock(kwq);
+@@ -785,2 +854,5 @@ again:
+ 	assert(old_owner == THREAD_NULL);
++	if (PSR_ON()) {
++		psr_emit(DTAPE_PSR_OP_MTX_WAIT, DTAPE_PSR_RES_WAIT, kwq, NULL, mgen, ugen, tid, 0);
++	}
+ 	error = ksyn_wait(kwq, KSYN_QUEUE_WRITE, mgen, ins_flags, 0, 0,
+@@ -810,2 +882,5 @@ psynch_mtxcontinue(void *parameter, wait_result_t result)
+ 	int error = _wait_result_to_errno(result);
++	if (PSR_ON()) {
++		psr_emit(DTAPE_PSR_OP_MTX_CONT, error ? DTAPE_PSR_RES_ERROR : DTAPE_PSR_RES_WOKEN, kwq, NULL, error, kwe->kwe_psynchretval, 0, 0);
++	}
+ 	if (error != 0) {
+@@ -842,2 +917,6 @@ _psynch_rw_continue(ksyn_wait_queue_t kwq, kwq_queue_type_t kqi,
+ 	int error = _wait_result_to_errno(result);
++	if (PSR_ON()) {
++		psr_emit(kqi == KSYN_QUEUE_READ ? DTAPE_PSR_OP_RD_CONT : DTAPE_PSR_OP_WR_CONT,
++				error ? DTAPE_PSR_RES_ERROR : DTAPE_PSR_RES_WOKEN, kwq, NULL, error, kwe->kwe_psynchretval, 0, 0);
++	}
+ 	if (error != 0) {
+@@ -1051,3 +1130,9 @@ __psynch_cvsignal(user_addr_t cv, uint32_t cgen, uint32_t cugen,
+ 		
++		struct psr_st psr_b = { 0, 0, 0 };
++
+ 		ksyn_wqlock(kwq);
++		if (PSR_ON()) {
++			psr_snap(kwq, &psr_b);
++			psr_acc_reset();
++		}
+ 		
+@@ -1077,2 +1162,6 @@ __psynch_cvsignal(user_addr_t cv, uint32_t cgen, uint32_t cugen,
+ 
++		if (PSR_ON()) {
++			psr_emit(broadcast ? DTAPE_PSR_OP_CV_BROAD : DTAPE_PSR_OP_CV_SIGNAL, DTAPE_PSR_RES_DONE, kwq, &psr_b,
++					cgen, cugen, (uint64_t)csgen | ((uint64_t)updatebits << 32), 1);
++		}
+ 		PTHREAD_TRACE(psynch_cvar_signal | DBG_FUNC_END, kwq->kw_addr,
+@@ -1245,2 +1334,6 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
+ 		
++		if (PSR_ON()) {
++			psr_emit(DTAPE_PSR_OP_CV_WAIT, DTAPE_PSR_RES_WAIT, ckwq, NULL, cgen, cvugen,
++					(uint64_t)mgen | ((uint64_t)ugen << 32), 0);
++		}
+ 		error = ksyn_wait(ckwq, KSYN_QUEUE_WRITE, cgen, SEQFIT, abstime,
+@@ -1272,2 +1365,5 @@ psynch_cvcontinue(void *parameter, wait_result_t result)
+ 	int error = _wait_result_to_errno(result);
++	if (PSR_ON()) {
++		psr_emit(DTAPE_PSR_OP_CV_CONT, error ? DTAPE_PSR_RES_ERROR : DTAPE_PSR_RES_WOKEN, ckwq, NULL, error, kwe->kwe_psynchretval, 0, 0);
++	}
+ 	if (error != 0) {
+@@ -1399,2 +1495,6 @@ __psynch_rw_lock(int type, user_addr_t rwlock, uint32_t lgenval,
+ 	ksyn_wqlock(kwq);
++	struct psr_st psr_b = { 0, 0, 0 };
++	if (PSR_ON()) {
++		psr_snap(kwq, &psr_b);
++	}
+ 	_ksyn_check_init(kwq, lgenval);
+@@ -1405,2 +1505,6 @@ __psynch_rw_lock(int type, user_addr_t rwlock, uint32_t lgenval,
+ 			_kwq_handle_preposted_wakeup(kwq, prepost_type, lockseq, retval)) {
++		if (PSR_ON()) {
++			psr_emit(type == PTH_RW_TYPE_READ ? DTAPE_PSR_OP_RD_LOCK : DTAPE_PSR_OP_WR_LOCK, DTAPE_PSR_RES_GRANTED,
++					kwq, &psr_b, lgenval, ugenval, (uint64_t)rw_wc | ((uint64_t)(uint32_t)flags << 32), 0);
++		}
+ 		ksyn_wqunlock(kwq);
+@@ -1411,2 +1515,6 @@ __psynch_rw_lock(int type, user_addr_t rwlock, uint32_t lgenval,
+ 		kThreadWaitPThreadRWLockRead : kThreadWaitPThreadRWLockWrite;
++	if (PSR_ON()) {
++		psr_emit(type == PTH_RW_TYPE_READ ? DTAPE_PSR_OP_RD_LOCK : DTAPE_PSR_OP_WR_LOCK, DTAPE_PSR_RES_WAIT,
++				kwq, &psr_b, lgenval, ugenval, (uint64_t)rw_wc | ((uint64_t)(uint32_t)flags << 32), 0);
++	}
+ 	error = ksyn_wait(kwq, kqi, lgenval, SEQFIT, 0, 0, tc, block_hint);
+@@ -1478,2 +1586,4 @@ _psynch_rw_unlock(__unused proc_t p, user_addr_t rwlock, uint32_t lgenval,
+ 	int clearedkflags = 0;
++	int psr_res = DTAPE_PSR_RES_DONE;
++	struct psr_st psr_b = { 0, 0, 0 };
+ 
+@@ -1486,2 +1596,5 @@ _psynch_rw_unlock(__unused proc_t p, user_addr_t rwlock, uint32_t lgenval,
+ 	ksyn_wqlock(kwq);
++	if (PSR_ON()) {
++		psr_snap(kwq, &psr_b);
++	}
+ 	int isinit = _ksyn_check_init(kwq, lgenval);
+@@ -1492,2 +1605,3 @@ _psynch_rw_unlock(__unused proc_t p, user_addr_t rwlock, uint32_t lgenval,
+ 		error = 0;
++		psr_res = DTAPE_PSR_RES_SPURIOUS;
+ 		goto out;
+@@ -1532,2 +1646,6 @@ out:
+ 	
++	if (PSR_ON()) {
++		psr_emit(DTAPE_PSR_OP_RW_UNLOCK, psr_res, kwq, &psr_b, lgenval, ugenval,
++				(uint64_t)rw_wc | ((uint64_t)(uint32_t)flags << 32), 0);
++	}
+ 	ksyn_wqunlock(kwq);
+@@ -1546,2 +1664,3 @@ prepost:
+ 	error = 0;
++	psr_res = DTAPE_PSR_RES_PREPOST;
+ 	goto out;
+@@ -1990,3 +2109,7 @@ ksyn_signal(ksyn_wait_queue_t kwq, kwq_queue_type_t kqi,
+ 
++	uint64_t psr_tid = PSR_ON() ? thread_tid(kwe->kwe_thread) : 0;
+ 	ret = pthread_kern->psynch_wait_wakeup(kwq, kwe, tstore);
++	if (PSR_ON()) {
++		psr_acc_add(psr_tid, ret == KERN_SUCCESS);
++	}
+ 
+@@ -2143,3 +2266,8 @@ kwq_handle_unlock(ksyn_wait_queue_t kwq, __unused uint32_t mgen, uint32_t rw_wc,
+ 	int curthreturns = 0;
++	struct psr_st psr_b = { 0, 0, 0 };
+ 	
++	if (PSR_ON()) {
++		psr_snap(kwq, &psr_b);
++		psr_acc_reset();
++	}
+ 	if (prepost != 0) {
+@@ -2271,2 +2399,6 @@ kwq_handle_unlock(ksyn_wait_queue_t kwq, __unused uint32_t mgen, uint32_t rw_wc,
+ 	
++	if (PSR_ON()) {
++		psr_emit(DTAPE_PSR_OP_RW_HANDLE_UNLOCK, DTAPE_PSR_RES_DONE, kwq, &psr_b, rwtype, flags,
++				(uint64_t)rw_wc | ((uint64_t)updatebits << 32), 1);
++	}
+ 	if (updatep != NULL)
+diff --git a/duct-tape/src/psynch.c b/duct-tape/src/psynch.c
+index 748d083..84a434a 100644
+--- a/duct-tape/src/psynch.c
++++ b/duct-tape/src/psynch.c
+@@ -678 +678,43 @@ void dtape_psynch_thread_destroy(dtape_thread_t* thread) {
+ };
++
++// ---- psynch ring (see darlingserver/duct-tape/psynch-ring.h) -------------------------------------------------------
++
++#include <darlingserver/duct-tape/psynch-ring.h>
++
++int dtape_psynch_ring_on = 0;
++struct dtape_psynch_ring_ent* dtape_psynch_ring = NULL;
++uint32_t dtape_psynch_ring_size = 0;
++uint64_t dtape_psynch_ring_head = 0;
++
++void dtape_psynch_ring_attach(struct dtape_psynch_ring_ent* mem, uint32_t n) {
++	dtape_psynch_ring = mem;
++	dtape_psynch_ring_size = n;
++	__atomic_store_n(&dtape_psynch_ring_on, mem != NULL && n != 0, __ATOMIC_RELEASE);
++};
++
++void dtape_psynch_ring_rec(const struct dtape_psynch_ring_ent* e) {
++	if (!dtape_psynch_ring_on) {
++		return;
++	}
++	uint64_t n = __atomic_fetch_add(&dtape_psynch_ring_head, 1, __ATOMIC_RELAXED);
++	struct dtape_psynch_ring_ent* slot = &dtape_psynch_ring[n & (dtape_psynch_ring_size - 1)];
++	__atomic_store_n(&slot->seq, 0, __ATOMIC_RELAXED);
++	*slot = *e;
++	slot->ts = mach_absolute_time();
++	__atomic_store_n(&slot->seq, n + 1, __ATOMIC_RELEASE);
++};
++
++void dtape_psynch_ring_note(uint16_t op, uint16_t res, uint32_t tid, uint32_t arg0, uint32_t arg1, uint64_t aux) {
++	if (!dtape_psynch_ring_on) {
++		return;
++	}
++	struct dtape_psynch_ring_ent e;
++	__builtin_memset(&e, 0, sizeof(e));
++	e.tid = tid;
++	e.op = op;
++	e.res = res;
++	e.arg0 = arg0;
++	e.arg1 = arg1;
++	e.aux = aux;
++	dtape_psynch_ring_rec(&e);
++};
+diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+index 629a9af..3f5b9fa 100644
+--- a/duct-tape/src/thread.c
++++ b/duct-tape/src/thread.c
+@@ -19,2 +19,4 @@
+ 
++#include <darlingserver/duct-tape/psynch-ring.h>
++
+ #define LINUX_ENOSYS 38
+@@ -2005,2 +2007,6 @@ thread_suspend(thread_t thread)
+ 
++	if (dtape_psynch_ring_on) {
++		dtape_psynch_ring_note(DTAPE_PSR_OP_THREAD_SUSPEND, DTAPE_PSR_RES_DONE, (uint32_t)thread_tid(current_thread()),
++			(uint32_t)thread->thread_id, thread->user_stop_count, (uint64_t)(uint32_t)thread->suspend_count | ((uint64_t)(uint32_t)result << 32));
++	}
+ 	thread_mtx_unlock(thread);
+@@ -2037,2 +2043,6 @@ thread_resume(thread_t thread)
+ 
++	if (dtape_psynch_ring_on) {
++		dtape_psynch_ring_note(DTAPE_PSR_OP_THREAD_RESUME, DTAPE_PSR_RES_DONE, (uint32_t)thread_tid(current_thread()),
++			(uint32_t)thread->thread_id, thread->user_stop_count, (uint64_t)(uint32_t)thread->suspend_count | ((uint64_t)(uint32_t)result << 32));
++	}
+ 	thread_mtx_unlock(thread);
+diff --git a/src/server.cpp b/src/server.cpp
+index a646422..5165920 100644
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -44,2 +44,36 @@ static DarlingServer::Server* sharedInstancePointer = nullptr;
+ 
++// psynch ring (duct-tape/src/psynch.c): off unless DSERVER_PSYNCH_RING is set
++extern "C" {
++	extern int dtape_psynch_ring_on;
++	void dtape_psynch_ring_attach(void* mem, uint32_t n);
++	void dtape_psynch_ring_note(uint16_t op, uint16_t res, uint32_t tid, uint32_t arg0, uint32_t arg1, uint64_t aux);
++}
++enum { PSR_OP_THREAD_PARK = 16, PSR_OP_THREAD_UNPARK = 17, PSR_RES_WAIT = 1, PSR_RES_DONE = 4 };
++
++static const bool dsPsynchRingInit = [] {
++	const char* on = getenv("DSERVER_PSYNCH_RING");
++	if (!on || !*on || *on == '0') {
++		return false;
++	}
++	unsigned long n = 4096;
++	if (const char* sz = getenv("DSERVER_PSYNCH_RING_SIZE")) {
++		n = strtoul(sz, nullptr, 0);
++	}
++	if (n < 16) {
++		n = 16;
++	}
++	if (n > (1ul << 22)) {
++		n = (1ul << 22);
++	}
++	while (n & (n - 1)) {
++		n &= n - 1;
++	}
++	// 128 bytes per entry (see duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h); never freed
++	void* mem = calloc(n, 128);
++	if (mem) {
++		dtape_psynch_ring_attach(mem, (uint32_t)n);
++	}
++	return mem != nullptr;
++}();
++
+ struct DTapeHooks {
+@@ -53,2 +87,6 @@ struct DTapeHooks {
+ 		}
++		if (dtape_psynch_ring_on) {
++			// the thread is about to park (Thread::suspend may still absorb an earlier resume)
++			dtape_psynch_ring_note(PSR_OP_THREAD_PARK, PSR_RES_WAIT, static_cast<DarlingServer::Thread*>(thread_context)->_nstid, continuationCallback ? 1 : 0, 0, 0);
++		}
+ 		if (continuationCallback) {
+@@ -63,2 +101,6 @@ struct DTapeHooks {
+ 	static void dtape_hook_thread_resume(void* thread_context) {
++		if (dtape_psynch_ring_on) {
++			auto rcur = DarlingServer::Thread::currentThread();
++			dtape_psynch_ring_note(PSR_OP_THREAD_UNPARK, PSR_RES_DONE, rcur ? rcur->_nstid : 0, static_cast<DarlingServer::Thread*>(thread_context)->_nstid, 0, 0);
++		}
+ 		static_cast<DarlingServer::Thread*>(thread_context)->resume();
