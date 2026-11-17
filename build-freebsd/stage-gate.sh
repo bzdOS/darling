@@ -76,6 +76,8 @@ gate_probe() { # name script
 [ "${STAGE_GATE_MLDRSOCK_RUN:-1}" = 1 ] && gate_probe MLDR-SOCKET-LEAK mldr-socket-leak-test.sh
 # SYSCALL482: thread_selfusage (BSD 482) implemented (SYSCALL482-VERDICT); default 0 until libsystem_kernel with it is deployed.
 [ "${STAGE_GATE_SYSCALL482_RUN:-0}" = 1 ] && gate_probe SYSCALL482 syscall482-probe.sh
+# PORT-CONSTRUCT: mach_port_construct always gets a reply (PORT-CONSTRUCT-VERDICT); default 0 (diagnostic for the Chrome pre-window stall).
+[ "${STAGE_GATE_PORTCONSTRUCT_RUN:-0}" = 1 ] && gate_probe PORT-CONSTRUCT port-construct-probe.sh
 # STAGE_GATE_SUSPEND_RUN=1 also runs the suspend/resume lost-wakeup probe (SUSPEND-WAKE-VERDICT pass|fail n= stalls= starved=: a thread is
 # suspended/resumed while it waits on a Mach semaphore; fail = a wakeup never arrives, even with the suspender stopped; up to
 # ~2 min, so off by default); needs tests/suspend-wake-probe-macho (build-suspend-wake-probe.sh).
