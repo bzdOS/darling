@@ -3,16 +3,24 @@
 # backend, run like the Chrome series runs (own headless sway in a private 0700 XDG_RUNTIME_DIR, launch-dynamic under
 # sudo, DARLING_GUEST_EXPOSE). After SNAP seconds: swaymsg get_tree (own socket) for a mapped view, grim snapshot,
 # pixel colour at the centre of the window buffer (view origin + 200,150). Needs DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR. Env: WAIT (default 40),
-# SNAP (default 12), WINDOW_DRAW_ALERT=1 (show a modal NSAlert instead; the colour check then fails by design), WL_DEBUG=1 (WAYLAND_DEBUG=1 in the guest; the log is capped at 50 MB).
+# SNAP (default 12), WD_MODE=plain|alert (default both: red NSWindow, then modal NSAlert panel, white at 20,20), WL_DEBUG=1 (WAYLAND_DEBUG=1 in the guest; the log is capped at 50 MB).
 # Output: WINDOW-DRAW-VERDICT pass|fail mapped=<y|n> color=<rgb> expected=255,0,0 ; rc 0 on pass.
-V=WINDOW-DRAW-VERDICT; EXP=255,0,0
-fail() { echo "$V fail mapped=${2:-n} color=${3:-none} expected=$EXP [$1]"; exit 1; }
+V=WINDOW-DRAW-VERDICT; EXP=255,0,0; MODE=${WD_MODE:-plain}
+[ "$MODE" = alert ] && EXP=255,255,255
+fail() { echo "$V fail mode=$MODE mapped=${2:-n} color=${3:-none} expected=$EXP [$1]"; exit 1; }
 SRC=$DARLING_SRC_DIR; BD=$DARLING_BUILD_DIR; OD=$DARLING_OVERLAY
 [ -n "$SRC" ] && [ -n "$BD" ] && [ -n "$OD" ] || fail "env not set"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 if [ -z "$DARLING_LOCK_HELD" ]; then
 	DARLING_LOCK_HELD=1 lockf -t 0 "$BD/.darling-run.lock" sh "$0" "$@"; rc=$?
 	[ $rc -eq 75 ] && fail "lock busy"; exit $rc
+fi
+# both windows in one run of the script: the plain NSWindow (red) and the modal NSAlert panel (white); WD_MODE=plain|alert runs one
+if [ -z "$WD_MODE" ]; then
+	rc=0
+	WD_MODE=plain WINDOW_DRAW_ALERT= sh "$0" "$@" || rc=1
+	WD_MODE=alert WINDOW_DRAW_ALERT=1 sh "$0" "$@" || rc=1
+	exit $rc
 fi
 SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=window-draw-probe-macho; W="$BD/window-draw-probe"; mkdir -p "$W"
 [ -d "$SDK_FLAT/usr/include" ] || fail "no flattened SDK"
@@ -47,7 +55,7 @@ echo "$TREE" | grep -q "\"shell\"" && mapped=y
 XDG_RUNTIME_DIR=$XR WAYLAND_DISPLAY=$WD grim "$PNG" 2>/dev/null
 color=none
 if [ -s "$PNG" ]; then
-	color=$(python3 - "$PNG" "$TREE" <<"PY" 2>/dev/null
+	color=$(python3 - "$PNG" "$TREE" "$MODE" <<"PY" 2>/dev/null
 import sys, json, zlib, struct
 d = open(sys.argv[1], "rb").read()
 pos = 8; idat = b""
@@ -66,9 +74,15 @@ try:
             r = walk(c)
             if r: return r
     r = walk(json.loads(sys.argv[2]))
-    if r: cx, cy = r["x"] + 200, r["y"] + 150  # the 400x300 buffer sits at the top left of the view; sway may tile the view larger
+    if r:
+        # plain: the 400x300 buffer sits at the top left of the view; sway may tile the view larger. alert: the panel is small
+        # (478x92), take a point 20,20 inside it
+        cx, cy = (r["x"] + 20, r["y"] + 20) if sys.argv[3] == "alert" else (r["x"] + 200, r["y"] + 150)
+        ox, oy = r["x"] + r["width"] - 20, r["y"] + r["height"] - 20  # near the far corner of the view
 except Exception: pass
-rows = []; prev = bytes(w * bpp)
+try: ox, oy
+except NameError: ox, oy = cx, cy
+rows = {}; prev = bytes(w * bpp)
 for y in range(h):
     f = raw[y*st]; line = bytearray(raw[y*st+1:(y+1)*st])
     for i in range(len(line)):
@@ -80,14 +94,19 @@ for y in range(h):
             p = a + b - c; pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
             line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
     prev = bytes(line)
-    if y == cy: rows = prev
-print("%d,%d,%d" % tuple(rows[cx*bpp:cx*bpp+3]))
+    if y == cy: rows["c"] = prev
+    if y == oy: rows["o"] = prev
+fmt = lambda r, x: "%d,%d,%d" % tuple(r[x*bpp:x*bpp+3])
+print(fmt(rows["c"], cx) + ";" + fmt(rows["o"], ox) + ";%d" % (ox - cx > 200 or oy - cy > 150))
 PY
 	) || color=none
 fi
 for p in $(pgrep -x darlingserver); do case "$PRE" in *" $p "*) ;; *) sudo -n kill -9 "$p" 2>/dev/null;; esac; done
 kill $SWAYPID 2>/dev/null; sleep 1; kill -9 $SWAYPID 2>/dev/null
 [ -n "$color" ] || color=none
-if [ "$mapped" = y ] && [ "$color" = "$EXP" ]; then echo "$V pass mapped=$mapped color=$color expected=$EXP"; exit 0; fi
-why=""; [ "$mapped" = y ] || why="window-not-in-sway-tree"; [ "$color" = "$EXP" ] || why="$why wrong-or-no-pixel"
+far=${color#*;}; big=${far#*;}; far=${far%%;*}; color=${color%%;*}
+# a tiled view larger than the 400x308 buffer must be filled too: the pixel near its far corner has the same colour
+resized=na; if [ "$MODE" = plain ] && [ "$big" = 1 ]; then resized=n; [ "$far" = "$EXP" ] && resized=y; fi
+if [ "$mapped" = y ] && [ "$color" = "$EXP" ] && [ "$resized" != n ]; then echo "$V pass mode=$MODE mapped=$mapped color=$color expected=$EXP far=$far resized=$resized"; exit 0; fi
+why=""; [ "$mapped" = y ] || why="window-not-in-sway-tree"; [ "$color" = "$EXP" ] || why="$why wrong-or-no-pixel"; [ "$resized" != n ] || why="$why buffer-not-resized(far=$far)"
 fail "${why# } log=$LOG png=$PNG" "$mapped" "$color"

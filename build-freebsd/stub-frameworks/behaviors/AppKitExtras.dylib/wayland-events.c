@@ -44,6 +44,70 @@ extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_hea
 #define POLLIN 1
 #define EAGAIN_ 35
 
+/* Compositor-driven resize. The backend's xdg_toplevel.configure callback ignores width/height, so after sway tiled the
+ * window the shm buffer stayed at the size it was created with. -[WaylandWindow initWithDelegate:] is wrapped: once it has
+ * returned, the window's xdg_toplevel proxy gets a copy of its listener whose configure records the size and then calls
+ * the original; the recorded size is applied after the dispatch (outside libwayland) by resizing the NSWindow frame, which
+ * makes the backend rebuild its context and reallocate the shm buffers at the next flush. Layout of wl_proxy (libwayland):
+ * object{interface,implementation,id}=24 bytes, display, queue, flags/refcount, user_data at 48; the layout is verified
+ * (user_data == window) before the listener is replaced. */
+typedef struct { double x, y, w, h; } RectD;
+extern void objc_msgSend_stret(void *, id, SEL, ...);
+static IMP orig_win_init;
+static void *orig_listener[4], *my_listener[4];
+static long toplevel_off = -1, wdelegate_off = -1;
+static id pending_win;
+static int pending_w, pending_h;
+
+static void my_toplevel_configure(void *data, void *toplevel, int w, int h, void *states)
+{
+    ((void (*)(void *, void *, int, int, void *))orig_listener[0])(data, toplevel, w, h, states);
+    if (w > 0 && h > 0) {
+        pending_win = (id)data;
+        pending_w = w;
+        pending_h = h;
+    }
+}
+
+static void apply_pending(void)
+{
+    RectD f;
+    id win = pending_win, del;
+    if (!win || wdelegate_off < 0)
+        return;
+    pending_win = 0;
+    del = *(id *)((char *)win + wdelegate_off);
+    if (!del)
+        return;
+    objc_msgSend_stret(&f, del, S("frame"));
+    if ((int)f.w == pending_w && (int)f.h == pending_h)
+        return;
+    f.w = pending_w;
+    f.h = pending_h;
+    ((void (*)(id, SEL, RectD, char))objc_msgSend)(del, S("setFrame:display:"), f, 1);
+    write(2, "WAYLAND-EVENTS: configure resize applied\n", 41);
+}
+
+static id win_init(id self, SEL cmd, id delegate)
+{
+    id r = ((id (*)(id, SEL, id))orig_win_init)(self, cmd, delegate);
+    if (r && toplevel_off >= 0) {
+        char *proxy = *(char **)((char *)r + toplevel_off);
+        if (proxy && *(void **)(proxy + 48) == (void *)r && *(void **)(proxy + 8) &&
+            *(void **)(proxy + 8) != (void *)my_listener) {
+            int i;
+            for (i = 0; i < 4; i++)
+                orig_listener[i] = ((void **)*(void **)(proxy + 8))[i];
+            for (i = 0; i < 4; i++)
+                my_listener[i] = orig_listener[i];
+            my_listener[0] = (void *)my_toplevel_configure;
+            *(void **)(proxy + 8) = (void *)my_listener;
+        } else
+            write(2, "WAYLAND-EVENTS: xdg_toplevel proxy layout unexpected, resize hook off\n", 70);
+    }
+    return r;
+}
+
 static IMP orig_next;
 static int (*p_dispatch)(void *);
 static int (*p_dispatch_pending)(void *);
@@ -77,6 +141,7 @@ static void wait_wayland(void *d, double seconds)
     r = poll(&pfd, 1, ms);
     if (r > 0 && (pfd.revents & POLLIN))
         p_dispatch(d);
+    apply_pending();
 }
 
 static id wayland_next_event(id self, SEL cmd, unsigned long mask, id untilDate, id mode, char dequeue)
@@ -89,6 +154,7 @@ static id wayland_next_event(id self, SEL cmd, unsigned long mask, id untilDate,
         return ((id (*)(id, SEL, unsigned long, id, id, char))orig_next)(self, cmd, mask, untilDate, mode, dequeue);
     queue = *(id *)((char *)self + ivar_getOffset(qv));
     p_dispatch_pending(d);
+    apply_pending();
     p_flush(d);
     now = now_ref();
     deadline = untilDate ? ((double (*)(id, SEL))objc_msgSend)(untilDate, S("timeIntervalSinceReferenceDate"))
@@ -172,6 +238,15 @@ static void try_add(void)
     orig_next = class_replaceMethod(c, S("nextEventMatchingMask:untilDate:inMode:dequeue:"), (IMP)wayland_next_event,
                                     "@48@0:8Q16@24@32c40");
     done = orig_next != 0;
+    c = objc_getClass("WaylandWindow");
+    if (done && c && !orig_win_init) {
+        iv = class_getInstanceVariable(c, "_xdgToplevel");
+        toplevel_off = iv ? ivar_getOffset(iv) : -1;
+        iv = class_getInstanceVariable(c, "_delegate");
+        wdelegate_off = iv ? ivar_getOffset(iv) : -1;
+        if (toplevel_off >= 0 && wdelegate_off >= 0)
+            orig_win_init = class_replaceMethod(c, S("initWithDelegate:"), (IMP)win_init, "@24@0:8@16");
+    }
     if (done)
         write(2, "WAYLAND-EVENTS installed: blocking event wait in -[WaylandDisplay nextEventMatchingMask:...]\n", 93);
 }

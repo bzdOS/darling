@@ -44,17 +44,18 @@ if [ "${STAGE_GATE_CFINIT_RUN:-0}" = 1 ]; then
 	cfv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/cfinit-check.sh" 2>&1 | grep -a "^CFINIT-VERDICT" | tail -1); echo "$cfv"
 	case "$cfv" in "CFINIT-VERDICT pass"*) ;; *) echo "STAGECHK FAIL cfinit=FAIL"; exit 1;; esac
 fi
-# STAGE_GATE_FSOPS_RUN=1 also runs the file system probe (FSOPS-VERDICT line: statfs/fstatfs, byte-range locks, fsync, mmap as a
-# browser's SQLite databases use them; starts its own darlingserver, off by default). Needs tests/fsops-probe-macho (build-fsops-probe.sh).
-if [ "${STAGE_GATE_FSOPS_RUN:-0}" = 1 ]; then
+# The FSOPS probe (3 s) always runs; STAGE_GATE_FSOPS_RUN=0 skips it. It is the file system probe (FSOPS-VERDICT line: statfs/fstatfs, byte-range locks, fsync, mmap as a
+# browser's SQLite databases use them; starts its own darlingserver). Needs tests/fsops-probe-macho (build-fsops-probe.sh).
+if [ "${STAGE_GATE_FSOPS_RUN:-1}" = 1 ]; then
 	fsv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/run-fsops-probe.sh" 2>&1 | grep -a "^FSOPS-VERDICT" | tail -1); echo "$fsv"
 	case "$fsv" in "FSOPS-VERDICT pass"*) ;; *) echo "STAGECHK FAIL fsops=FAIL"; exit 1;; esac
 fi
 # STAGE_GATE_WINDOW_RUN=1 also runs the window draw probe (WINDOW-DRAW-VERDICT line: an NSWindow with a red background must
 # map in an own headless sway and show that colour in a grim snapshot; own sway and darlingserver, off by default).
 if [ "${STAGE_GATE_WINDOW_RUN:-0}" = 1 ]; then
-	wdv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/window-draw-probe.sh" 2>&1 | grep -a "^WINDOW-DRAW-VERDICT" | tail -1); echo "$wdv"
-	case "$wdv" in "WINDOW-DRAW-VERDICT pass"*) ;; *) echo "STAGECHK FAIL window=FAIL"; exit 1;; esac
+	wdv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/window-draw-probe.sh" 2>&1 | grep -a "^WINDOW-DRAW-VERDICT"); echo "$wdv"
+	# one line per window (plain, modal alert): both must pass
+	[ "$(echo "$wdv" | grep -c "^WINDOW-DRAW-VERDICT pass")" = 2 ] && ! echo "$wdv" | grep -q "verdict fail\|VERDICT fail" || { echo "STAGECHK FAIL window=FAIL"; exit 1; }
 fi
 # CoreGraphics must carry the NULL-safe CGColor accessors (cg-color-nullsafe.py); overlay and staged copy are both checked.
 cgp=ok; CGR=System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
