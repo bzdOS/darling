@@ -2,14 +2,18 @@
 # suspend-run.sh - run suspend-<kind>-probe-macho (kind = rwlock | mutex | cv, env SR_KIND) under launch-dynamic with the server's
 # psynch ring on (own headless sway in a private XDG_RUNTIME_DIR, own darlingserver), take one dsdump after the probe's summary
 # line, and print:
-#   SUSPEND-<KIND> confirmed=y|n iters=N eintr=E retry_same_seq=R invariant_broken=I hung=y|n pass=y|n
-#        iters / invariant_broken / hung come from the probe (hung=y also when no summary line came: crash or timeout);
+#   SUSPEND-<KIND> confirmed=y|n iters=N eintr=E retry=R retry_same_a0=S invariant_broken=I spurious=P hung=y|n pass=y|n
+#        iters / invariant_broken / spurious / hung come from the probe (hung=y also when no summary line came: crash or timeout;
+#        spurious is "-" for kinds that do not count it);
 #        eintr         = ring records "<cont op> res=error a0=0x4" for the probe's lock address (the interrupted call);
-#        retry_same_seq= of those, how many were followed by a new <wait op> record of the same tid on the same address
-#                        with the same a0 as the interrupted one (what libpthread must do on EINTR);
-#        confirmed=y   when eintr>0 and retry_same_seq=0 (interrupted calls are not repeated);
-#        pass=y        rwlock, mutex: eintr>0 and retry_same_seq==eintr and invariant_broken=0 and hung=n;
-#                      cv (libpthread turns EINTR into a spurious wakeup, no repeat): eintr>0 and invariant_broken=0 and hung=n.
+#        retry         = of those, how many were followed by a new <wait op> record of the same tid on the same address
+#                        (what libpthread must do on EINTR). For mutex the a0 is NOT compared (libpthread bumps a0 by +0x100 on the
+#                        repeat); for rwlock a0 must equal the interrupted one;
+#        retry_same_a0 = of those, how many repeats carried the same a0 as the interrupted call (reference only for mutex);
+#        confirmed=y   when eintr>0 and retry=0 (interrupted calls are not repeated);
+#        pass=y        rwlock, mutex: eintr>0 and retry==eintr and invariant_broken=0 and hung=n;
+#                      cv (libpthread turns EINTR into a spurious wakeup, no repeat; POSIX allows it): eintr>0 and
+#                      invariant_broken=0 and hung=n; spurious is informational only.
 #   followed by "SUSPEND-RING-TAIL ..." lines (last ring records of the address around the first interrupted call).
 # RUN-INVALID (no verdict) when the own sway is not alive at the end. Needs the darlingserver built with the psynch ring.
 # Usage: SR_KIND=rwlock sh build-freebsd/probes/suspend-run.sh [wait-secs]   Env: DARLING_SRC_DIR, DARLING_OVERLAY, DARLING_BUILD_DIR,
@@ -79,27 +83,28 @@ echo "log=$LOG dump=$DUMP sway=$SWAYOK" >&2
 if [ "$SWAYOK" != y ]; then echo "RUN-INVALID sway-down"; exit 4; fi
 S=$(grep -a "^SUSPEND-SUMMARY" "$LOG" | head -1)
 f() { echo "$S" | sed -n "s/.* $1=\([^ ]*\).*/\1/p"; }
-ITERS=$(f iters); BROKEN=$(f invariant_broken); HUNG=$(f hung); A=$(f addr)
+ITERS=$(f iters); BROKEN=$(f invariant_broken); HUNG=$(f hung); A=$(f addr); SPUR=$(f spurious)
 [ -n "$A" ] || A=$(grep -a "^SUSPEND-ADDR" "$LOG" | head -1 | sed 's/.*addr=\(0x[0-9a-f]*\).*/\1/')
 case "$HUNG" in 0) HUNG=n ;; 1) HUNG=y ;; *) HUNG="y(no-summary)" ;; esac
 if [ -z "$A" ] || [ ! -f "$DUMP" ]; then
-    echo "$LABEL confirmed=- iters=${ITERS:--} eintr=- retry_same_seq=- invariant_broken=${BROKEN:--} hung=${HUNG} pass=n (no address or no ring in the dump)"; exit 1
+    echo "$LABEL confirmed=- iters=${ITERS:--} eintr=- retry=- retry_same_a0=- invariant_broken=${BROKEN:--} spurious=${SPUR:--} hung=${HUNG} pass=n (no address or no ring in the dump)"; exit 1
 fi
-awk -v a="$A" -v iters="${ITERS:--}" -v broken="${BROKEN:--}" -v hung="$HUNG" -v label="$LABEL" -v kind="$KIND" -v wop="$WOP" -v cop="$COP" '
+awk -v a="$A" -v iters="${ITERS:--}" -v broken="${BROKEN:--}" -v hung="$HUNG" -v label="$LABEL" -v kind="$KIND" -v spur="${SPUR:--}" -v wop="$WOP" -v cop="$COP" '
     function kv(line, key,    n, i, f, t) { n = split(line, f, " "); for (i = 1; i <= n; i++) { t = f[i]; if (index(t, key "=") == 1) return substr(t, length(key) + 2) } return "" }
     /^ring seq=/ && kv($0, "cls") == "psynch" && kv($0, "uaddr") == a {
         op = kv($0, "op"); res = kv($0, "res"); t = kv($0, "tid")
         n++; line[n] = $0
         if (op == wop) {
-            if ((t in pend) && pend[t] != "") { if (kv($0, "a0") == pend[t]) retry++; pend[t] = "" }
+            if ((t in pend) && pend[t] != "") { retry_any++; if (kv($0, "a0") == pend[t]) same++; pend[t] = "" }
             last[t] = kv($0, "a0")
         } else if (op == cop && res == "error" && kv($0, "a0") == "0x4") {
             eintr++; pend[t] = last[t]; if (!first) first = n
         }
     }
     END {
+        retry = (kind == "mutex") ? retry_any : same
         ok = (eintr > 0 && broken == "0" && hung == "n" && (kind == "cv" || retry == eintr)) ? "y" : "n"
-        printf "%s confirmed=%s iters=%s eintr=%d retry_same_seq=%d invariant_broken=%s hung=%s pass=%s\n", label, (eintr > 0 && retry == 0) ? "y" : "n", iters, eintr, retry, broken, hung, ok
+        printf "%s confirmed=%s iters=%s eintr=%d retry=%d retry_same_a0=%d invariant_broken=%s spurious=%s hung=%s pass=%s\n", label, (eintr > 0 && retry == 0) ? "y" : "n", iters, eintr, retry, same, broken, spur, hung, ok
         if (!first) first = n
         s = first - 3; if (s < 1) s = 1
         for (i = s; i <= n && i <= s + 11; i++) print "SUSPEND-RING-TAIL " line[i]

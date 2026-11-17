@@ -4,7 +4,7 @@
  *   waiter B   : loop { rc = pthread_mutex_lock; if rc==0 check win==0 (twice, across a spin); unlock }
  *   suspender X: loop { thread_suspend(B); short delay; thread_resume(B); pause }
  * Invariant: lock returned 0 => no holder inside (a holder inside while B "has" the lock = invariant_broken). The EINTR of the
- * interrupted __psynch_mutexwait is not visible from pthread_mutex_lock, so eintr and retry_same_seq are read by the runner from
+ * interrupted __psynch_mutexwait is not visible from pthread_mutex_lock, so eintr, retry and retry_same_a0 are read by the runner from
  * the server's psynch ring. A watchdog stops the probe when B makes no progress for HANG_S seconds (hung=1).
  * Env: SR_SECS (20), SR_HANG_S (10), SR_SUSP_US (200), SR_GAP_US (500).
  * Prints:  SUSPEND-SUMMARY iters=N rdfail=F invariant_broken=I hung=H suspends=S first_rc=R addr=0x..
