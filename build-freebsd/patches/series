@@ -28,3 +28,4 @@ darlingserver darlingserver-sigexc-keep-wakeup.patch
 darlingserver darlingserver-shared-entry-adjacent.patch
 xnu xnu-thread-selfusage.patch
 cocotron cocotron-wayland-font-families.patch
+libkqueue libkqueue-copyout-diag.patch

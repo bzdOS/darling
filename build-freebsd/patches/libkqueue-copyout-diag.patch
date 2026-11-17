@@ -1,0 +1,19 @@
+diff --git a/src/linux/platform.c b/src/linux/platform.c
+--- a/src/linux/platform.c
++++ b/src/linux/platform.c
+@@ -19,2 +19,5 @@
+ #include <pthread.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <errno.h>
+ #include "../common/private.h"
+@@ -214,2 +217,9 @@
+         if (slowpath(rv < 0)) {
++            char diag[128];
++            int diag_errno = errno;
++            int diag_len = snprintf(diag, sizeof(diag),
++                "libkqueue: knote_copyout failed filter=%d rv=%d errno=%d ident=%llu\n",
++                (int)kn->kev.filter, rv, diag_errno, (unsigned long long)kn->kev.ident);
++            if (diag_len > 0)
++                (void)write(2, diag, (size_t)diag_len);
+             dbg_puts("knote_copyout failed");
