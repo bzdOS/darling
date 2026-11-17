@@ -315,6 +315,8 @@ int mldr_trap_log_handlers = 1;
 /* Linux clockid_t values (uapi/linux/time.h) that differ from FreeBSD's
  * (sys/_clock_id.h) — CLOCK_REALTIME=0 coincides on both. */
 #define LINUX_CLOCK_MONOTONIC 1
+#define LINUX_CLOCK_PROCESS_CPUTIME_ID 2
+#define LINUX_CLOCK_THREAD_CPUTIME_ID 3
 
 /* Linux arch_prctl(2) op codes (uapi/asm/prctl.h) */
 #define LINUX_ARCH_SET_GS 0x1001
@@ -2090,6 +2092,10 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         long clockid = a1;
         if (clockid == LINUX_CLOCK_MONOTONIC) {
             clockid = CLOCK_MONOTONIC;
+        } else if (clockid == LINUX_CLOCK_PROCESS_CPUTIME_ID) {
+            clockid = CLOCK_PROCESS_CPUTIME_ID; /* Linux 2 = FreeBSD 15 */
+        } else if (clockid == LINUX_CLOCK_THREAD_CPUTIME_ID) {
+            clockid = CLOCK_THREAD_CPUTIME_ID; /* Linux 3 = FreeBSD 14; raw 3 is EINVAL (thread_selfusage returned 0) */
         }
         return freebsd_raw_syscall(SYS_clock_gettime, clockid, a2, 0, 0, 0, 0);
     }
