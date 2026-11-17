@@ -1,0 +1,58 @@
+diff --git a/AppKit/Wayland.backend/WaylandDisplay.m b/AppKit/Wayland.backend/WaylandDisplay.m
+index f9206d6..f40a873 100644
+--- a/AppKit/Wayland.backend/WaylandDisplay.m
++++ b/AppKit/Wayland.backend/WaylandDisplay.m
+@@ -28,10 +28,12 @@
+ #import <AppKit/NSPasteboard.h>
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSScreen.h>
++#import <AppKit/NSFontTypeface.h>
+ #import <AppKit/NSWindow.h>
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSValue.h>
+ 
++#import <dlfcn.h>
+ #import <errno.h>
+ #import <poll.h>
+ #import <stdio.h>
+@@ -648,6 +650,40 @@ static const struct wl_seat_listener _wayland_seat_listener = {
+      * missing wiring to add here — there is no Wayland equivalent). */
+ }
+ 
++- (NSSet *) allFontFamilyNames {
++    /* The family list comes from the CoreText implementation (the same one
++     * CTFontManagerCopyAvailableFontFamilyNames answers for every client), so
++     * this backend keeps no font list of its own. CoreText is already loaded
++     * by AppKit (NSFont uses CTFont*), hence the flat lookup rather than a
++     * link dependency of this bundle. */
++    CFArrayRef (*copyFamilies)(void) = (CFArrayRef(*)(void)) dlsym(
++            RTLD_DEFAULT, "CTFontManagerCopyAvailableFontFamilyNames");
++    NSMutableSet *result = [NSMutableSet set];
++    CFArrayRef families = copyFamilies ? copyFamilies() : NULL;
++    if (families != NULL) {
++        CFIndex i, count = CFArrayGetCount(families);
++        for (i = 0; i < count; i++) {
++            id name = (id) CFArrayGetValueAtIndex(families, i);
++            if ([name isKindOfClass: [NSString class]])
++                [result addObject: name];
++        }
++        CFRelease(families);
++    }
++    if ([result count] == 0)
++        [result addObject: @"Helvetica"];
++    return result;
++}
++
++- (NSArray *) fontTypefacesForFamilyName: (NSString *) name {
++    /* NSFontFamily +addFontFamilyWithName: asks for this right after
++     * -allFontFamilyNames, once per family. One regular face per family. */
++    NSFontTypeface *face = [[[NSFontTypeface alloc] initWithName: name
++                                                       traitName: @"Regular"
++                                                          traits: 0]
++            autorelease];
++    return [NSArray arrayWithObject: face];
++}
++
+ - (CGFloat) scrollerWidth {
+     return 15.0;
+ }
