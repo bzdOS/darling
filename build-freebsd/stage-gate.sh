@@ -60,6 +60,8 @@ gate_probe() { # name script
 }
 [ "${STAGE_GATE_FSOPS_RUN:-1}" = 1 ] && gate_probe FSOPS run-fsops-probe.sh
 [ "${STAGE_GATE_FORK_RUN:-1}" = 1 ] && gate_probe FORK run-fork-fail-probe.sh
+# VMMAP-WRITE: write-after-map/protect/remap probe (needs tests/vm-map-write-probe-macho, build-vm-map-write-probe.sh); off (=0) until the darlingserver adjacent-entry fix is deployed.
+[ "${STAGE_GATE_VMMAP_RUN:-0}" = 1 ] && gate_probe VMMAP-WRITE vm-map-write-probe.sh
 #   CORETEXT: the CoreText Create/Copy functions answer objects, never NULL (both CoreText and CoreTextExtras images);
 #          needs tests/coretext-probe-macho and tests/coretext-extras-probe-macho (build-coretext-probe.sh).
 [ "${STAGE_GATE_CORETEXT_RUN:-1}" = 1 ] && gate_probe CORETEXT run-coretext-probe.sh
