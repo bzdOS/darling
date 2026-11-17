@@ -18,8 +18,10 @@ rebuilds such an image from its own export list and load commands:
     (stub-frameworks/behaviors/<image>/*.c) of a SHADOW_FROM image defines: the single implementation lives in the behaviour;
   * everything else stays a function (`xorl %eax,%eax; ret`).
 Install name, versions, re-exports and dependencies are kept. An image with nothing
-to fix is left alone. With --install the old file is copied to <file>.pre-dataascode
-(never overwritten) and replaced by the rebuilt one.
+to fix is left alone. With --install the old file is copied to
+<backup-dir>/<image file name>/pre-dataascode (one per image, never overwritten, nothing is written
+into the overlay besides the image itself; backup-dir defaults to ../backup next to the overlay) and
+replaced by the rebuilt one.
 
 Usage: rebuild-stub-data.py --overlay DIR --work DIR --data-list FILE [--install] IMAGE...
 """
@@ -115,12 +117,15 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--data-list")
     ap.add_argument("--install", action="store_true")
+    ap.add_argument("--backup-dir", help="where --install keeps the original of each image "
+                    "(default: DARLING_BACKUP_DIR, else 'backup' next to the overlay directory)")
     ap.add_argument("--chrome-providers", metavar="CHROME_ROOT",
                     help="also rebuild the stub images that provide a string constant the Chrome images under "
                          "CHROME_ROOT import as a zero object (data-only stubs are not in the stub list)")
     ap.add_argument("images", nargs="+")
     a = ap.parse_args()
     ov = a.overlay.rstrip("/")
+    backup_root = a.backup_dir or os.environ.get("DARLING_BACKUP_DIR") or os.path.join(os.path.dirname(ov), "backup")
     if a.chrome_providers:
         import importlib.util
         here = os.path.dirname(os.path.abspath(__file__))
@@ -266,8 +271,10 @@ def main():
             print("  not exported (a behaviour of another image implements them): %d: %s" % (len(shadow), " ".join(shadow)))
         rebuilt += 1
         if a.install:
-            bak = path + ".pre-dataascode"
+            bdir = os.path.join(backup_root, os.path.basename(path))
+            bak = os.path.join(bdir, "pre-dataascode")
             if not os.path.exists(bak):
+                os.makedirs(bdir, exist_ok=True)
                 shutil.copy2(path, bak)
             shutil.copyfile(out, path)
             try:
