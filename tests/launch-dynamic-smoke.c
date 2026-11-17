@@ -1092,6 +1092,14 @@ int main(void) {
         setenv("DYLD_INSERT_LIBRARIES", combined, 1);
     }
 
+    /* DARLING_INSERT_EXTRA: guest path(s) appended to DYLD_INSERT_LIBRARIES (debug hooks, e.g. build-freebsd/throw-trace-hook.sh). */
+    if (getenv("DARLING_INSERT_EXTRA") && *getenv("DARLING_INSERT_EXTRA")) {
+        const char *cur = getenv("DYLD_INSERT_LIBRARIES");
+        char combined[1024];
+        snprintf(combined, sizeof(combined), "%s%s%s", cur ? cur : "", cur ? ":" : "", getenv("DARLING_INSERT_EXTRA"));
+        setenv("DYLD_INSERT_LIBRARIES", combined, 1);
+    }
+
     /* Chrome: force dyld to print load/search activity so we can see which
      * dependent dylib dlopen fails to resolve ("image not found"). */
     if (strcmp(test_bin, "chrome-macho") == 0 ||

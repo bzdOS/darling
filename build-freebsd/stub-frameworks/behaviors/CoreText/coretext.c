@@ -72,10 +72,26 @@ static CFNumberRef dnum(double v) { return CFNumberCreate(0, 6 /* kCFNumberDoubl
 static CFNumberRef inum(int v) { return CFNumberCreate(0, 3 /* kCFNumberSInt32Type */, &v); }
 static int isdict(CFTypeRef o) { return o && CFGetTypeID(o) == CFDictionaryGetTypeID(); }
 
+/* An NSFont (AppKitExtras font.c) wraps a CTFont in the bytes after the instance; CTFontRef parameters are often NSFont casts. */
+extern void *objc_getClass(const char *);
+extern void *object_getClass(const void *);
+extern unsigned long class_getInstanceSize(void *);
+static CFTypeRef unwrap(CFTypeRef o)
+{
+    void *nf;
+    if (!o) return o;
+    nf = objc_getClass("NSFont");
+    if (nf && object_getClass(o) == nf) {
+        CFTypeRef in = *(CFTypeRef *)((const char *)o + class_getInstanceSize(nf));
+        return in ? in : o;
+    }
+    return o;
+}
 static CFStringRef font_name(CFTypeRef font)
 {
     CFStringRef n = 0;
     init();
+    font = unwrap(font);
     if (isdict(font)) {
         n = CFDictionaryGetValue(font, kFontName);
         if (!n) n = CFDictionaryGetValue(font, kCTFontNameAttribute);
@@ -87,6 +103,7 @@ static double font_size(CFTypeRef font)
     double v = 0;
     CFNumberRef n;
     init();
+    font = unwrap(font);
     if (isdict(font) && (n = CFDictionaryGetValue(font, kFontSize)) && CFNumberGetValue(n, 6, &v) && v > 0)
         return v;
     return 12.0;

@@ -65,6 +65,9 @@ gate_probe() { # name script
 #   CORETEXT: the CoreText Create/Copy functions answer objects, never NULL (both CoreText and CoreTextExtras images);
 #          needs tests/coretext-probe-macho and tests/coretext-extras-probe-macho (build-coretext-probe.sh).
 [ "${STAGE_GATE_CORETEXT_RUN:-1}" = 1 ] && gate_probe CORETEXT run-coretext-probe.sh
+#   FONT-METRICS: NSFont/CoreText metric accessors (ascender, descender, capHeight, leading, xHeight, pointSize, CTFontGet*/Copy*) answer
+#          sane values, no NULL, no exception (font-metrics-probe.sh builds tests/font-metrics-probe-macho itself).
+[ "${STAGE_GATE_FONTMETRICS_RUN:-1}" = 1 ] && gate_probe FONT-METRICS font-metrics-probe.sh
 # STAGE_GATE_SURVIVE_RUN=1 also runs the darlingserver survival probe (DSERVER-SURVIVE-VERDICT: malformed requests and a client killed
 # mid-call must not take the server down; about 75 s, so off by default); needs tests/dserver-survive-probe-macho.
 [ "${STAGE_GATE_SURVIVE_RUN:-0}" = 1 ] && gate_probe DSERVER-SURVIVE run-dserver-survive-probe.sh

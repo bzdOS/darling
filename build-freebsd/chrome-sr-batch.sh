@@ -47,7 +47,7 @@ if [ "${SEAT_INPUT:-0}" = 1 ]; then
 	swaymsg -t get_seats 2>/dev/null | grep -o "\"capabilities\": *[0-9]*" | sed "s/^/seat /"
 fi
 : "${CHROME_APP:?host path of the .app bundle}"; export CHROME_APP
-export DARLING_GUEST_EXPOSE=$XR DARLING_GUEST_MKDIR=/wlprofile DARLING_GUEST_COPY="$RUN/page.html=/wlpage/page.html"
+export DARLING_GUEST_EXPOSE=$XR DARLING_GUEST_MKDIR=/wlprofile DARLING_GUEST_COPY="$RUN/page.html=/wlpage/page.html${CHROME_SR_COPY:+:$CHROME_SR_COPY}"
 export CHROME_ARGS="--no-sandbox --user-data-dir=/wlprofile --disable-gpu --no-first-run --no-default-browser-check --disable-background-networking --disable-component-update --disable-sync --disable-breakpad ${CHROME_EXTRA_ARGS} file:///wlpage/page.html"
 export CHROME_LOG_PREFIX=chrome-sr
 valid=0; i=1
