@@ -8,8 +8,93 @@
 # Further sections: ksyn (psynch) wait queues per process and the shared table (user address, owner and waiter
 # threads, whether the owner is in the live registry, its saved stack); the kernelAsync queue, its semaphore and the
 # runner threads (wait state of each); the server work queue; per-process kqchans with notification-deferral and
-# outbox state.
+# outbox state, and the psynch ring (DSERVER_PSYNCH_RING=1 in the server environment; see
+# duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h for the 128-byte entry layout).
 import lldb
+import re
+import struct
+import subprocess
+
+# ---- guest image map: address -> image+offset (from the host mappings of the guest process) -----------------------
+_MAPS = {}
+
+def _maps(pid):
+    """[(start, end, path)] for the file-backed mappings of host process pid (procstat -v), cached per dump."""
+    if pid in _MAPS:
+        return _MAPS[pid]
+    out = []
+    try:
+        txt = subprocess.run(["procstat", "-v", str(pid)], capture_output=True, text=True, timeout=10).stdout
+        for ln in txt.splitlines()[1:]:
+            f = ln.split()
+            if len(f) < 10:
+                continue
+            try:
+                out.append((int(f[1], 16), int(f[2], 16), f[10] if len(f) > 10 else ""))
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    _MAPS[pid] = out
+    return out
+
+def img_off(pid, addr):
+    """'name+0xoff' (offset from the lowest mapping of that file, an estimate for images mapped in pieces),
+    'anon[start-end]+0xoff' for anonymous memory, '?' when the process map is unavailable."""
+    if not pid or not addr:
+        return "?"
+    maps = _maps(pid)
+    for st, en, path in maps:
+        if st <= addr < en:
+            if path and path not in ("-", ""):
+                base = min(a for a, _, p in maps if p == path)
+                return "%s+%#x" % (path.rsplit("/", 1)[-1], addr - base)
+            return "anon[%#x-%#x]+%#x" % (st, en, addr - st)
+    return "unmapped"
+
+# ---- psynch ring ------------------------------------------------------------------------------------------------
+_RING_OPS = {1: "rd_lock", 2: "wr_lock", 3: "rw_unlock", 4: "rw_handle_unlock", 5: "rd_cont", 6: "wr_cont",
+             7: "mutexwait", 8: "mutexdrop", 9: "mutex_cont", 10: "cvwait", 11: "cvsignal", 12: "cvbroad",
+             13: "cv_cont", 14: "thread_suspend", 15: "thread_resume", 16: "thread_park", 17: "thread_unpark"}
+_RING_RES = {1: "wait", 2: "granted", 3: "woken", 4: "done", 5: "error", 6: "prepost", 7: "spurious"}
+_RING_FMT = "<QQQIHH6I2IHBBHH6I6IQ"  # 128 bytes, see psynch-ring.h
+
+def dump_ring(target, proc, info, P):
+    on = _gv(target, "dtape_psynch_ring_on")
+    ring = _gv(target, "dtape_psynch_ring")
+    size = _gv(target, "dtape_psynch_ring_size")
+    head = _gv(target, "dtape_psynch_ring_head")
+    if not (on and ring and size and head):
+        P("(psynch ring symbols not found: server built without the ring)")
+        return
+    if not _u(on) or not _u(ring):
+        P("(psynch ring off: start the server with DSERVER_PSYNCH_RING=1)")
+        return
+    n = _u(size); hd = _u(head)
+    assert struct.calcsize(_RING_FMT) == 128
+    raw = _mem(proc, _u(ring), n * 128)
+    if raw is None:
+        P("(psynch ring unreadable)")
+        return
+    nst_pid = {}
+    for d in info:
+        if d.get("nstid") is not None and d.get("pid"):
+            nst_pid[d["nstid"]] = d["pid"]
+    ents = []
+    for i in range(n):
+        f = struct.unpack_from(_RING_FMT, raw, i * 128)
+        if f[0]:
+            ents.append(f)
+    ents.sort(key=lambda f: f[0])
+    P("psynch ring: size=%d recorded=%d valid=%d (oldest seq %s) format: seq t tid(guest) op res uaddr img type qr qw L/U/S before>after a0 a1 aux wake skip" % (
+        n, hd, len(ents), ents[0][0] if ents else "-"))
+    for f in ents:
+        (seq, ts, uaddr, tid, op, res, l0, u0, s0, l1, u1, s1, a0, a1, ty, qr, qw, nw, nk) = f[:19]
+        wake = f[19:25]; skip = f[25:31]; aux = f[31]
+        img = img_off(nst_pid.get(tid), uaddr) if uaddr else "-"
+        P("ring seq=%d t=%d tid=%d op=%s res=%s uaddr=%#x img=%s type=%d qr=%d qw=%d L=%#x>%#x U=%#x>%#x S=%#x>%#x a0=%#x a1=%#x aux=%#x wake=%d[%s] skip=%d[%s]" % (
+            seq, ts, tid, _RING_OPS.get(op, op), _RING_RES.get(res, res), uaddr, img, ty, qr, qw, l0, l1, u0, u1, s0, s1, a0, a1, aux,
+            nw, ",".join(str(x) for x in wake[:min(nw, 6)]), nk, ",".join(str(x) for x in skip[:min(nk, 6)])))
 
 def _u(v):
     return v.GetValueAsUnsigned() if v and v.IsValid() else 0
@@ -168,7 +253,7 @@ def dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf):
     def thr_desc(dt_addr):
         d = thread_of_dt(dt_addr)
         if d:
-            return "tid=%d(%s)" % (d["tid"], "susp" if d["suspended"] else ("run" if d["running"] else "idle"))
+            return "tid=%d/ns%d(%s)" % (d["tid"], d["nstid"], "susp" if d["suspended"] else ("run" if d["running"] else "idle"))
         return "%#x(no Thread)" % dt_addr
     tables = []
     if gh and _u(gh):
@@ -196,6 +281,9 @@ def dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf):
                 inq = rd32(kw + o_inq); io = rd32(kw + o_io); ty = rd32(kw + o_type)
                 l = rd32(kw + o_l); u = rd32(kw + o_u); s = rd32(kw + o_s); pf = rd32(kw + o_pf)
                 ws = []
+                # kw_type is masked to KSYN_WQTYPE_*: 1 mutex, 2 condvar, 4 rwlock, 8 sema. Queue 0 is
+                # KSYN_QUEUE_READ, queue 1 KSYN_QUEUE_WRITE (mutex and condvar waiters sit on queue 1).
+                tmask = (ty & 0xff) if ty is not None else 0
                 for qi in range(2):
                     qa = kw + o_q0 + qi * qsz
                     cur = _rd64(proc, qa)
@@ -203,10 +291,11 @@ def dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf):
                     while cur and n < 512:
                         th = _rd64(proc, cur + o_el_thr)
                         ls = rd32(cur + o_el_lseq)
-                        ws.append("%s:%s@seq%#x" % ("RW"[qi] if ty is not None and ty >= 2 else "M", thr_desc(th - xoff) if th else "none", ls or 0))
+                        ws.append("%s:%s@seq%#x" % (("RW"[qi] if tmask == 4 else ("C" if tmask == 2 else ("M" if tmask == 1 else "Q%d" % qi))), thr_desc(th - xoff) if th else "none", ls or 0))
                         cur = _rd64(proc, cur + o_el_next); n += 1
                 if inq or ws or own:
-                    P("kwq %#x [%s] uaddr=%#x type=%s owner_thread=%#x inqueue=%s iocount=%s pflags=%#x lword=%#x uword=%#x sword=%#x" % (kw, label, addr or 0, ty, own or 0, inq, io, pf or 0, l or 0, u or 0, s or 0))
+                    mpid = re.match(r"pid=(\d+)", label)
+                    P("kwq %#x [%s] uaddr=%#x img=%s type=%s owner_thread=%#x inqueue=%s iocount=%s pflags=%#x lword=%#x uword=%#x sword=%#x" % (kw, label, addr or 0, img_off(int(mpid.group(1)) if mpid else None, addr or 0), ty, own or 0, inq, io, pf or 0, l or 0, u or 0, s or 0))
                     if own:
                         od = thread_of_dt(own - xoff)
                         P("   owner: %s" % (("Thread tid=%d nstid=%d pid=%s state=%s dead=%s" % (od["tid"], od["nstid"], od["pid"], "suspended" if od["suspended"] else ("running" if od["running"] else "idle/not-scheduled"), od["dead"])) if od else "NOT IN LIVE THREAD REGISTRY (stale kw_owner reference)"))
@@ -491,6 +580,7 @@ def dsdump(debugger, command, result, internal_dict):
         P("")
     for title, fn in (("psynch ksyn wait queues", lambda: dump_psynch(target, proc, info, thread_of_dt, xoff, stacks, P, maxf)),
                       ("kernelAsync", lambda: dump_async(target, proc, info, P, C, maxf)),
+                      ("psynch ring", lambda: dump_ring(target, proc, info, P)),
                       ("dsdiag", lambda: dump_diag(target, proc, P)),
                       ("workqueue", lambda: dump_workqueue(target, proc, P)),
                       ("kqchans", lambda: dump_kqchans(target, proc, info, P))):
