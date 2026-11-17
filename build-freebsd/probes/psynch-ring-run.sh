@@ -1,10 +1,13 @@
 #!/bin/sh
 # psynch-ring-run.sh - run psynch-ring-probe-macho under launch-dynamic with the server's psynch ring on, take one
 # dsdump while the probe holds its contended rwlock, and print two verdict lines:
-#   PSYNCH-RING pass|fail expected=N got=M   (dump holds >= N ring records for the probe's phase-1 lock address)
+#   PSYNCH-RING pass|fail expected=N got=M psynch=rec/drop park=rec/drop susp=rec/drop
+#        (the psynch ring of the dump holds >= N records for the probe's phase-1 lock address; rec = recorded, drop =
+#        overwritten, per ring class; a fail with psynch dropped=0 and got=0 is a defect of the server hook, not of the probe)
 #   RWLABEL pass|fail                        (rdlock waiter is labelled R, wrlock waiter W in the kwq wait list)
 # Needs the darlingserver built with darlingserver-psynch-ring.patch. The dump and log paths go to stderr.
-# Usage: sh build-freebsd/probes/psynch-ring-run.sh [wait-secs]   Env: DARLING_SRC_DIR, DARLING_OVERLAY, DARLING_BUILD_DIR.
+# Usage: sh build-freebsd/probes/psynch-ring-run.sh [wait-secs]   Env: DARLING_SRC_DIR, DARLING_OVERLAY, DARLING_BUILD_DIR,
+# PSYNCH_RING_CLASSES (server ring class mask, default 7; bit 0 psynch, 1 park/unpark, 2 suspend/resume).
 # Stops only the darlingserver/mldr pids it started (by pid).
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"
 WAIT="${1:-180}"
@@ -14,7 +17,7 @@ if pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a serie
 TS=$(date +%m%d-%H%M%S)
 LOG="${BD}/psynch-ring-probe-${TS}.log"; DUMP="${BD}/psynch-ring-probe-${TS}.dump"
 before=$(pgrep -x darlingserver | tr "\n" " ")
-( sudo timeout -k 5 $((WAIT+30)) env DSERVER_PSYNCH_RING=1 DSERVER_PSYNCH_RING_SIZE=16384 "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \
+( sudo timeout -k 5 $((WAIT+30)) env DSERVER_PSYNCH_RING=1 DSERVER_PSYNCH_RING_SIZE=16384 "DSERVER_PSYNCH_RING_CLASSES=${PSYNCH_RING_CLASSES:-7}" "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \
     "DARLING_TEST_BINARY=psynch-ring-probe-macho" DARLING_SMOKE_REFRESH=1 "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
 i=0
 while [ "$i" -lt "$WAIT" ]; do
@@ -33,32 +36,47 @@ done
 for g in $(pgrep -f "mldr-real/mldr .*psynch-ring-probe-macho"); do sudo kill -9 "$g" 2>/dev/null; done
 echo "log=$LOG dump=$DUMP" >&2
 rc=0
-# PSYNCH-RING: count ring records of the phase-1 address
+# PSYNCH-RING: count ring records of the phase-1 address in the psynch class ring (fields parsed, not matched as text)
 A1=$(grep -a "^PSRING-ADDR" "$LOG" | head -1 | sed 's/.*addr=\(0x[0-9a-f]*\).*/\1/')
 N1=$(grep -a "^PSRING-ADDR" "$LOG" | head -1 | sed 's/.*n=\([0-9]*\).*/\1/')
 if [ -z "$A1" ] || [ ! -f "$DUMP" ]; then
     echo "PSYNCH-RING fail expected=${N1:-0} got=0 (no probe address or no ring in the dump)"; rc=1
 else
-    M=$(grep -a "^ring seq=" "$DUMP" | grep -ac " uaddr=${A1} ")
-    if [ "$M" -ge "$N1" ]; then echo "PSYNCH-RING pass expected=$N1 got=$M"; else echo "PSYNCH-RING fail expected=$N1 got=$M"; rc=1; fi
+    # one pass over the dump: per ring class recorded/dropped, and the psynch ring entries whose uaddr field equals A1
+    R=$(awk -v a="$A1" '
+        function kv(line, key,    n, i, f, t) { n = split(line, f, " "); for (i = 1; i <= n; i++) { t = f[i]; if (index(t, key "=") == 1) return substr(t, length(key) + 2) } return "" }
+        /^ring class=/ { c = kv($0, "class"); rec[c] = kv($0, "recorded"); drp[c] = kv($0, "dropped"); next }
+        /^ring seq=/ { if (kv($0, "cls") == "psynch" && kv($0, "uaddr") == a) m++ }
+        END { printf "%d psynch=%s/%s park=%s/%s susp=%s/%s", m, (rec["psynch"] == "" ? "-" : rec["psynch"]), (drp["psynch"] == "" ? "-" : drp["psynch"]), (rec["park"] == "" ? "-" : rec["park"]), (drp["park"] == "" ? "-" : drp["park"]), (rec["susp"] == "" ? "-" : rec["susp"]), (drp["susp"] == "" ? "-" : drp["susp"]) }' "$DUMP")
+    M=${R%% *}; CNT=${R#* }
+    PD=$(echo "$CNT" | sed 's/.*psynch=[^/]*\/\([^ ]*\).*/\1/')
+    if [ "$M" -ge "$N1" ]; then echo "PSYNCH-RING pass expected=$N1 got=$M $CNT"
+    elif [ "$M" -eq 0 ] && [ "$PD" = 0 ]; then echo "PSYNCH-RING fail expected=$N1 got=$M $CNT HOOK-DEFECT (psynch ring dropped nothing and holds nothing for the address)"; rc=1
+    else echo "PSYNCH-RING fail expected=$N1 got=$M $CNT"; rc=1; fi
 fi
-# RWLABEL: the rdlock waiter must be R, the wrlock waiter W
+# RWLABEL: the rdlock waiter must be R, the wrlock waiter W (exactly these two entries, by field)
 L=$(grep -a "^RWLABEL-WAIT" "$LOG" | head -1)
 A2=$(echo "$L" | sed 's/.*addr=\(0x[0-9a-f]*\).*/\1/'); RD=$(echo "$L" | sed 's/.*rd=\([0-9]*\).*/\1/'); WR=$(echo "$L" | sed 's/.*wr=\([0-9]*\).*/\1/')
 if [ -z "$L" ] || [ ! -f "$DUMP" ]; then
     echo "RWLABEL fail (no wait line or no dump)"; rc=1
 else
-    # the kwq line for the address is followed by "   waiters: R:tid=a/nsB(..)@seq.. W:tid=.."
-    W=$(grep -a -A3 "^kwq .* uaddr=${A2} " "$DUMP" | grep -a "waiters:" | head -1)
+    # the kwq line whose uaddr field equals A2 is followed by "   waiters: R:tid=a/nsB(..)@seq.. W:tid=.." ; each waiter is one token
+    W=$(awk -v a="$A2" -v rd="$RD" -v wr="$WR" '
+        /^kwq / { cur = 0; n = split($0, f, " "); for (i = 1; i <= n; i++) if (f[i] == "uaddr=" a) cur = 1; next }
+        cur && /^   waiters:/ {
+            nr = 0; nw = 0; bad = 0; tot = 0; desc = ""
+            for (i = 2; i <= NF; i++) {
+                if (!match($i, /^[A-Z][0-9]*:tid=[0-9]+\/ns[0-9]+\(/)) continue
+                tok = $i; lab = substr(tok, 1, index(tok, ":") - 1); ns = tok; sub(/^[^\/]*\/ns/, "", ns); sub(/\(.*/, "", ns)
+                tot++; desc = desc " " lab "=" ns
+                if (lab == "R" && ns == rd) nr++; else if (lab == "W" && ns == wr) nw++; else bad++
+            }
+            printf "%s rd=%d wr=%d other=%d waiters:%s\n", (nr == 1 && nw == 1 && bad == 0 && tot == 2) ? "ok" : "bad", nr, nw, bad, desc
+            exit
+        }' "$DUMP")
     case "$W" in
-        *"R:tid="*"/ns${RD}("*) rok=y ;; *) rok=n ;;
+        ok*) echo "RWLABEL pass" ;;
+        *) echo "RWLABEL fail rd=$RD wr=$WR got=[${W:-no waiters line for $A2}]"; rc=1 ;;
     esac
-    case "$W" in
-        *"W:tid="*"/ns${WR}("*) wok=y ;; *) wok=n ;;
-    esac
-    case "$W" in
-        *"W:tid="*"/ns${RD}("*|*"R:tid="*"/ns${WR}("*) wok=n ;;
-    esac
-    if [ "$rok" = y ] && [ "$wok" = y ]; then echo "RWLABEL pass"; else echo "RWLABEL fail rd=$RD wr=$WR waiters=[$W]"; rc=1; fi
 fi
 exit $rc

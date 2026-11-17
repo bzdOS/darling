@@ -59,42 +59,66 @@ _RING_OPS = {1: "rd_lock", 2: "wr_lock", 3: "rw_unlock", 4: "rw_handle_unlock", 
 _RING_RES = {1: "wait", 2: "granted", 3: "woken", 4: "done", 5: "error", 6: "prepost", 7: "spurious"}
 _RING_FMT = "<QQQIHH6I2IHBBHH6I6IQ"  # 128 bytes, see psynch-ring.h
 
+_RING_CLASSES = ("psynch", "park", "susp")
+
+def _garr(target, proc, name, n, width):
+    v = _gv(target, name)
+    if v is None:
+        return None
+    addr = v.GetLoadAddress()
+    raw = _mem(proc, addr, n * width)
+    if raw is None:
+        return None
+    return list(struct.unpack("<%d%s" % (n, "Q" if width == 8 else "I"), raw))
+
 def dump_ring(target, proc, info, P):
     on = _gv(target, "dtape_psynch_ring_on")
-    ring = _gv(target, "dtape_psynch_ring")
-    size = _gv(target, "dtape_psynch_ring_size")
-    head = _gv(target, "dtape_psynch_ring_head")
-    if not (on and ring and size and head):
-        P("(psynch ring symbols not found: server built without the ring)")
+    if on is None or _gv(target, "dtape_psynch_ring_mem") is None:
+        P("(psynch ring symbols not found: server built without the per-class ring)")
         return
-    if not _u(on) or not _u(ring):
+    mask = _u(on)
+    if not mask:
         P("(psynch ring off: start the server with DSERVER_PSYNCH_RING=1)")
         return
-    n = _u(size); hd = _u(head)
-    assert struct.calcsize(_RING_FMT) == 128
-    raw = _mem(proc, _u(ring), n * 128)
-    if raw is None:
+    nc = len(_RING_CLASSES)
+    mems = _garr(target, proc, "dtape_psynch_ring_mem", nc, 8)
+    sizes = _garr(target, proc, "dtape_psynch_ring_size", nc, 4)
+    heads = _garr(target, proc, "dtape_psynch_ring_head", nc, 8)
+    drops = _garr(target, proc, "dtape_psynch_ring_dropped", nc, 8)
+    if not (mems and sizes and heads and drops):
         P("(psynch ring unreadable)")
         return
+    assert struct.calcsize(_RING_FMT) == 128
     nst_pid = {}
     for d in info:
         if d.get("nstid") is not None and d.get("pid"):
             nst_pid[d["nstid"]] = d["pid"]
-    ents = []
-    for i in range(n):
-        f = struct.unpack_from(_RING_FMT, raw, i * 128)
-        if f[0]:
-            ents.append(f)
-    ents.sort(key=lambda f: f[0])
-    P("psynch ring: size=%d recorded=%d valid=%d (oldest seq %s) format: seq t tid(guest) op res uaddr img type qr qw L/U/S before>after a0 a1 aux wake skip" % (
-        n, hd, len(ents), ents[0][0] if ents else "-"))
-    for f in ents:
-        (seq, ts, uaddr, tid, op, res, l0, u0, s0, l1, u1, s1, a0, a1, ty, qr, qw, nw, nk) = f[:19]
-        wake = f[19:25]; skip = f[25:31]; aux = f[31]
-        img = img_off(nst_pid.get(tid), uaddr) if uaddr else "-"
-        P("ring seq=%d t=%d tid=%d op=%s res=%s uaddr=%#x img=%s type=%d qr=%d qw=%d L=%#x>%#x U=%#x>%#x S=%#x>%#x a0=%#x a1=%#x aux=%#x wake=%d[%s] skip=%d[%s]" % (
-            seq, ts, tid, _RING_OPS.get(op, op), _RING_RES.get(res, res), uaddr, img, ty, qr, qw, l0, l1, u0, u1, s0, s1, a0, a1, aux,
-            nw, ",".join(str(x) for x in wake[:min(nw, 6)]), nk, ",".join(str(x) for x in skip[:min(nk, 6)])))
+    P("psynch ring: classes=%#x (bit0 psynch, bit1 park, bit2 susp) per class: recorded = events offered, dropped = entries overwritten" % mask)
+    for c in range(nc):
+        name = _RING_CLASSES[c]
+        if not (mask >> c) & 1:
+            P("ring class=%s off" % name)
+            continue
+        n = sizes[c]
+        raw = _mem(proc, mems[c], n * 128)
+        if raw is None:
+            P("ring class=%s unreadable" % name)
+            continue
+        ents = []
+        for i in range(n):
+            f = struct.unpack_from(_RING_FMT, raw, i * 128)
+            if f[0]:
+                ents.append(f)
+        ents.sort(key=lambda f: f[0])
+        P("ring class=%s size=%d recorded=%d dropped=%d valid=%d oldest_seq=%s" % (
+            name, n, heads[c], drops[c], len(ents), ents[0][0] if ents else "-"))
+        for f in ents:
+            (seq, ts, uaddr, tid, op, res, l0, u0, s0, l1, u1, s1, a0, a1, ty, qr, qw, nw, nk) = f[:19]
+            wake = f[19:25]; skip = f[25:31]; aux = f[31]
+            img = img_off(nst_pid.get(tid), uaddr) if uaddr else "-"
+            P("ring seq=%d cls=%s t=%d tid=%d op=%s res=%s uaddr=%#x img=%s type=%d qr=%d qw=%d L=%#x>%#x U=%#x>%#x S=%#x>%#x a0=%#x a1=%#x aux=%#x wake=%d[%s] skip=%d[%s]" % (
+                seq, name, ts, tid, _RING_OPS.get(op, op), _RING_RES.get(res, res), uaddr, img, ty, qr, qw, l0, l1, u0, u1, s0, s1, a0, a1, aux,
+                nw, ",".join(str(x) for x in wake[:min(nw, 6)]), nk, ",".join(str(x) for x in skip[:min(nk, 6)])))
 
 def _u(v):
     return v.GetValueAsUnsigned() if v and v.IsValid() else 0

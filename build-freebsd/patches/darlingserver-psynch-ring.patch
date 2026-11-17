@@ -1,16 +1,19 @@
 diff --git a/duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h b/duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h
 new file mode 100644
-index 0000000..53fea7b
+index 0000000..ba68286
 --- /dev/null
 +++ b/duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,85 @@
 +#ifndef _DARLINGSERVER_DUCT_TAPE_PSYNCH_RING_H_
 +#define _DARLINGSERVER_DUCT_TAPE_PSYNCH_RING_H_
 +
-+// In-memory ring of psynch (pthread mutex / cond / rwlock) and thread suspend/resume events.
-+// Off by default; the server enables it with DSERVER_PSYNCH_RING=1 (DSERVER_PSYNCH_RING_SIZE=<entries>,
-+// default 4096). Nothing is logged: the buffer is read out of the live process (ds_microthreads_dump.py,
-+// section "psynch ring"). When off the cost of a hook is one load and one branch.
++// In-memory rings of psynch (pthread mutex / cond / rwlock) events, of thread park/unpark events and of thread
++// suspend/resume events: one ring per class, so a busy class cannot push out another one.
++// Off by default; the server enables it with DSERVER_PSYNCH_RING=1 (DSERVER_PSYNCH_RING_SIZE=<entries per ring>,
++// default 4096; DSERVER_PSYNCH_RING_CLASSES=<mask>, bit 0 psynch, bit 1 park/unpark, bit 2 suspend/resume,
++// default 7). Nothing is logged: the buffers are read out of the live process (ds_microthreads_dump.py, section
++// "psynch ring"). dtape_psynch_ring_on holds the mask of the classes that are on; when a class is off the cost of
++// its hook is one load and one branch. Each class counts recorded entries and dropped (overwritten) entries.
 +
 +#include <stdint.h>
 +
@@ -64,10 +67,19 @@ index 0000000..53fea7b
 +	DTAPE_PSR_RES_SPURIOUS, // unlock ignored: older than the last unlock
 +};
 +
-+extern int dtape_psynch_ring_on;
++enum { DTAPE_PSR_CLASS_PSYNCH = 0, DTAPE_PSR_CLASS_PARK = 1, DTAPE_PSR_CLASS_SUSP = 2, DTAPE_PSR_NCLASS = 3 };
++#define DTAPE_PSR_BIT(c) (1 << (c))
 +
-+// mem must hold n entries (zeroed); n is rounded down to a power of two by the caller
-+void dtape_psynch_ring_attach(struct dtape_psynch_ring_ent* mem, uint32_t n);
++// bit mask of the classes that are on (0: ring off)
++extern int dtape_psynch_ring_on;
++// per class: ring memory, entries (power of two), recorded entries (events offered while on), dropped entries (overwritten)
++extern struct dtape_psynch_ring_ent* dtape_psynch_ring_mem[DTAPE_PSR_NCLASS];
++extern uint32_t dtape_psynch_ring_size[DTAPE_PSR_NCLASS];
++extern uint64_t dtape_psynch_ring_head[DTAPE_PSR_NCLASS];
++extern uint64_t dtape_psynch_ring_dropped[DTAPE_PSR_NCLASS];
++
++// mem must hold n entries (zeroed); n is rounded down to a power of two by the caller; seq is per class
++void dtape_psynch_ring_attach(int cls, struct dtape_psynch_ring_ent* mem, uint32_t n);
 +void dtape_psynch_ring_rec(const struct dtape_psynch_ring_ent* e);
 +// simple form for events without kwq state
 +void dtape_psynch_ring_note(uint16_t op, uint16_t res, uint32_t tid, uint32_t arg0, uint32_t arg1, uint64_t aux);
@@ -78,7 +90,7 @@ index 0000000..53fea7b
 +
 +#endif // _DARLINGSERVER_DUCT_TAPE_PSYNCH_RING_H_
 diff --git a/duct-tape/pthread/kern_synch.c b/duct-tape/pthread/kern_synch.c
-index aa2b6d3..13ca856 100644
+index aa2b6d3..0499123 100644
 --- a/duct-tape/pthread/kern_synch.c
 +++ b/duct-tape/pthread/kern_synch.c
 @@ -39,2 +39,3 @@
@@ -88,7 +100,7 @@ index aa2b6d3..13ca856 100644
 @@ -192,2 +193,62 @@ typedef struct ksyn_wait_queue * ksyn_wait_queue_t;
  
 +/* ---- psynch ring hooks (darlingserver/duct-tape/psynch-ring.h); each is one branch when the ring is off ---- */
-+#define PSR_ON() __builtin_expect(dtape_psynch_ring_on != 0, 0)
++#define PSR_ON() __builtin_expect((dtape_psynch_ring_on & DTAPE_PSR_BIT(DTAPE_PSR_CLASS_PSYNCH)) != 0, 0)
 +
 +struct psr_st { uint32_t l, u, s; };
 +struct psr_acc { uint16_t nwake, nskip; uint32_t wake[6], skip[6]; };
@@ -285,10 +297,10 @@ index aa2b6d3..13ca856 100644
 +	}
  	if (updatep != NULL)
 diff --git a/duct-tape/src/psynch.c b/duct-tape/src/psynch.c
-index 748d083..84a434a 100644
+index 748d083..9346ad7 100644
 --- a/duct-tape/src/psynch.c
 +++ b/duct-tape/src/psynch.c
-@@ -678 +678,43 @@ void dtape_psynch_thread_destroy(dtape_thread_t* thread) {
+@@ -678 +678,60 @@ void dtape_psynch_thread_destroy(dtape_thread_t* thread) {
  };
 +
 +// ---- psynch ring (see darlingserver/duct-tape/psynch-ring.h) -------------------------------------------------------
@@ -296,30 +308,47 @@ index 748d083..84a434a 100644
 +#include <darlingserver/duct-tape/psynch-ring.h>
 +
 +int dtape_psynch_ring_on = 0;
-+struct dtape_psynch_ring_ent* dtape_psynch_ring = NULL;
-+uint32_t dtape_psynch_ring_size = 0;
-+uint64_t dtape_psynch_ring_head = 0;
++struct dtape_psynch_ring_ent* dtape_psynch_ring_mem[DTAPE_PSR_NCLASS];
++uint32_t dtape_psynch_ring_size[DTAPE_PSR_NCLASS];
++uint64_t dtape_psynch_ring_head[DTAPE_PSR_NCLASS];
++uint64_t dtape_psynch_ring_dropped[DTAPE_PSR_NCLASS];
 +
-+void dtape_psynch_ring_attach(struct dtape_psynch_ring_ent* mem, uint32_t n) {
-+	dtape_psynch_ring = mem;
-+	dtape_psynch_ring_size = n;
-+	__atomic_store_n(&dtape_psynch_ring_on, mem != NULL && n != 0, __ATOMIC_RELEASE);
++static int dtape_psynch_ring_class_of(uint16_t op) {
++	if (op == DTAPE_PSR_OP_THREAD_PARK || op == DTAPE_PSR_OP_THREAD_UNPARK) {
++		return DTAPE_PSR_CLASS_PARK;
++	}
++	if (op == DTAPE_PSR_OP_THREAD_SUSPEND || op == DTAPE_PSR_OP_THREAD_RESUME) {
++		return DTAPE_PSR_CLASS_SUSP;
++	}
++	return DTAPE_PSR_CLASS_PSYNCH;
++};
++
++void dtape_psynch_ring_attach(int cls, struct dtape_psynch_ring_ent* mem, uint32_t n) {
++	if (cls < 0 || cls >= DTAPE_PSR_NCLASS || mem == NULL || n == 0) {
++		return;
++	}
++	dtape_psynch_ring_mem[cls] = mem;
++	dtape_psynch_ring_size[cls] = n;
++	__atomic_fetch_or(&dtape_psynch_ring_on, DTAPE_PSR_BIT(cls), __ATOMIC_RELEASE);
 +};
 +
 +void dtape_psynch_ring_rec(const struct dtape_psynch_ring_ent* e) {
-+	if (!dtape_psynch_ring_on) {
++	int cls = dtape_psynch_ring_class_of(e->op);
++	if (!(dtape_psynch_ring_on & DTAPE_PSR_BIT(cls))) {
 +		return;
 +	}
-+	uint64_t n = __atomic_fetch_add(&dtape_psynch_ring_head, 1, __ATOMIC_RELAXED);
-+	struct dtape_psynch_ring_ent* slot = &dtape_psynch_ring[n & (dtape_psynch_ring_size - 1)];
-+	__atomic_store_n(&slot->seq, 0, __ATOMIC_RELAXED);
++	uint64_t n = __atomic_fetch_add(&dtape_psynch_ring_head[cls], 1, __ATOMIC_RELAXED);
++	struct dtape_psynch_ring_ent* slot = &dtape_psynch_ring_mem[cls][n & (dtape_psynch_ring_size[cls] - 1)];
++	if (__atomic_exchange_n(&slot->seq, 0, __ATOMIC_RELAXED) != 0) {
++		__atomic_fetch_add(&dtape_psynch_ring_dropped[cls], 1, __ATOMIC_RELAXED);
++	}
 +	*slot = *e;
 +	slot->ts = mach_absolute_time();
 +	__atomic_store_n(&slot->seq, n + 1, __ATOMIC_RELEASE);
 +};
 +
 +void dtape_psynch_ring_note(uint16_t op, uint16_t res, uint32_t tid, uint32_t arg0, uint32_t arg1, uint64_t aux) {
-+	if (!dtape_psynch_ring_on) {
++	if (!(dtape_psynch_ring_on & DTAPE_PSR_BIT(dtape_psynch_ring_class_of(op)))) {
 +		return;
 +	}
 +	struct dtape_psynch_ring_ent e;
@@ -333,7 +362,7 @@ index 748d083..84a434a 100644
 +	dtape_psynch_ring_rec(&e);
 +};
 diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
-index 629a9af..3f5b9fa 100644
+index 629a9af..96d3702 100644
 --- a/duct-tape/src/thread.c
 +++ b/duct-tape/src/thread.c
 @@ -19,2 +19,4 @@
@@ -343,31 +372,31 @@ index 629a9af..3f5b9fa 100644
  #define LINUX_ENOSYS 38
 @@ -2005,2 +2007,6 @@ thread_suspend(thread_t thread)
  
-+	if (dtape_psynch_ring_on) {
++	if (dtape_psynch_ring_on & DTAPE_PSR_BIT(DTAPE_PSR_CLASS_SUSP)) {
 +		dtape_psynch_ring_note(DTAPE_PSR_OP_THREAD_SUSPEND, DTAPE_PSR_RES_DONE, (uint32_t)thread_tid(current_thread()),
 +			(uint32_t)thread->thread_id, thread->user_stop_count, (uint64_t)(uint32_t)thread->suspend_count | ((uint64_t)(uint32_t)result << 32));
 +	}
  	thread_mtx_unlock(thread);
 @@ -2037,2 +2043,6 @@ thread_resume(thread_t thread)
  
-+	if (dtape_psynch_ring_on) {
++	if (dtape_psynch_ring_on & DTAPE_PSR_BIT(DTAPE_PSR_CLASS_SUSP)) {
 +		dtape_psynch_ring_note(DTAPE_PSR_OP_THREAD_RESUME, DTAPE_PSR_RES_DONE, (uint32_t)thread_tid(current_thread()),
 +			(uint32_t)thread->thread_id, thread->user_stop_count, (uint64_t)(uint32_t)thread->suspend_count | ((uint64_t)(uint32_t)result << 32));
 +	}
  	thread_mtx_unlock(thread);
 diff --git a/src/server.cpp b/src/server.cpp
-index a646422..5165920 100644
+index a646422..bf54917 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
-@@ -44,2 +44,36 @@ static DarlingServer::Server* sharedInstancePointer = nullptr;
+@@ -44,2 +44,48 @@ static DarlingServer::Server* sharedInstancePointer = nullptr;
  
 +// psynch ring (duct-tape/src/psynch.c): off unless DSERVER_PSYNCH_RING is set
 +extern "C" {
 +	extern int dtape_psynch_ring_on;
-+	void dtape_psynch_ring_attach(void* mem, uint32_t n);
++	void dtape_psynch_ring_attach(int cls, void* mem, uint32_t n);
 +	void dtape_psynch_ring_note(uint16_t op, uint16_t res, uint32_t tid, uint32_t arg0, uint32_t arg1, uint64_t aux);
 +}
-+enum { PSR_OP_THREAD_PARK = 16, PSR_OP_THREAD_UNPARK = 17, PSR_RES_WAIT = 1, PSR_RES_DONE = 4 };
++enum { PSR_OP_THREAD_PARK = 16, PSR_OP_THREAD_UNPARK = 17, PSR_RES_WAIT = 1, PSR_RES_DONE = 4, PSR_BIT_PARK = 2 };
 +
 +static const bool dsPsynchRingInit = [] {
 +	const char* on = getenv("DSERVER_PSYNCH_RING");
@@ -387,25 +416,37 @@ index a646422..5165920 100644
 +	while (n & (n - 1)) {
 +		n &= n - 1;
 +	}
-+	// 128 bytes per entry (see duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h); never freed
-+	void* mem = calloc(n, 128);
-+	if (mem) {
-+		dtape_psynch_ring_attach(mem, (uint32_t)n);
++	// classes: bit 0 psynch, bit 1 park/unpark, bit 2 suspend/resume
++	unsigned long mask = 7;
++	if (const char* cl = getenv("DSERVER_PSYNCH_RING_CLASSES")) {
++		mask = strtoul(cl, nullptr, 0) & 7;
 +	}
-+	return mem != nullptr;
++	bool any = false;
++	for (int c = 0; c < 3; c++) {
++		if (!(mask & (1ul << c))) {
++			continue;
++		}
++		// 128 bytes per entry (see duct-tape/internal-include/darlingserver/duct-tape/psynch-ring.h); never freed
++		void* mem = calloc(n, 128);
++		if (mem) {
++			dtape_psynch_ring_attach(c, mem, (uint32_t)n);
++			any = true;
++		}
++	}
++	return any;
 +}();
 +
  struct DTapeHooks {
-@@ -53,2 +87,6 @@ struct DTapeHooks {
+@@ -53,2 +99,6 @@ struct DTapeHooks {
  		}
-+		if (dtape_psynch_ring_on) {
++		if (dtape_psynch_ring_on & PSR_BIT_PARK) {
 +			// the thread is about to park (Thread::suspend may still absorb an earlier resume)
 +			dtape_psynch_ring_note(PSR_OP_THREAD_PARK, PSR_RES_WAIT, static_cast<DarlingServer::Thread*>(thread_context)->_nstid, continuationCallback ? 1 : 0, 0, 0);
 +		}
  		if (continuationCallback) {
-@@ -63,2 +101,6 @@ struct DTapeHooks {
+@@ -63,2 +113,6 @@ struct DTapeHooks {
  	static void dtape_hook_thread_resume(void* thread_context) {
-+		if (dtape_psynch_ring_on) {
++		if (dtape_psynch_ring_on & PSR_BIT_PARK) {
 +			auto rcur = DarlingServer::Thread::currentThread();
 +			dtape_psynch_ring_note(PSR_OP_THREAD_UNPARK, PSR_RES_DONE, rcur ? rcur->_nstid : 0, static_cast<DarlingServer::Thread*>(thread_context)->_nstid, 0, 0);
 +		}
