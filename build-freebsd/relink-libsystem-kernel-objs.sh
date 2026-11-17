@@ -46,6 +46,10 @@ open(out + "/cc.sh", "w").write("\n".join(cc) + "\n")
 link = [l for l in lines if "-o " + target + " " in l and "-shared" in l][-1]
 link = link.replace("-arch x86_64 -arch i386", "-arch x86_64").replace(" -arch i386 -arch x86_64 -arch x86_64 ", " ")
 link = link.replace("-o " + target, "-o " + out + "/libsystem_kernel.x86_64")
+# reproducible: -ggdb objects put the object path + mtime into N_OSO stabs (differs per outdir and per run) and the
+# UUID is a hash of the file; strip debug stabs so equal inputs give a byte-identical dylib
+link = link.replace(" -Wl,-bind_at_load ", " -Wl,-bind_at_load -Wl,-S ", 1)
+assert " -Wl,-S " in link
 ld = src + "/build-host-tools/ld64/x86_64-apple-darwin20-ld"
 link = link.replace("-fuse-ld=" + [w for w in link.split() if w.startswith("-fuse-ld=")][0][9:], "-fuse-ld=" + ld)
 link = link.replace("-B " + [w for w in link.split() if w.startswith("/") and w.endswith("ld64/src/")][0],

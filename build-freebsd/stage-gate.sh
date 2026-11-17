@@ -50,6 +50,12 @@ if [ "${STAGE_GATE_FSOPS_RUN:-0}" = 1 ]; then
 	fsv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/run-fsops-probe.sh" 2>&1 | grep -a "^FSOPS-VERDICT" | tail -1); echo "$fsv"
 	case "$fsv" in "FSOPS-VERDICT pass"*) ;; *) echo "STAGECHK FAIL fsops=FAIL"; exit 1;; esac
 fi
+# STAGE_GATE_WINDOW_RUN=1 also runs the window draw probe (WINDOW-DRAW-VERDICT line: an NSWindow with a red background must
+# map in an own headless sway and show that colour in a grim snapshot; own sway and darlingserver, off by default).
+if [ "${STAGE_GATE_WINDOW_RUN:-0}" = 1 ]; then
+	wdv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/window-draw-probe.sh" 2>&1 | grep -a "^WINDOW-DRAW-VERDICT" | tail -1); echo "$wdv"
+	case "$wdv" in "WINDOW-DRAW-VERDICT pass"*) ;; *) echo "STAGECHK FAIL window=FAIL"; exit 1;; esac
+fi
 # CoreGraphics must carry the NULL-safe CGColor accessors (cg-color-nullsafe.py); overlay and staged copy are both checked.
 cgp=ok; CGR=System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
 for f in "$DARLING_OVERLAY/$CGR" "$SO/$CGR"; do
@@ -77,6 +83,8 @@ grep -q SERIES_DISK_MAX "$HERE/chrome-series.sh" && grep -q SERIES_DISK_STOP "$H
 if [ "$dg" = FAIL ]; then
 	echo "STAGECHK FAIL diskguard=FAIL (SERIES_DISK_MAX/SERIES_DISK_STOP guard or disk-guard-selftest.sh missing)"; exit 1
 fi
+# Relink reproducibility: static flag check only (relink-repro-check.sh without --static does two relinks; opt-in).
+sh "$HERE/relink-repro-check.sh" --static || { echo "STAGECHK FAIL relinkrepro=FAIL"; exit 1; }
 if [ -z "$bad" ] && [ "$ML" != none ]; then
 	echo "STAGECHK ok cfinit=ok cgpatch=$cgp nokill=$nk diskguard=$dg images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
 fi
