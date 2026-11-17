@@ -44,6 +44,12 @@ if [ "${STAGE_GATE_CFINIT_RUN:-0}" = 1 ]; then
 	cfv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/cfinit-check.sh" 2>&1 | grep -a "^CFINIT-VERDICT" | tail -1); echo "$cfv"
 	case "$cfv" in "CFINIT-VERDICT pass"*) ;; *) echo "STAGECHK FAIL cfinit=FAIL"; exit 1;; esac
 fi
+# STAGE_GATE_FSOPS_RUN=1 also runs the file system probe (FSOPS-VERDICT line: statfs/fstatfs, byte-range locks, fsync, mmap as a
+# browser's SQLite databases use them; starts its own darlingserver, off by default). Needs tests/fsops-probe-macho (build-fsops-probe.sh).
+if [ "${STAGE_GATE_FSOPS_RUN:-0}" = 1 ]; then
+	fsv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/run-fsops-probe.sh" 2>&1 | grep -a "^FSOPS-VERDICT" | tail -1); echo "$fsv"
+	case "$fsv" in "FSOPS-VERDICT pass"*) ;; *) echo "STAGECHK FAIL fsops=FAIL"; exit 1;; esac
+fi
 # CoreGraphics must carry the NULL-safe CGColor accessors (cg-color-nullsafe.py); overlay and staged copy are both checked.
 cgp=ok; CGR=System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
 for f in "$DARLING_OVERLAY/$CGR" "$SO/$CGR"; do

@@ -1,0 +1,87 @@
+diff --git a/AppKit/Wayland.backend/WaylandDisplay.m b/AppKit/Wayland.backend/WaylandDisplay.m
+index 28d2ad84..f9206d67 100644
+--- a/AppKit/Wayland.backend/WaylandDisplay.m
++++ b/AppKit/Wayland.backend/WaylandDisplay.m
+@@ -33,6 +33,7 @@
+ #import <Foundation/NSValue.h>
+ 
+ #import <errno.h>
++#import <poll.h>
+ #import <stdio.h>
+ #import <stdlib.h>
+ #import <string.h>
+@@ -731,20 +732,54 @@ static const struct wl_seat_listener _wayland_seat_listener = {
+     }
+ }
+ 
++/* Wait for the compositor socket: up to `seconds`, returns early when events arrived. A readable socket is read and
++ * dispatched with wl_display_dispatch (the wayland shim exports no prepare_read/read_events), so configure, frame, key
++ * and pointer events are received while the application is inside its event loop (before this, nothing but a blocking
++ * wl_display_dispatch in window creation ever read the socket). */
++- (void) _waitForWaylandEventsFor: (NSTimeInterval) seconds {
++    if (_display == NULL)
++        return;
++    wl_display_dispatch_pending(_display);
++    if (wl_display_flush(_display) < 0 && errno != EAGAIN)
++        return;
++    struct pollfd pfd;
++    pfd.fd = wl_display_get_fd(_display);
++    pfd.events = POLLIN;
++    pfd.revents = 0;
++    int ms = seconds <= 0 ? 0 : (int) (seconds * 1000.0 + 0.5);
++    if (poll(&pfd, 1, ms) > 0 && (pfd.revents & POLLIN))
++        wl_display_dispatch(_display);
++}
++
+ - (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
+                           untilDate: (NSDate *) untilDate
+                              inMode: (NSRunLoopMode) mode
+                             dequeue: (BOOL) dequeue
+ {
+-    /* Give the compositor a chance to process anything we've queued (and
+-     * us a chance to notice buffer releases / configure events) before
+-     * falling through to the base class's _eventQueue-driven
+-     * implementation (NSDisplay.m:149-183). See _dispatchPendingWaylandEvents's
+-     * doc comment for why this is a polling stand-in, not a real fd
+-     * integration. */
++    /* Block until an event is queued or the deadline passes, waking on the Wayland socket (no polling spin with a
++     * zero timeout). A deadline that is already due (a modal session polls with [NSDate date] and the base class
++     * answers with a placeholder event, never nil, so its loop would spin) is lifted to a short wait, so the loop
++     * runs at most ~20 times a second and wakes at once on a socket event. The run loop (timers, ports) is given a
++     * non-blocking pass each round by the base implementation. */
+     [self _dispatchPendingWaylandEvents];
++    NSTimeInterval deadline = untilDate != nil ? [untilDate timeIntervalSinceReferenceDate]
++                                               : [[NSDate distantFuture] timeIntervalSinceReferenceDate];
++    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
++    if ([mode isEqual: NSModalPanelRunLoopMode] && deadline <= now)
++        deadline = now + 0.05;
++    while ([_eventQueue count] == 0) {
++        now = [NSDate timeIntervalSinceReferenceDate];
++        if (now >= deadline)
++            break;
++        NSTimeInterval slice = deadline - now;
++        if (slice > 0.02)
++            slice = 0.02; /* wake for run loop sources (timers, ports) that the socket poll cannot see */
++        [self _waitForWaylandEventsFor: slice];
++        if ([[NSRunLoop currentRunLoop] runMode: mode beforeDate: [NSDate date]])
++            break; /* a run loop source ran: return to the caller like the base implementation does */
++    }
+     return [super nextEventMatchingMask: mask
+-                               untilDate: untilDate
++                               untilDate: [NSDate date]
+                                   inMode: mode
+                                  dequeue: dequeue];
+ }
+diff --git a/AppKit/Wayland.backend/WaylandInput.h b/AppKit/Wayland.backend/WaylandInput.h
+index e42721a9..ea3cbb51 100644
+--- a/AppKit/Wayland.backend/WaylandInput.h
++++ b/AppKit/Wayland.backend/WaylandInput.h
+@@ -81,7 +81,7 @@ struct wl_surface;
+ /* purpose: stateful translator from wl_keyboard/wl_pointer callback
+  *          arguments to NSEvent instances, posted onto the current
+  *          NSDisplay's event queue.
+- * input: fed via the -waylandKeyboard*/-waylandPointer* methods below,
++ * input: fed via the -waylandKeyboard... and -waylandPointer... methods below,
+  *        called directly from wl_keyboard_listener/wl_pointer_listener
+  *        trampolines set up by WaylandDisplay.
+  * output: none directly - NSEvents are posted as a side effect (see

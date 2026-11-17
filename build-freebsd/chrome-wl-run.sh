@@ -53,6 +53,14 @@ RCF=$BASE.rc.$$
 rm -f "$RCF"
 # Run in the background (own subshell, so kill -0 works on it) so that a hang can be dumped BEFORE timeout kills it.
 # CHROME_SR_SERVER_LOG=<level> starts the server with DSERVER_LOG_LEVEL=<level>.
+# Log cap: the run writes into a FIFO read by one awk (RDP) that drops the traplog/prctl lines (and the lone quote lines their multi-line records leave behind) and stops appending to the
+# log after CHROME_SR_LOG_CAP bytes (default 200 MB; it keeps reading, so the run is never blocked or killed by the cap).
+# A single reader process, so it can be stopped by pid once the run is over (daemons may keep the FIFO open).
+FIFO=$BASE.fifo.$$
+rm -f "$FIFO"; mkfifo "$FIFO" || exit 1
+LC_ALL=C awk -v cap="${CHROME_SR_LOG_CAP:-209715200}" -v out="$LOG" \
+  '!/traplog|prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO" &
+RDP=$!
 ( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
@@ -66,7 +74,7 @@ rm -f "$RCF"
   ${CHROME_SR_SERVER_LOG:+DSERVER_LOG_LEVEL=$CHROME_SR_SERVER_LOG} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
-  timeout --foreground -k 5 "$T" "$LAUNCH" >> "$LOG" 2>&1; echo $? > "$RCF" ) &
+  timeout --foreground -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
 BGP=$!
 # Hang dump: CHROME_SR_DUMP_LEAD seconds (default 40) before the timeout, if the run is still alive, run
 # ds-microthreads-dump.sh on the server pid and guest-threads-snapshot.sh on the guest pid. Both pids come from the
@@ -100,6 +108,9 @@ wait $BGP
 [ -n "$SEGVP" ] && wait $SEGVP
 RC=$(cat "$RCF" 2>/dev/null); RC=${RC:-1}
 rm -f "$RCF"
+# let the reader drain what is already in the FIFO, then stop it by pid
+i=0; while [ $i -lt 3 ] && kill -0 $RDP 2>/dev/null; do sleep 1; i=$((i+1)); done
+kill $RDP 2>/dev/null; wait $RDP 2>/dev/null; rm -f "$FIFO"
 # server log (only with CHROME_SR_SERVER_LOG), copied before the prefix is removed; capped at 100 MB (tail)
 if [ -n "$CHROME_SR_SERVER_LOG" ]; then
 	$SUDO tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$BASE-dserver.txt" 2>/dev/null

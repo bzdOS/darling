@@ -1,0 +1,59 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c
+index 1098510..364818f 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c
+@@ -49,14 +49,22 @@ long sys_fstatfs64(int fd, struct bsd_statfs64* buf)
+ 
+ 	statfs_linux_to_bsd64(&lbuf, buf);
+ 
+-	ret = fdpath(fd, path, sizeof(path));
+-
+-	if (ret < 0)
+-		return ret;
++	buf->f_mntonname[0] = 0;
++	buf->f_fstypename[0] = 0;
++	buf->f_mntfromname[0] = 0;
++	buf->f_iosize = 512;
+ 
+-	fd_m = sys_open("/proc/self/mounts", O_RDONLY, 0);
++	ret = fdpath(fd, path, sizeof(path));
++	fd_m = ret < 0 ? ret : sys_open("/proc/self/mounts", O_RDONLY, 0);
+ 	if (fd_m < 0)
+-		return fd_m;
++	{
++		/* the mount table is not always readable (the guest root has no /proc): the statfs result itself is valid,
++		 * only the mount name and type are unknown, so answer success with a generic root mount instead of failing */
++		strlcpy(buf->f_mntonname, "/", sizeof(buf->f_mntonname));
++		strlcpy(buf->f_fstypename, "darling", sizeof(buf->f_fstypename));
++		strlcpy(buf->f_mntfromname, "darling", sizeof(buf->f_mntfromname));
++		return 0;
++	}
+ 	
+ 	__simple_readline_init(&rbuf);
+ 
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
+index a6a5162..0054037 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
+@@ -58,9 +58,20 @@ long sys_statfs64(const char* path, struct bsd_statfs64* buf)
+ 
+ 	statfs_linux_to_bsd64(&lbuf, buf);
+ 
++	buf->f_mntonname[0] = 0;
++	buf->f_fstypename[0] = 0;
++	buf->f_mntfromname[0] = 0;
++
+ 	fd = sys_open("/proc/self/mounts", O_RDONLY, 0);
+ 	if (fd < 0)
+-		return fd;
++	{
++		/* the mount table is not always readable (the guest root has no /proc): the statfs result itself is valid,
++		 * only the mount name and type are unknown, so answer success with a generic root mount instead of failing */
++		strlcpy(buf->f_mntonname, "/", sizeof(buf->f_mntonname));
++		strlcpy(buf->f_fstypename, "darling", sizeof(buf->f_fstypename));
++		strlcpy(buf->f_mntfromname, "darling", sizeof(buf->f_mntfromname));
++		return 0;
++	}
+ 	
+ 	__simple_readline_init(&rbuf);
+ 

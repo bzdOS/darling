@@ -49,7 +49,11 @@ while [ $valid -lt "$N" ] && [ $i -le $((2*N)) ]; do
 		sleep "${SNAP_AT:-30}"
 		if grep -aq GUEST-EXEC "$L" && ! grep -aq '^WRAPPER_RC=' "$L"; then
 			grim "$PNG" >/dev/null 2>&1
-			w=$(swaymsg -t get_tree 2>/dev/null | grep -c app_id)
+			# swaymsg finds the series' own sway only through its IPC socket (private XDG_RUNTIME_DIR, no SWAYSOCK in the env):
+			# without it swaymsg printed "Unable to retrieve socket path" and the count was always 0, whatever was on screen
+			# (read-only get_tree; a view node carries a "shell" key, an app_id may be unset)
+			SS=$(ls "$XR"/sway-ipc.* 2>/dev/null | head -1)
+			w=$(SWAYSOCK=$SS swaymsg -t get_tree 2>/dev/null | grep -c '"shell"')
 			echo "SNAP windows=$w png=$PNG" >> "$L"
 		fi
 	) &

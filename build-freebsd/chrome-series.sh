@@ -9,6 +9,7 @@
 #      CHROME_EXTRA_ARGS  extra Chrome flags (exported to chrome-sr-batch.sh, inserted before the URL).
 # Valid run = has GUEST-EXEC. survived20 = valid runs with WRAPPER_DURATION > 20. top = most frequent WRAPPER_RC.
 # Before it: FWDMISS <unique -[Class sel] of the runs' OBJC-FWD-MISS lines, comma separated> (or FWDMISS none).
+#      Each rc124 run is followed by its NOWINDOW-DIAG line (nowindow-diag.sh analyze).
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> fwdmiss=<unique OBJC-FWD-MISS selectors> mldr=<md5>
 # Exit 1 if the gate fails or valid=0.
 #      chrome-series.sh --dump-selftest   (no Chrome: fake launcher + fake dump scripts, checks the rc124 hang dump)
@@ -119,5 +120,14 @@ series_count "$DARLING_BUILD_DIR" "$P" "$N" || exit 1
 top="rc?x0"
 [ -n "$rcs" ] && top=$(printf '%s\n' $rcs | sort | uniq -c | sort -rn | awk 'NR==1{print "rc" $2 "x" $1}')
 if [ -n "$fwdlist" ]; then echo "FWDMISS $(printf '%s\n' "$fwdlist" | paste -sd, - | sed 's/,/, /g')"; else echo "FWDMISS none"; fi
+# rc124 classifier: one NOWINDOW-DIAG line per run that hit the timeout (see nowindow-diag.sh analyze: where the main
+# thread is, wayland connected, windows seen, last stage reached, the NSAlert text if any, and a one-word verdict)
+_i=1
+while [ "$_i" -le "$N" ]; do
+	_L="$DARLING_BUILD_DIR/chrome-sr-$P$_i.log"; _i=$((_i+1))
+	[ -f "$_L" ] || continue
+	[ "$(sed -n 's/^WRAPPER_RC=//p' "$_L" | tail -1)" = 124 ] || continue
+	echo "run $((_i-1)): $(sh "$DARLING_SRC_DIR/build-freebsd/nowindow-diag.sh" analyze "$_L" 2>&1 | tail -1)"
+done
 echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins fwdmiss=$fwdmiss mldr=$M args=\"$CHROME_EXTRA_ARGS\""
 [ "$valid" -gt 0 ]
