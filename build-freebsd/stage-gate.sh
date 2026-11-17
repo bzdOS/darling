@@ -106,7 +106,17 @@ if [ "$dg" = FAIL ]; then
 fi
 # Relink reproducibility: static flag check only (relink-repro-check.sh without --static does two relinks; opt-in).
 sh "$HERE/relink-repro-check.sh" --static || { echo "STAGECHK FAIL relinkrepro=FAIL"; exit 1; }
+# One tree, one final build, nothing grows: keep-one-check.sh is read-only (never deletes). Reported as keepone=<verdict>;
+# it fails the gate only with STAGE_GATE_KEEPONE=1 (line: KEEP-ONE verdict=pass|fail ...; --list names the candidates).
+ko=skip
+if [ -f "$HERE/keep-one-check.sh" ]; then
+	kol=$(sh "$HERE/keep-one-check.sh" 2>/dev/null | tail -1)
+	case "$kol" in "KEEP-ONE verdict=pass"*) ko=pass;; *) ko=fail;; esac
+	if [ "$ko" = fail ] && [ "${STAGE_GATE_KEEPONE:-0}" = 1 ]; then
+		echo "STAGECHK FAIL keepone=FAIL ($kol)"; exit 1
+	fi
+fi
 if [ -z "$bad" ] && [ "$ML" != none ]; then
-	echo "STAGECHK ok cfinit=ok cgpatch=$cgp nokill=$nk diskguard=$dg images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
+	echo "STAGECHK ok cfinit=ok cgpatch=$cgp nokill=$nk diskguard=$dg keepone=$ko images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
 fi
 echo "STAGECHK FAIL images=$n mldr=$ML mismatches:${bad:- none}"; exit 1
