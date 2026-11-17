@@ -3,7 +3,7 @@
 # backend, run like the Chrome series runs (own headless sway in a private 0700 XDG_RUNTIME_DIR, launch-dynamic under
 # sudo, DARLING_GUEST_EXPOSE). After SNAP seconds: swaymsg get_tree (own socket) for a mapped view, grim snapshot,
 # pixel colour at the centre of the window buffer (view origin + 200,150). Needs DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR. Env: WAIT (default 40),
-# SNAP (default 12), WL_DEBUG=1 (WAYLAND_DEBUG=1 in the guest; the log is capped at 50 MB).
+# SNAP (default 12), WINDOW_DRAW_ALERT=1 (show a modal NSAlert instead; the colour check then fails by design), WL_DEBUG=1 (WAYLAND_DEBUG=1 in the guest; the log is capped at 50 MB).
 # Output: WINDOW-DRAW-VERDICT pass|fail mapped=<y|n> color=<rgb> expected=255,0,0 ; rc 0 on pass.
 V=WINDOW-DRAW-VERDICT; EXP=255,0,0
 fail() { echo "$V fail mapped=${2:-n} color=${3:-none} expected=$EXP [$1]"; exit 1; }
@@ -36,7 +36,7 @@ LOG=$BD/window-draw-probe.log; PNG=$BD/window-draw-probe.png; rm -f "$LOG" "$PNG
 PRE=" $(pgrep -x darlingserver | tr "\n" " ") "
 ( sudo -n timeout -k 5 "${WAIT:-40}" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
 	DARLING_KEEP_LOCAL=1 DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc \
-	XDG_RUNTIME_DIR="$XR" WAYLAND_DISPLAY="$WD" DARLING_GUEST_EXPOSE="$XR" ${WL_DEBUG:+WAYLAND_DEBUG=1} \
+	XDG_RUNTIME_DIR="$XR" WAYLAND_DISPLAY="$WD" DARLING_GUEST_EXPOSE="$XR" ${WL_DEBUG:+WAYLAND_DEBUG=1} ${WINDOW_DRAW_ALERT:+WINDOW_DRAW_ALERT=1} \
 	"$BD/launch-dynamic" 2>&1 | head -c 52428800 > "$LOG" & )
 i=0; while [ $i -lt 40 ]; do grep -qa "WINDOW-DRAW-PROBE READY" "$LOG" 2>/dev/null && break; sleep 1; i=$((i+1)); done
 sleep "${SNAP:-12}"

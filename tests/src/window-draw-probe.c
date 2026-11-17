@@ -24,6 +24,15 @@ int main(void)
     void *win = mw(M(C("NSWindow"), S("alloc")), S("initWithContentRect:styleMask:backing:defer:"), r, 15UL, 2UL, 0);
     void *mode = M(C("NSString"), S("stringWithUTF8String:"), "kCFRunLoopDefaultMode");
     M(win, S("setBackgroundColor:"), mc(C("NSColor"), S("colorWithCalibratedRed:green:blue:alpha:"), 1.0, 0.0, 0.0, 1.0));
+    if (getenv("WINDOW_DRAW_ALERT")) {
+        /* the Chrome profile-error path: a modal NSAlert, blocks until dismissed (the run is cut by the harness) */
+        void *al = M(M(C("NSAlert"), S("alloc")), S("init"));
+        M(al, S("setMessageText:"), M(C("NSString"), S("stringWithUTF8String:"), "window-draw alert"));
+        M(al, S("addButtonWithTitle:"), M(C("NSString"), S("stringWithUTF8String:"), "OK"));
+        printf("WINDOW-DRAW-PROBE READY alert\n");
+        fflush(stdout);
+        M(al, S("runModal"));
+    }
     M(win, S("makeKeyAndOrderFront:"), 0);
     printf("WINDOW-DRAW-PROBE READY win=%p\n", win);
     fflush(stdout);
