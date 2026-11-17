@@ -32,15 +32,17 @@ TS=$(date +%m%d-%H%M%S)
 LOG="${BD}/suspend-rwlock-${TS}.log"; DUMP="${BD}/suspend-rwlock-${TS}.dump"
 XR=$(mktemp -d /tmp/suspend-rwlock-xdg.XXXXXX) || { echo "FATAL: mktemp" >&2; exit 2; }
 chmod 700 "$XR"
-XDG_RUNTIME_DIR="$XR" WAYLAND_DISPLAY=wayland-sr WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+XDG_RUNTIME_DIR="$XR" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
     nice -n 19 sway --unsupported-gpu >"$XR/sway.log" 2>&1 &
 SWAYPID=$!
-i=0; while [ ! -S "$XR/wayland-sr" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
-if [ ! -S "$XR/wayland-sr" ]; then echo "RUN-INVALID sway-did-not-start"; ps -o pid,ppid,lstart,args -p "$SWAYPID" >&2; kill "$SWAYPID"; exit 4; fi
+# sway names its own socket wayland-N (it ignores WAYLAND_DISPLAY with the headless backend): wait for any, then use that one
+WD=""; i=0
+while [ -z "$WD" ] && [ "$i" -lt 30 ]; do WD=$(ls "$XR" 2>/dev/null | grep -E "^wayland-[0-9]+$" | head -1); [ -n "$WD" ] || { sleep 1; i=$((i+1)); }; done
+if [ -z "$WD" ] || [ ! -S "$XR/$WD" ]; then echo "RUN-INVALID sway-did-not-start"; ps -o pid,ppid,lstart,args -p "$SWAYPID" >&2; kill "$SWAYPID"; exit 4; fi
 before=$(pgrep -x darlingserver | tr "\n" " ")
 ( sudo timeout -k 5 $((WAIT+60)) env DSERVER_PSYNCH_RING=1 "DSERVER_PSYNCH_RING_SIZE=${PSYNCH_RING_SIZE:-262144}" "DSERVER_PSYNCH_RING_CLASSES=${PSYNCH_RING_CLASSES:-7}" \
     "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" "DARLING_TEST_BINARY=suspend-rwlock-probe-macho" DARLING_SMOKE_REFRESH=1 \
-    XDG_RUNTIME_DIR="$XR" WAYLAND_DISPLAY=wayland-sr DARLING_GUEST_EXPOSE="$XR" \
+    XDG_RUNTIME_DIR="$XR" WAYLAND_DISPLAY="$WD" DARLING_GUEST_EXPOSE="$XR" \
     ${SR_SECS:+SR_SECS=$SR_SECS} ${SR_HANG_S:+SR_HANG_S=$SR_HANG_S} ${SR_SUSP_US:+SR_SUSP_US=$SR_SUSP_US} ${SR_GAP_US:+SR_GAP_US=$SR_GAP_US} \
     "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
 i=0
@@ -55,7 +57,7 @@ for p in $(pgrep -x darlingserver); do
     if grep -qa "^psynch ring:" "${DUMP}.$p"; then mv "${DUMP}.$p" "${DUMP}"; break; fi
 done
 SWAYOK=n
-kill -0 "$SWAYPID" 2>/dev/null && [ -S "$XR/wayland-sr" ] && SWAYOK=y
+kill -0 "$SWAYPID" 2>/dev/null && [ -S "$XR/$WD" ] && SWAYOK=y
 for p in $(pgrep -x darlingserver); do
     case " $before " in *" $p "*) ;; *) ps -o pid,ppid,lstart,args -p "$p" >&2; sudo kill -9 "$p" ;; esac
 done
