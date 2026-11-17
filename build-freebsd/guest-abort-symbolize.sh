@@ -46,6 +46,13 @@ if not frames:
             m = re.match(r'\[darling-mldr\]   at (.+) rip=(0x[0-9a-f]+)', ln)
             if m: frames.append(('raw', int(m.group(2), 16)))
 if not frames:
+    # SIGTRAP/SEGV delivered to the guest: the faulting rip, then the chain of return addresses
+    for ln in raw:
+        m = re.search(r'SIGTRAP-AUDIT-DELIVER:.* rip=(0x[0-9a-f]+)', ln)
+        if m and not frames: frames.append(('raw', int(m.group(1), 16)))
+        m = re.search(r'SIGTRAP-AUDIT-CHAIN: #\d+ ret=(0x[0-9a-f]+)', ln)
+        if m and frames: frames.append(('raw', int(m.group(1), 16)))
+if not frames:
     print('ABORT %s rc=%s none(no abort or fatal stack in log)' % (tag, rc)); sys.exit(1)
 app = os.environ.get('CHROME_APP', '')
 fw = None
@@ -122,5 +129,7 @@ for n, (_, a) in enumerate(frames):
 end = ai if ai is not None else next((i for i, ln in enumerate(raw) if 'FATAL signal' in ln), len(raw))
 noise = re.compile(r'^\[(traplog|darling-mldr|dyld-trace|launch)\]|^WRAPPER_|^SNAP|^sh: ')
 tail = [ln.strip()[:160] for ln in raw[:end] if ln.strip() and not noise.match(ln)][-20:]
+keyimg = ('chrome-macho', 'Google Chrome for Testing Framework', 'libsystem_kernel.dylib', 'dyld', 'libdispatch.dylib', 'libsystem_c.dylib', 'libsystem_pthread.dylib', 'CoreFoundation', 'Foundation', 'AppKit')
+print('IMAGES %s ' % tag + ' '.join('%s@0x%x' % (k.replace('Google Chrome for Testing Framework', 'ChromeFW'), v) for k, v in imgs.items() if k in keyimg or k.split('/')[-1] in keyimg))
 print('ABORT %s rc=%s frames=%s str=%s stderr=<%s>' % (tag, rc, ' > '.join(parts), ' ; '.join(strs) or 'none', ' / '.join(tail)))
 PY
