@@ -11,6 +11,8 @@
 # Before it: FWDMISS <unique -[Class sel] of the runs' OBJC-FWD-MISS lines, comma separated> (or FWDMISS none).
 #      Each rc124 run is followed by its NOWINDOW-DIAG line (nowindow-diag.sh analyze).
 # Last line: SERIES <prefix> N=<n> valid=<v> survived20=<k> top=rc<code>x<count> windows=<runs with windows> fwdmiss=<unique OBJC-FWD-MISS selectors> mldr=<md5>
+# Also written to $SERIES_SUMMARY_DIR/<prefix>.txt (default <parent of the build dir>/series-summaries) with a per-run table; a run whose
+#      sway was not healthy afterwards is RUN-INVALID (not counted, retried). CHROME_APP defaults to the CfT bundle, missing -> SERIES-ABORT reason=chrome-app.
 # Exit 1 if the gate fails or valid=0.
 #      chrome-series.sh --dump-selftest   (no Chrome: fake launcher + fake dump scripts, checks the rc124 hang dump)
 #      CHROME_SR_SERVER_LOG=debug  server runs with DSERVER_LOG_LEVEL=debug; its log is saved as chrome-sr-<run>-dserver.txt
@@ -96,6 +98,14 @@ leftover_report() {
 trap leftover_report EXIT
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
+# CHROME_APP default: the CfT bundle (without it every run is invalid, valid=0); a path that does not exist aborts loudly
+CHROME_APP=${CHROME_APP:-$(dirname "$DARLING_BUILD_DIR")/chrome-cft/chrome-mac-x64/Google Chrome for Testing.app}; export CHROME_APP
+. "$DARLING_SRC_DIR/build-freebsd/series-count.sh"
+if [ ! -d "$CHROME_APP" ]; then
+	_l="SERIES-ABORT reason=chrome-app path=\"$CHROME_APP\""; echo "$_l"
+	series_summary_write "$DARLING_BUILD_DIR" "$P" "$N" "$_l"; exit 1
+fi
+: "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
 # Core files (a Mach core can be 14 GB): sudo resets the core limit to 0, so chrome-wl-run.sh runs the guest via
 # core-wrap.sh, which sets ulimit -c to CORE_LIMIT_KB (default and maximum 2 GiB) and cds to CORE_DIR
 # (default $DARLING_BUILD_DIR/cores; kern.corefile %N.core lands in the cwd). At exit only the newest core is
@@ -132,7 +142,9 @@ while [ "$_i" -le "$N" ]; do
 	[ "$(sed -n 's/^WRAPPER_RC=//p' "$_L" | tail -1)" = 124 ] || continue
 	echo "run $((_i-1)): $(sh "$DARLING_SRC_DIR/build-freebsd/nowindow-diag.sh" analyze "$_L" 2>&1 | tail -1)"
 done
-echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins fwdmiss=$fwdmiss mldr=$M args=\"$CHROME_EXTRA_ARGS\""
+SERIES_LINE="SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins fwdmiss=$fwdmiss mldr=$M args=\"$CHROME_EXTRA_ARGS\""
+echo "$SERIES_LINE"
+series_summary_write "$DARLING_BUILD_DIR" "$P" "$N" "$SERIES_LINE" || echo "SERIES-SUMMARY-WRITE-FAILED"
 # compress this run's big logs (>10M) after counting; the SERIES line above is unchanged
 if command -v xz >/dev/null 2>&1; then find "$DARLING_BUILD_DIR" -maxdepth 1 -name "chrome-sr-$P*.log" -size +10M -exec xz -f {} + 2>/dev/null; fi
 [ "$valid" -gt 0 ]

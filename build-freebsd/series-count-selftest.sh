@@ -24,3 +24,21 @@ fi
 TREE_J="{\"nodes\":[{\"type\":\"workspace\",\"nodes\":[{\"type\":\"con\",\"shell\":\"xdg_shell\",\"nodes\":[],\"floating_nodes\":[]}],\"floating_nodes\":[{\"type\":\"floating_con\",\"shell\":\"xdg_shell\",\"nodes\":[],\"floating_nodes\":[]}]}]}"
 fw=$(printf "%s\n" "$TREE_J" | tr "," "\n" | grep -c "\"shell\"")
 if [ "$fw" -eq 2 ]; then echo "WINDOW-COUNT-SELFTEST pass tiled+floating=$fw"; else echo "WINDOW-COUNT-SELFTEST FAIL got=$fw want=2"; exit 1; fi
+# invalid runs (RUN-INVALID, e.g. sway-down) are not counted, and a retry beyond N still is
+T2=$(mktemp -d); trap 'rm -rf "$T" "$T2"' EXIT
+for i in 1 2 3 4; do printf 'GUEST-EXEC\nWRAPPER_RC=139\nWRAPPER_DURATION=5\n' > "$T2/chrome-sr-iv$i.log"; done
+printf 'RUN-INVALID reason=sway-down\n' >> "$T2/chrome-sr-iv2.log"
+printf 'WRAPPER_RC=1\n' > "$T2/chrome-sr-iv5.log"
+series_count "$T2" iv 3
+if [ "$valid" -eq 3 ]; then echo "SERIES-INVALID-SELFTEST pass N=3 valid=$valid (run 2 RUN-INVALID skipped, retry run 4 counted)"; else echo "SERIES-INVALID-SELFTEST FAIL valid=$valid want=3"; exit 1; fi
+# durable summary file: SERIES line plus per-run table
+SERIES_SUMMARY_DIR="$T2/sum" series_summary_write "$T2" iv 3 "SERIES iv N=3 valid=$valid"
+F=$T2/sum/iv.txt
+if grep -q '^SERIES iv N=3 valid=3' "$F" && grep -q '^run 2 invalid:sway-down rc=139' "$F" && grep -q '^run 5 noexec rc=1' "$F" && grep -q '^run 4 valid rc=139 dur=5' "$F"; then
+	echo "SERIES-SUMMARY-SELFTEST pass file=<dir>/iv.txt lines=$(wc -l < "$F")"
+else echo "SERIES-SUMMARY-SELFTEST FAIL"; cat "$F"; exit 1; fi
+# CHROME_APP pointing nowhere: SERIES-ABORT reason=chrome-app, exit 1, summary file written (no Chrome run, no lock needed)
+out=$(DARLING_LOCK_HELD=1 DARLING_SRC_DIR="$HERE/.." DARLING_BUILD_DIR="$T2" CHROME_APP=/nonexistent/x.app SERIES_SUMMARY_DIR="$T2/sum2" sh "$HERE/chrome-series.sh" abortp 1 2>&1); rc=$?
+if [ $rc -eq 1 ] && printf '%s\n' "$out" | grep -q 'SERIES-ABORT reason=chrome-app' && grep -q 'SERIES-ABORT reason=chrome-app' "$T2/sum2/abortp.txt"; then
+	echo "SERIES-ABORT-SELFTEST pass rc=$rc reason=chrome-app summary written"
+else echo "SERIES-ABORT-SELFTEST FAIL rc=$rc out=$out"; exit 1; fi
