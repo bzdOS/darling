@@ -12,6 +12,7 @@
 #
 # Images with their own generator keep it: suppl.dylib and cg-supl.dylib
 # (build-suppl-stubs.sh), SystemConfigurationExtras.dylib (build-sc-stubs.sh, hand written behaviour), the OpenDirectory stand-in (build-opendirectory-stub.sh).
+# The Chrome framework root for the string-constant providers is NULLCONST_CHROME_ROOT, default <overlay>/Frameworks (as null-const-probe.sh).
 # Set CHROME_APP so the Chrome framework is a consumer (rule c of the check).
 #
 # Usage: DARLING_SRC_DIR=... DARLING_OVERLAY=... DARLING_BUILD_DIR=... [CHROME_APP=...] \
@@ -33,7 +34,7 @@ grep -v -e '/usr/lib/suppl.dylib$' -e '/usr/lib/cg-supl.dylib$' -e '/usr/lib/Sys
         -e '/OpenDirectory.framework/' -e '/usr/lib/system/' "$W/stubs.txt" > "$W/images.txt"
 # shellcheck disable=SC2046
 python3 "$SRC/build-freebsd/rebuild-stub-data.py" --overlay "$OV" --work "$W" \
-    --data-list "$W/data-names.txt" "$@" $(cat "$W/images.txt")
+    --data-list "$W/data-names.txt" --chrome-providers "${NULLCONST_CHROME_ROOT:-$OV/Frameworks}" "$@" $(cat "$W/images.txt")
 # the gate: fails the build and lists the offenders when any stub still exports data as code
 # (only meaningful once the rebuilt images are installed)
 case " $* " in
