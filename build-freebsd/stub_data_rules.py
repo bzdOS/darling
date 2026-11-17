@@ -77,7 +77,7 @@ def class_names(names):
 # constant in a dictionary (+[NSDictionary dictionaryWithObjects:forKeys:count:] throws, CFDictionaryGetValue
 # hashes NULL). Struct constants (CMTime) and objects (kCGColor*, callbacks) are not in this set.
 STRING_CONST = re.compile(
-    r"^_k(SC|Sec|LS|UT|AX|AV|UN|CT|VT|CMF|CMS|CVI|CVP|CVV|CFP|CFN|CFStream|CFProxy|MA|CGColorSpace|CGImage|CGDisplay|CGWindow|CGPDF|CAGravity|CAFilter|CAMedia|CATransition)[A-Za-z]"
+    r"^_k(SC|Sec|LS|UT|AX|AV|UN|CT|VT|CMF|CMS|CVI|CVP|CVV|CFP|CFN|CFStream|CFProxy|MA|CGColorSpace|CGImage|CGDisplay|CGWindow|CGPDF|CAGravity|CAFilter|CAMedia|CATransition|CATransaction)[A-Za-z]"
     r"|^_k[A-Z][A-Za-z0-9_]*(Notification|NotificationName|Key|Domain)$"
     r"|^_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$")
 NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$")

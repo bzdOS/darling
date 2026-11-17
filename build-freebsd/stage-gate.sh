@@ -72,6 +72,9 @@ gate_probe() { # name script
 #   FONT-RESOLVE: with darling-extras.dylib injected (as Chrome runs) CTFontCreateWithName("Helvetica",12) and +[NSFont systemFontOfSize:12] are
 #          not nil and the flat lookup of CTFontCreateWithName is not answered by darling-extras (font-resolve-probe.sh builds its own binary).
 [ "${STAGE_GATE_FONTRESOLVE_RUN:-1}" = 1 ] && gate_probe FONT-RESOLVE font-resolve-probe.sh
+#   CATX-KEYS: the key of +[CATransaction setValue:forKey:] that Chrome passes (kCATransactionDisableActions) is non-null in every image that exports it
+#          (static check of the overlay, no run; catx-keys-probe.sh). A NULL key raises "not key value coding compliant for the key (null)".
+[ "${STAGE_GATE_CATXKEYS_RUN:-1}" = 1 ] && { _c=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/catx-keys-probe.sh" 2>&1 | grep -a "^CATX-KEYS" | tail -1); echo "${_c:-CATX-KEYS fail no-verdict}"; case "$_c" in "CATX-KEYS pass"*) ;; *) echo "STAGECHK FAIL catx-keys=FAIL"; exit 1;; esac; }
 #   FONT-FAMILIES: [[NSDisplay currentDisplay] allFontFamilyNames] answers a non-empty set and does not raise "only defined for abstract class";
 #          needs the AppKit Wayland backend with cocotron-wayland-font-families deployed, so default 0 until then (font-families-probe.sh).
 [ "${STAGE_GATE_FONTFAMILIES_RUN:-1}" = 1 ] && gate_probe FONT-FAMILIES font-families-probe.sh
