@@ -114,6 +114,9 @@ sh "$DARLING_SRC_DIR/build-freebsd/stage-gate.sh" || exit 1
 if [ -n "$EXPECT_MLDR_MD5" ] && [ "$EXPECT_MLDR_MD5" != "$M" ]; then
 	echo "GATE FAIL: expected mldr md5 $EXPECT_MLDR_MD5, installed $M"; exit 1
 fi
+# disk guard: refuse to start above SERIES_DISK_MAX (default 84) % root use (the batch loop stops at >= SERIES_DISK_STOP, default 85, see chrome-sr-batch.sh)
+DISK_USE=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5+0}')
+[ "$DISK_USE" -gt "${SERIES_DISK_MAX:-84}" ] && { echo "SERIES-ABORT reason=disk use=${DISK_USE}%"; exit 1; }
 sh "$DARLING_SRC_DIR/build-freebsd/chrome-sr-batch.sh" "$P" "$N" "$T"
 . "$DARLING_SRC_DIR/build-freebsd/series-count.sh"
 series_count "$DARLING_BUILD_DIR" "$P" "$N" || exit 1
@@ -130,4 +133,6 @@ while [ "$_i" -le "$N" ]; do
 	echo "run $((_i-1)): $(sh "$DARLING_SRC_DIR/build-freebsd/nowindow-diag.sh" analyze "$_L" 2>&1 | tail -1)"
 done
 echo "SERIES $P N=$N valid=$valid survived20=$surv top=$top windows=$wins fwdmiss=$fwdmiss mldr=$M args=\"$CHROME_EXTRA_ARGS\""
+# compress this run's big logs (>10M) after counting; the SERIES line above is unchanged
+if command -v xz >/dev/null 2>&1; then find "$DARLING_BUILD_DIR" -maxdepth 1 -name "chrome-sr-$P*.log" -size +10M -exec xz -f {} + 2>/dev/null; fi
 [ "$valid" -gt 0 ]

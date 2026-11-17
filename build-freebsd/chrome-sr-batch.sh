@@ -42,6 +42,9 @@ export CHROME_ARGS="--no-sandbox --user-data-dir=/wlprofile --disable-gpu --no-f
 export CHROME_LOG_PREFIX=chrome-sr
 valid=0; i=1
 while [ $valid -lt "$N" ] && [ $i -le $((2*N)) ]; do
+	# disk guard: stop between runs at >= SERIES_DISK_STOP (default 85) % root use
+	DISK_USE=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5+0}')
+	[ "$DISK_USE" -ge "${SERIES_DISK_STOP:-85}" ] && { echo "SERIES-STOP reason=disk use=${DISK_USE}% after=$((i-1))"; break; }
 	S=$P$i
 	L=$DARLING_BUILD_DIR/chrome-sr-$S.log
 	PNG=$DARLING_BUILD_DIR/chrome-sr-$S.png
