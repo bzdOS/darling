@@ -8,6 +8,22 @@
 # A built image that differs from the overlay (built, not installed) or a staged copy that stays different is a failure.
 # The gated set is images.txt plus EXTRA_IMAGES (own-generator images that images.txt omits).
 # Output: one "STAGECHK" line; exit 1 on any mismatch. STAGE_GATE_RUN_ALL=1 runs every line and exits 1 at the end if any was red.
+# STAGE_GATE_FULL=1: every line runs (RUN_ALL=1) and the optional probes are on: SYSCALL482, PORTCONSTRUCT, SUSPEND (wake) and
+# SUSPEND_RWLOCK/MUTEX/CV. ImageIO stays off. The last line is always "GATE mode=full|partial skipped=<n> rc=<n>": full means no line
+# printed "skipped"; skipped counts the lines that did; rc is the real exit code of the gate (the same value the gate exits with).
+if [ "${STAGE_GATE_FULL:-0}" = 1 ]; then
+	STAGE_GATE_RUN_ALL=1; STAGE_GATE_SYSCALL482_RUN=1; STAGE_GATE_PORTCONSTRUCT_RUN=1; STAGE_GATE_SUSPEND_RUN=1
+	STAGE_GATE_SUSPEND_RWLOCK_RUN=1; STAGE_GATE_SUSPEND_MUTEX_RUN=1; STAGE_GATE_SUSPEND_CV_RUN=1
+	export STAGE_GATE_RUN_ALL STAGE_GATE_SYSCALL482_RUN STAGE_GATE_PORTCONSTRUCT_RUN STAGE_GATE_SUSPEND_RUN \
+		STAGE_GATE_SUSPEND_RWLOCK_RUN STAGE_GATE_SUSPEND_MUTEX_RUN STAGE_GATE_SUSPEND_CV_RUN
+fi
+if [ -z "$STAGE_GATE_INNER" ]; then
+	_gt=$(mktemp "${TMPDIR:-/tmp}/stage-gate.XXXXXX") || { echo "GATE mode=partial skipped=0 rc=1"; exit 1; }
+	STAGE_GATE_INNER=1 sh "$0" >"$_gt" 2>&1; _rc=$?
+	cat "$_gt"; _sk=$(grep -c "skipped" "$_gt"); rm -f "$_gt"
+	_md=partial; [ "$_sk" = 0 ] && _md=full
+	echo "GATE mode=$_md skipped=$_sk rc=$_rc"; exit "$_rc"
+fi
 if [ -z "$DARLING_BUILD_DIR" ] || [ -z "$DARLING_OVERLAY" ]; then
 	echo "STAGECHK FAIL missing env:$([ -z "$DARLING_BUILD_DIR" ] && printf ' DARLING_BUILD_DIR')$([ -z "$DARLING_OVERLAY" ] && printf ' DARLING_OVERLAY')"; exit 1
 fi
