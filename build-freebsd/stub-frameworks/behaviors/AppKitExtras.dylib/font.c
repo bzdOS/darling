@@ -13,7 +13,7 @@
  *   -fontName familyName displayName fontDescriptor isFixedPitch isVertical screenFont printerFont copyWithZone:
  * The Wayland AppKit backend bundle (loaded later, class WaylandDisplay) does not override NSDisplay -allFontFamilyNames and
  * -fontTypefacesForFamilyName:, so the first NSFontFamily build raised "only defined for abstract class". Once WaylandDisplay
- * exists (checked at every image load) both are installed on it: the family set comes from CTFontManagerCopyAvailableFontFamilyNames
+ * exists (checked at every image load) both are installed on it (and on NSDisplay, see try_wayland): the family set comes from CTFontManagerCopyAvailableFontFamilyNames
  * (Helvetica when empty), one NSFontTypeface "Regular" per family. */
 typedef void *Class;
 typedef void *SEL;
@@ -191,16 +191,20 @@ static id c_typefaces(id self, SEL c, id name)
     f = ((id (*)(id, SEL, id, id, unsigned))objc_msgSend)(f, S("initWithName:traitName:traits:"), name, (id)cfs("Regular"), 0);
     return objc_msgSend((id)objc_getClass("NSArray"), S("arrayWithObject:"), msg0(f, "autorelease"));
 }
-static int wl_done;
+static int nd_done, wl_done;
+static void install_display(Class c)
+{
+    class_replaceMethod(c, S("allFontFamilyNames"), (IMP)c_families, "@16@0:8");
+    class_replaceMethod(c, S("fontTypefacesForFamilyName:"), (IMP)c_typefaces, "@24@0:8@16");
+}
+/* The dyld add-image callback of the backend bundle runs before the objc runtime has registered its classes, so WaylandDisplay is
+ * often not yet visible then. The base class NSDisplay (AppKit, loaded earlier) gets the methods as well: WaylandDisplay inherits them
+ * until (and unless) it defines its own, which this never overwrites. */
 static void try_wayland(void)
 {
-    Class wd;
-    if (wl_done) return;
-    wd = objc_getClass("WaylandDisplay");
-    if (!wd) return;
-    class_replaceMethod(wd, S("allFontFamilyNames"), (IMP)c_families, "@16@0:8");
-    class_replaceMethod(wd, S("fontTypefacesForFamilyName:"), (IMP)c_typefaces, "@24@0:8@16");
-    wl_done = 1;
+    Class c;
+    if (!nd_done && (c = objc_getClass("NSDisplay"))) { install_display(c); nd_done = 1; }
+    if (!wl_done && (c = objc_getClass("WaylandDisplay"))) { install_display(c); wl_done = 1; }
 }
 static void on_image(const struct mach_header *mh, long slide) { (void)mh; (void)slide; try_add(); try_wayland(); }
 

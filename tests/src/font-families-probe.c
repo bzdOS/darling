@@ -1,4 +1,4 @@
-/* font-families-probe: in a live process, [[NSDisplay currentDisplay] allFontFamilyNames] must answer a non-empty set (not raise
+/* font-families-probe: in a live process, -[WaylandDisplay allFontFamilyNames] must answer a non-empty set (not raise
  * "only defined for abstract class"), -fontTypefacesForFamilyName: must answer a non-empty array, and the IMP serving
  * -allFontFamilyNames must lie in the AppKitExtras image (dladdr). An uncaught objc exception kills the process before the result
  * line; the script reads that as threw=y.
@@ -17,25 +17,32 @@ extern void *class_getMethodImplementation(id, void *);
 
 #define MSG(r, o, s) ((r (*)(id, void *))objc_msgSend)((o), sel_registerName(s))
 
+extern void *dlopen(const char *, int);
+extern char *dlerror(void);
+
+/* The compositor is not needed: [NSDisplay currentDisplay] would raise "Failed to connect to a window server" here. The backend bundle is
+ * loaded directly and the IMPs of the live class WaylandDisplay are called (the replacements ignore the receiver). */
 int main(void)
 {
 	long count = -1, faces = -1;
 	const char *dc = "?", *imp = "?";
+	Dl_info di;
 	printf("FAMILIES-START\n");
 	fflush(stdout);
-	id cls = objc_getClass("NSDisplay");
-	id disp = cls ? MSG(id, cls, "currentDisplay") : 0;
-	if (disp) {
-		Dl_info di;
-		void *m = class_getMethodImplementation(object_getClass(disp), sel_registerName("allFontFamilyNames"));
+	void *h = dlopen("/System/Library/Frameworks/AppKit.framework/Resources/Backends/Wayland.backend/Contents/MacOS/Wayland", 2);
+	if (!h) printf("FAMILIES-DLOPEN %s\n", dlerror());
+	id cls = objc_getClass("WaylandDisplay");
+	if (cls) {
+		dc = "WaylandDisplay";
+		void *m = class_getMethodImplementation(cls, sel_registerName("allFontFamilyNames"));
+		void *t = class_getMethodImplementation(cls, sel_registerName("fontTypefacesForFamilyName:"));
 		if (m && dladdr(m, &di) && di.dli_fname) imp = di.dli_fname;
-		dc = object_getClassName(disp);
-		id set = MSG(id, disp, "allFontFamilyNames");
+		id set = ((id (*)(id, void *))m)(cls, sel_registerName("allFontFamilyNames"));
 		if (set) {
 			count = (long)MSG(unsigned long, set, "count");
 			id any = MSG(id, set, "anyObject");
 			if (any) {
-				id arr = ((id (*)(id, void *, id))objc_msgSend)(disp, sel_registerName("fontTypefacesForFamilyName:"), any);
+				id arr = ((id (*)(id, void *, id))t)(cls, sel_registerName("fontTypefacesForFamilyName:"), any);
 				faces = arr ? (long)MSG(unsigned long, arr, "count") : 0;
 			}
 		} else count = 0;
