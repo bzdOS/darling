@@ -1,0 +1,9 @@
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -903,2 +903,6 @@
+ 		if (call->isBSDTrap()) {
++			// guest psynch wrappers test for -LINUX_EINTR (-4); a positive 4 would be taken as success
++			if (resultCode == EINTR) {
++				resultCode = -EINTR;
++			}
+ 			call->sendBSDReply(resultCode, currentThreadVar->_bsdReturnValue);
