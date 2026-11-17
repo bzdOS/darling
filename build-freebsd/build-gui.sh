@@ -434,18 +434,11 @@ mkdir -p "${OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A"
 cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText" \
 	"${OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText"
 
-clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -w -O0 -c "${STUBS}/ImageIO/ImageIO.m" -o "${BUILD}/ImageIO-stub.o"
+# ImageIO: the real implementation (src/frameworks/ImageIO), one build path -- build-imageio.sh (its own build dir)
+DARLING_SRC_DIR="${SRC}" DARLING_OVERLAY="${OVERLAY}" DARLING_BUILD_DIR="$(dirname "${BUILD}")" sh "${SRC}/build-freebsd/build-imageio.sh" --install
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A"
-ld64.lld ${LD_FLAGS} -dylib \
-	-install_name /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO \
-	-o "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
-	"${BUILD}/ImageIO-stub.o" \
-	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
-	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics" \
-	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
-mkdir -p "${OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A"
-cp "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
-	"${OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO"
+cp "${OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
+	"${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO"
 
 clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -w -O0 -c "${STUBS}/LaunchServices/LaunchServices.m" -o "${BUILD}/LaunchServices-stub.o"
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A"

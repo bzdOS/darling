@@ -94,6 +94,13 @@ gate_probe() { # name script
 #   FONT-FAMILIES: [[NSDisplay currentDisplay] allFontFamilyNames] answers a non-empty set and does not raise "only defined for abstract class";
 #          needs the AppKit Wayland backend with cocotron-wayland-font-families deployed, so default 0 until then (font-families-probe.sh).
 [ "${STAGE_GATE_FONTFAMILIES_RUN:-1}" = 1 ] && gate_probe FONT-FAMILIES font-families-probe.sh
+# IMAGEIO-DECODE + IMGREP-NULL: the real ImageIO decodes a generated 8-bit PNG (size matches) and gives a NULL source for garbage;
+#          +[NSBitmapImageRep canInitWithData:] on garbage answers NO without crashing (probes/imageio-run.sh, runs under the shared run lock).
+[ "${STAGE_GATE_IMAGEIO_RUN:-1}" = 1 ] && { _i=$(if [ -n "$DARLING_LOCK_HELD" ]; then DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/imageio-run.sh" 2>/dev/null
+	else lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" env DARLING_LOCK_HELD=1 DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/imageio-run.sh" 2>/dev/null; [ $? -eq 75 ] && echo "IMAGEIO-DECODE skipped lock-busy"; fi | grep -a "^IMAGEIO-DECODE\|^IMGREP-NULL")
+	[ -n "$_i" ] || _i="IMAGEIO-DECODE FAIL no-verdict"; echo "$_i"
+	case "$_i" in *"IMAGEIO-DECODE pass"*|*"IMAGEIO-DECODE skipped"*) ;; *) echo "STAGECHK FAIL imageio-decode=FAIL"; stage_fail;; esac
+	case "$_i" in *"IMGREP-NULL pass"*|*"IMAGEIO-DECODE skipped"*) ;; *) echo "STAGECHK FAIL imgrep-null=FAIL"; stage_fail;; esac; }
 # STAGE_GATE_SURVIVE_RUN=1 also runs the darlingserver survival probe (DSERVER-SURVIVE-VERDICT: malformed requests and a client killed
 # mid-call must not take the server down; about 75 s, so off by default); needs tests/dserver-survive-probe-macho.
 [ "${STAGE_GATE_SURVIVE_RUN:-0}" = 1 ] && gate_probe DSERVER-SURVIVE run-dserver-survive-probe.sh

@@ -166,9 +166,10 @@ def string_source(name):
 
 # Images no stub generator rewrites (they have their own generator or are real system libraries);
 # rebuild-stub-data.py skips them, so the caller passes the whole stub list.
+# ImageIO.framework: the real implementation (src/frameworks/ImageIO on Onyx2D), built by build-imageio.sh.
 EXCLUDE_IMAGES = re.compile(
     r"(/usr/lib/(suppl|cg-supl|SystemConfigurationExtras)\.dylib$"
-    r"|/OpenDirectory\.framework/|/usr/lib/system/)")
+    r"|/OpenDirectory\.framework/|/ImageIO\.framework/|/usr/lib/system/)")
 
 
 def is_excluded_image(path):
