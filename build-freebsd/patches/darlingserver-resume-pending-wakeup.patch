@@ -14,6 +14,11 @@ DSERVER_RESUME_SELFTEST=1 the server runs 200 bursts of 64 kernelAsync lambdas a
 RESUME-SELFTEST PASS / FAIL (20 s per round timeout) then exits; DSERVER_SELFTEST_SUSPEND_DELAY_US=N delays
 every suspend() by N us to force the race.
 
+Also (found with tests/src/suspend-wake-probe.c): a resume() that lands after suspend() set _suspended but before the
+thread has switched back to the top of its microthread schedules the thread; the worker reaching doWork() sees
+_running and used to drop the wakeup. doWork() now records it as _pendingWakeup for a suspended thread and the
+doneWorking handler reschedules it.
+
 Decision on darlingserver-thread-suspend-lock.patch (shift 2): KEPT, not a duplicate of this flag in effect.
 It serialises thread_release()/dtape_thread_wait_while_user_suspended (duct-tape thread.c, user-suspension
 path) with one global lock. The kernelAsync semaphore path never takes it, and the pre-suspend-lock server
@@ -97,12 +102,19 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  		microthreadLog.debug() << _tid << "(" << _nstid << "): execution was deferred" << microthreadLog.endLog;
  		_deferralState = DeferralState::DeferredPending;
  		_rwlock.unlock();
-@@ -436,6 +451,8 @@
+@@ -436,6 +451,15 @@
  	}
  
  	if (_running) {
 +		++dsdiag_dowork_already_running;
 +		microthreadLog.debug() << "DIAG doWork tid=" << _tid << " exit=already-running suspended=" << _suspended << microthreadLog.endLog;
++		// A resume() can schedule us while we are still on our microthread but already marked _suspended: suspend() sets
++		// _suspended, drops the lock and only then switches back to the top. A worker that picks the schedule up in that
++		// window used to return here and the wakeup was lost for good. Remember it instead; doneWorking (below) reschedules
++		// a suspended thread that has a pending wakeup.
++		if (_suspended && !_dead && !_terminating) {
++			_pendingWakeup = true;
++		}
  		// this is probably an error
  		microthreadLog.warning() << _tid << "(" << _nstid << "): attempt to re-run already running microthread on another thread" << microthreadLog.endLog;
  		_rwlock.unlock();

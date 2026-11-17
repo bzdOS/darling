@@ -1,0 +1,35 @@
+darlingserver: a signal (sigexc InterruptEnter) must not turn an already woken wait into an interrupted one.
+
+Lost wakeup, reproduced by tests/src/suspend-wake-probe.c (SUSPEND-WAKE-VERDICT fail ... stalls=1, with and without
+darlingserver-thread-suspend-lock.patch): thread B waits in semaphore_timedwait, thread A signals the semaphore while a
+third thread thread_suspend()s B. The signal wakes B (the token is handed to the waiter, thread_unblock stores
+wait_result and schedules B), then the interrupt for the suspension signal arrives before B runs again and
+dtape_thread_sigexc_enter() overwrote wait_result with THREAD_INTERRUPTED unconditionally. B's call returned KERN_ABORTED
+with the token consumed; the guest retries and waits for a wakeup that already happened. The same overwrite loses a mach
+message handed to a receiver. Dump of the stalled state: all guest threads parked in timed waits, nothing queued, the
+suspender idle.
+Fix: only interrupt a thread whose wait_result is still THREAD_WAITING; a waiter that was woken keeps its result.
+
+diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+index eafde90..629a9af 100644
+--- a/duct-tape/src/thread.c
++++ b/duct-tape/src/thread.c
+@@ -457,9 +457,15 @@ void dtape_thread_release(dtape_thread_t* thread) {
+ 
+ void dtape_thread_sigexc_enter(dtape_thread_t* thread) {
+ 	thread_lock(&thread->xnu_thread);
+-	thread->xnu_thread.state &= ~(TH_UNINT | TH_WAIT);
+-	thread->xnu_thread.wait_result = THREAD_INTERRUPTED;
+-	clear_wait_internal(&thread->xnu_thread, THREAD_INTERRUPTED);
++	// Interrupt the wait only if the thread is still waiting (wait_result is THREAD_WAITING from thread_mark_wait_locked until a
++	// waker stores its result in thread_unblock). A waiter that was already woken has had its wakeup consumed (a semaphore token
++	// or a mach message handed over directly); overwriting its result with THREAD_INTERRUPTED made the call fail with KERN_ABORTED
++	// / MACH_RCV_INTERRUPTED and the wakeup was lost (tests/src/suspend-wake-probe.c).
++	if (thread->xnu_thread.wait_result == THREAD_WAITING) {
++		thread->xnu_thread.state &= ~(TH_UNINT | TH_WAIT);
++		thread->xnu_thread.wait_result = THREAD_INTERRUPTED;
++		clear_wait_internal(&thread->xnu_thread, THREAD_INTERRUPTED);
++	}
+ 	thread_unlock(&thread->xnu_thread);
+ };
+ 

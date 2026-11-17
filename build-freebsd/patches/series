@@ -24,3 +24,4 @@ darlingserver darlingserver-guest-errno-signo.patch
 xnu xnu-statfs-no-mounts.patch
 cocotron cocotron-wayland-event-wait.patch
 darlingserver darlingserver-dead-client.patch
+darlingserver darlingserver-sigexc-keep-wakeup.patch
