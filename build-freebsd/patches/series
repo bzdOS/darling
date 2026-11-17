@@ -26,3 +26,4 @@ cocotron cocotron-wayland-event-wait.patch
 darlingserver darlingserver-dead-client.patch
 darlingserver darlingserver-sigexc-keep-wakeup.patch
 darlingserver darlingserver-shared-entry-adjacent.patch
+xnu xnu-thread-selfusage.patch

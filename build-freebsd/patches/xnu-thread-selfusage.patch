@@ -1,0 +1,72 @@
+diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
+index bf6096e..2350299 100644
+--- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
++++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
+@@ -163,6 +163,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/impl/misc/syscall.c
+ 	src/xnu_syscall/bsd/impl/misc/sysctl.c
+ 	src/xnu_syscall/bsd/impl/misc/thread_selfid.c
++	src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+ 	src/xnu_syscall/bsd/impl/mman/madvise.c
+ 	src/xnu_syscall/bsd/impl/mman/mman.c
+ 	src/xnu_syscall/bsd/impl/mman/msync.c
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
+index 0ef8b2f..ecb028a 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
+@@ -54,6 +54,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/syscall.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/sysctl.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfid.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfusage.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/madvise.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/msync.h>
+@@ -480,6 +481,7 @@ void* __bsd_syscall_table[600] = {
+ 	[475] = sys_mkdirat,
+ 	[476] = sys_getattrlistat,
+ 	[478] = sys_bsdthread_ctl,
++	[482] = sys_thread_selfusage,
+ 	[483] = sys_csrctl,
+ 	[500] = sys_getentropy,
+ 	[515] = sys_ulock_wait,
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
+new file mode 100644
+index 0000000..2e61b04
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
+@@ -0,0 +1,9 @@
++#ifndef LINUX_THREAD_SELFUSAGE_H
++#define LINUX_THREAD_SELFUSAGE_H
++
++#include <stdint.h>
++
++// BSD syscall 482: CPU time used by the calling thread, in mach absolute time units (nanoseconds here).
++uint64_t sys_thread_selfusage(void);
++
++#endif // LINUX_THREAD_SELFUSAGE_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+new file mode 100644
+index 0000000..375d005
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+@@ -0,0 +1,19 @@
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfusage.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++#define LINUX_CLOCK_THREAD_CPUTIME_ID 3
++
++struct thread_selfusage_ts { long tv_sec; long tv_nsec; };
++
++VISIBLE // made visible for xtrace
++uint64_t sys_thread_selfusage(void)
++{
++	struct thread_selfusage_ts ts;
++
++	// xnu returns 0 on failure to read the runtime, never an errno
++	if (LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_THREAD_CPUTIME_ID, &ts) < 0)
++		return 0;
++	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
