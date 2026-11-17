@@ -44,7 +44,13 @@ KEEP_SRC="dyld-raw *-relink* lsk-* me-lsk marker-suppl suppl-stubs* supl-bind* u
 KEEP_OUT="dserver real-macho crash-probe coredata-coreservices wayland-window-test wayland-backend quartzcore stub-data cores src"
 # build infrastructure and per-script scratch/output dirs (recreated by their scripts)
 KEEP_INFRA="CMakeFiles Developer -I i386 x86_64 x86_64-apple-darwin20 dtape cg-supl suppl wl-debug-copy wlr-protocols-gen constdict-desc got-slot-undoc msgSend-imp-undoc bundle-principal-class-test sc-stubs extras-objc-classes opendirectory-stub bootstrap-shim bootstrap-probe cfinit const-objc window-draw-probe screens objc-only tz-check *-probe-test bitmap-check bitmap-draw-check nscgcolor-check kqueue-close-probe font-metrics-probe throw-trace"
-KEEP_DIRS="$KEEP_SRC $KEEP_OUT $KEEP_INFRA $KEEPONE_ALLOW"
+# work dirs of the current probes and of everything the gate (stage-gate.sh, probes/*.sh) rebuilds or uses
+KEEP_PROBE="imageio imageio-probe suspend-rwlock-probe suspend-mutex-probe suspend-cv-probe suspend-wake-probe* window-draw* netsegv nullsrc unwind-resume v5store catx-kvc-probe eintr-prepost-probe psynch-ring-probe ptattach-probe semtw-probe port-construct-probe font-families-probe font-resolve-probe syscall482-probe throw-trace-selftest"
+KEEP_DIRS="$KEEP_SRC $KEEP_OUT $KEEP_INFRA $KEEP_PROBE $KEEPONE_ALLOW"
+# top-level build/ files that are never candidates: gate/probe output and the series fix20a, fix20, fix21, fix22
+KEEP_FILES="suspend-*.log suspend-*.dump window-draw* imageio-probe.log series-fix20*.out series-fix21*.out series-fix22*.out chrome-sr-fix20* chrome-sr-fix21* chrome-sr-fix22* $KEEPONE_ALLOW_FILES"
+# backup/ entries that are rollback points (named so in the handoff notes) or not yet understood; never candidates
+KEEP_BACKUPS="ImageIO ImageIO.pre-r5 ImageIO.real-r5.* stub-data-ImageIO.pre-r5 AppKitExtras.dylib.pre-b4-fontfamilies AppKitExtras.pre-resize darlingserver.pre-q1.* darlingserver.pre-b6.* darlingserver.pre-d2.* darlingserver.pre-d5.* darlingserver.pre-f1.* libdtape.a.pre-q1 libdtape.a.pre-b6 libdtape.a.pre-d5 stubdata-pre-b5 darling-extras.dylib.pre-ctresolve libsystem_kernel.pre-statfs-deploy.* $KEEPONE_ALLOW_BACKUPS"
 
 T=$(mktemp -t keepone.XXXXXX) || exit 2
 trap 'rm -f "$T"' EXIT INT TERM
@@ -83,6 +89,7 @@ if [ -d "$B" ]; then
 		*) o="";;
 		esac
 		[ -n "$FOREIGN" ] && case "$f" in *"$FOREIGN"*) continue;; esac
+		_k=0; set -f; for g in $KEEP_FILES; do case "$f" in $g) _k=1; break;; esac; done; set +f; [ $_k = 1 ] && continue
 		[ -n "$(find "$B/$f" -mmin -"$AGE" 2>/dev/null)" ] && continue
 		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
 		if [ -n "$o" ] && { [ "$o" = "$KEEP1" ] || [ "$o" = "$KEEP2" ]; }; then continue; fi
@@ -106,6 +113,7 @@ fi
 if [ -d "$BK" ]; then
 	for f in $(cd "$BK" && ls -t); do
 		l=${f%%.pre-*}; l=${l%.dylib}
+		_k=0; set -f; for g in $KEEP_BACKUPS; do case "$f" in $g) _k=1; break;; esac; done; set +f; [ $_k = 1 ] && { SEEN="$SEEN $l"; continue; }
 		case " $SEEN " in *" $l "*) printf '%s\tbackup\t%s\n' "$(( $(timeout 60 du -sk "$BK/$f" 2>/dev/null | cut -f1) * 1024 ))" "$BK/$f" >>"$T";; *) SEEN="$SEEN $l";; esac
 	done
 fi
