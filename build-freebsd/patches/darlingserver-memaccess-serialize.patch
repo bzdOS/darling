@@ -1,0 +1,43 @@
+diff --git a/src/process.cpp b/src/process.cpp
+--- a/src/process.cpp
++++ b/src/process.cpp
+@@ -321,2 +321,5 @@
+ 
++	// only one server thread may attach to a given target at a time (a second PT_ATTACH gets EBUSY)
++	std::lock_guard<std::mutex> memoryAccessLock(_memoryAccessMutex);
++
+ 	/*
+@@ -328,3 +331,12 @@
+ 	 * anyway, so briefly stopping it here is safe. */
+-	if (ptrace(PT_ATTACH, targetPid, (caddr_t)1, 0) == -1) {
++	int attachResult = -1;
++	// the target may still be held by something outside this process (a debugger, a stale attach): retry briefly on EBUSY
++	for (int attempt = 0; attempt < 50; ++attempt) {
++		attachResult = ptrace(PT_ATTACH, targetPid, (caddr_t)1, 0);
++		if (attachResult != -1 || errno != EBUSY) {
++			break;
++		}
++		usleep(1000);
++	}
++	if (attachResult == -1) {
+ 		int code = errno;
+diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
+--- a/internal-include/darlingserver/process.hpp
++++ b/internal-include/darlingserver/process.hpp
+@@ -91,2 +91,4 @@
+ 		mutable std::shared_mutex _rwlock;
++		// serializes the PT_ATTACH/PT_IO/PT_DETACH bracket around one target process
++		mutable std::mutex _memoryAccessMutex;
+ 		std::unordered_map<uint64_t, std::weak_ptr<Thread>> _threads;
+diff --git a/duct-tape/src/memory.c b/duct-tape/src/memory.c
+--- a/duct-tape/src/memory.c
++++ b/duct-tape/src/memory.c
+@@ -355,3 +355,7 @@
+ 	} else {
+-		return dtape_hooks->task_read_memory(map->dtape_task->context, fromaddr, todata, length) ? KERN_SUCCESS : KERN_FAILURE;
++		if (!dtape_hooks->task_read_memory(map->dtape_task->context, fromaddr, todata, length)) {
++			dtape_log_error("copyin: guest memory read failed (%llu byte(s) at 0x%llx)", (unsigned long long)length, (unsigned long long)fromaddr);
++			return KERN_FAILURE;
++		}
++		return KERN_SUCCESS;
+ 	}
