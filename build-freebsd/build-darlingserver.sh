@@ -110,7 +110,7 @@ target_link_libraries(darlingserver simple dtape -L/usr/local/lib -lepoll-shim -
 CMEOF
 
 cmake .
-make -j$(sysctl -n hw.ncpu)
+make -j${JOBS:-$(( $(sysctl -n hw.ncpu) - 2 ))}
 # Publish the binary at the canonical path everything else reads from; the
 # scratch directory above is an implementation detail of this script.
 # ${BUILD}/darlingserver may be a symlink to the scratch binary (same file): install(1) refuses that
