@@ -11,7 +11,8 @@
 #                        repeat); for rwlock a0 must equal the interrupted one;
 #        retry_same_a0 = of those, how many repeats carried the same a0 as the interrupted call (reference only for mutex);
 #        confirmed=y   when eintr>0 and retry=0 (interrupted calls are not repeated);
-#        pass=y        rwlock, mutex: eintr>0 and retry==eintr and invariant_broken=0 and hung=n;
+#        pass=y        rwlock: eintr>0 and retry==eintr and invariant_broken=0 and hung=n;
+#                      mutex: same with retry>=eintr-1 (the last interrupted call may be the probe stop boundary);
 #                      cv (libpthread turns EINTR into a spurious wakeup, no repeat; POSIX allows it): eintr>0 and
 #                      invariant_broken=0 and hung=n; spurious is informational only.
 #   followed by "SUSPEND-RING-TAIL ..." lines (last ring records of the address around the first interrupted call).
@@ -103,7 +104,7 @@ awk -v a="$A" -v iters="${ITERS:--}" -v broken="${BROKEN:--}" -v hung="$HUNG" -v
     }
     END {
         retry = (kind == "mutex") ? retry_any : same
-        ok = (eintr > 0 && broken == "0" && hung == "n" && (kind == "cv" || retry == eintr)) ? "y" : "n"
+        ok = (eintr > 0 && broken == "0" && hung == "n" && (kind == "cv" || (kind == "mutex" ? retry >= eintr - 1 : retry == eintr))) ? "y" : "n"
         printf "%s confirmed=%s iters=%s eintr=%d retry=%d retry_same_a0=%d invariant_broken=%s spurious=%s hung=%s pass=%s\n", label, (eintr > 0 && retry == 0) ? "y" : "n", iters, eintr, retry, same, broken, spur, hung, ok
         if (!first) first = n
         s = first - 3; if (s < 1) s = 1

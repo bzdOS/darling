@@ -37,10 +37,10 @@ static void *signaller(void *p) {
     while (!b_ready) usleep(1000);
     while (!stop_all) {
         pthread_mutex_lock(&mx);
+        long want = b_iters + 1;
         flag = 1;
         pthread_cond_signal(&cv);
         pthread_mutex_unlock(&mx);
-        long want = b_iters + 1;
         int waited_us = 0, late = 0;
         while (b_iters < want && !stop_all) {
             usleep(50);
@@ -71,8 +71,8 @@ static void *waiter(void *p) {
             if (!flag) spurious++;
         }
         flag = 0;
-        pthread_mutex_unlock(&mx);
         b_iters++;
+        pthread_mutex_unlock(&mx);
     }
     b_done = 1;
     return NULL;
