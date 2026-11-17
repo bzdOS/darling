@@ -28,9 +28,16 @@ objs = sys.argv[5:]
 lines = open(out + "/commands.txt").read().split("\n")
 cc = []
 repl = {}
+extra = []  # objects of sources added by a patch (no build command yet): NEW:<object>:<sibling object in the same dir>
 for n, obj in enumerate(objs):
+    newobj = None
+    if obj.startswith("NEW:"):
+        newobj, obj = obj[4:].split(":", 1)
     cmd = [l for l in lines if "-o " + obj + " " in l][0]
     t = shlex.split(cmd); o = []; i = 0
+    if newobj:
+        k = t.index("-c") + 1
+        t[k] = os.path.join(os.path.dirname(t[k]), os.path.basename(newobj)[:-2])
     while i < len(t):
         x = t[i]
         if x == "-arch": i += 2; continue
@@ -41,7 +48,10 @@ for n, obj in enumerate(objs):
     j = o.index("-c")
     o[j:j] = ["-arch", "x86_64", "-o", new]
     cc.append(" ".join(shlex.quote(x) for x in o))
-    repl[obj] = new
+    if newobj:
+        extra.append(new)
+    else:
+        repl[obj] = new
 open(out + "/cc.sh", "w").write("\n".join(cc) + "\n")
 link = [l for l in lines if "-o " + target + " " in l and "-shared" in l][-1]
 link = link.replace("-arch x86_64 -arch i386", "-arch x86_64").replace(" -arch i386 -arch x86_64 -arch x86_64 ", " ")
@@ -61,6 +71,10 @@ link = " ".join(w for w in link.split(" ") if "libsyscall_32.dir" not in w)
 for obj, new in repl.items():
     assert link.count(" " + obj + " ") == 1, obj
     link = link.replace(" " + obj + " ", " " + new + " ")
+if extra:
+    tag = "-o " + out + "/libsystem_kernel.x86_64 "
+    assert link.count(tag) == 1
+    link = link.replace(tag, tag + " ".join(extra) + " ")
 open(out + "/link.sh", "w").write(link + "\n")
 PY
 

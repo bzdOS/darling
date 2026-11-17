@@ -22,7 +22,12 @@ while read -r f; do
 	case "$f" in *.c|*.S) ;; *) continue;; esac
 	b=$(basename "$f")
 	# the build command whose source file has this name and path ending (any dir under libsystem_kernel)
-	grep -o -- "-o [^ ]*\.o -c [^ ]*/${b}\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1
+	o=$(grep -o -- "-o [^ ]*\.o -c [^ ]*/${b}\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1)
+	if [ -n "$o" ]; then echo "$o"; else
+		# a source added by a patch has no build command: clone one from a sibling .c in the same directory
+		case "$f" in *.c) d=$(dirname "$f"); sib=$(grep -o -- "-o [^ ]*\.o -c [^ ]*/${d#darling/src/libsystem_kernel/}/[^/ ]*\.c\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1)
+			[ -n "$sib" ] && echo "NEW:$(dirname "$sib")/${b}.o:$sib";; esac
+	fi
 done | sort -u > "$OUT/objects.txt"
 [ -s "$OUT/objects.txt" ] || { echo "FATAL: no changed libsystem_kernel objects found" >&2; exit 1; }
 echo "objects: $(wc -l < "$OUT/objects.txt")"
