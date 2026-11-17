@@ -331,7 +331,7 @@ DT_SRCS="${DT_SRCS} \
   ${DEVD}/device_server.c \
   ${UNDD}/UNDReplyServer.c"
 
-# pthread/kern_synch.c needs its own -I for pthread headers
+# pthread/kern_synch.c comes from the submodule tree (the series patches land there); headers still resolve via pthread-staged
 DT_PTHREAD_SRCS="${DT}/pthread/kern_synch.c"
 
 # ── Compile flags matching duct-tape CMakeLists.txt ───────────────────────────
@@ -437,19 +437,25 @@ COMPAT_FLAGS="\
   -DDARLING_FREEBSD"
 compile_one "${DT}/src/freebsd_compat.c" "${COMPAT_FLAGS}"
 
-# kern_synch.c: use pre-staged headers to avoid 9p EMSGSIZE on pthread/kern symlinks.
-# pthread-staged/ is committed to the repo to avoid broken symlinks.
+# kern_synch.c: source from the submodule tree (DT_PTHREAD_SRCS); -I pre-staged headers to avoid 9p EMSGSIZE on pthread/kern symlinks.
+# pthread-staged/ supplies headers only (no .c is compiled from it).
 PTHREAD_STAGED="${SCRIPT_DIR}/build-freebsd/pthread-staged"
 
 OBJ="${DTBUILD}/objs/kern_synch.o"
-# Compile staged kern_synch.c so "kern/..." includes resolve from PTHREAD_STAGED
-OUT=$(clang ${DTFLAGS} -I${PTHREAD_STAGED} -c "${PTHREAD_STAGED}/kern_synch.c" -o "${OBJ}" 2>&1)
+# "kern/..." includes resolve from PTHREAD_STAGED
+OUT=$(clang ${DTFLAGS} -I${PTHREAD_STAGED} -c "${DT_PTHREAD_SRCS}" -o "${OBJ}" 2>&1)
 if [ $? -ne 0 ]; then
     echo "FAIL: kern_synch.c"
     echo "${OUT}" | grep 'error:' | head -5 || true
     ERRS=$((ERRS+1))
 else
     PASS=$((PASS+1))
+fi
+
+# kern_synch.o must carry the series (psynch ring): symbol check
+if [ -f "${OBJ}" ] && ! nm "${OBJ}" 2>/dev/null | grep -q dtape_psynch_ring_rec; then
+    echo "NMCHECK FAIL kern_synch.o lacks dtape_psynch_ring_rec"
+    ERRS=$((ERRS+1)); NMFAIL=1
 fi
 
 echo ""
@@ -461,3 +467,5 @@ if [ ${ERRS} -eq 0 ]; then
     ar rcs "${DTBUILD}/libdtape.a" "${DTBUILD}/objs"/*.o
     echo "Built: ${DTBUILD}/libdtape.a ($(du -sh ${DTBUILD}/libdtape.a | cut -f1))"
 fi
+[ "${NMFAIL:-0}" = 1 ] && exit 1
+exit 0

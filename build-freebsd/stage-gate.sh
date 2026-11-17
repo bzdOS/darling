@@ -143,6 +143,15 @@ if [ "$dg" = FAIL ]; then
 fi
 # Relink reproducibility: static flag check only (relink-repro-check.sh without --static does two relinks; opt-in).
 sh "$HERE/relink-repro-check.sh" --static || { echo "STAGECHK FAIL relinkrepro=FAIL"; stage_fail; }
+# STAGED-DRIFT: no .c may be compiled from a staged copy (it would shadow the tree the series patches). Table: fixed strings that
+# name a staged source directory (literal and shell variable spellings); scanned in build-*.sh, comments ignored. pass files=0 when none.
+sd=0; sdf=""
+for f in "$HERE"/build-*.sh; do
+	[ -f "$f" ] || continue
+	c=$(sed 's/#.*//' "$f" | awk 'BEGIN{n=split("pthread-staged/|${PTHREAD_STAGED}/|$PTHREAD_STAGED/",K,"|")} {for(i=1;i<=n;i++) if(index($0,K[i])>0 && $0 ~ /\.c([^[:alnum:]_]|$)/){c++; break}} END{print c+0}')
+	[ "$c" -gt 0 ] && { sd=$((sd+c)); sdf="$sdf $(basename "$f")"; }
+done
+if [ "$sd" = 0 ]; then echo "STAGED-DRIFT pass files=0"; else echo "STAGED-DRIFT fail files=$sd in:$sdf"; echo "STAGECHK FAIL staged-drift=FAIL"; stage_fail; fi
 # One tree, one final build, nothing grows: keep-one-check.sh is read-only (never deletes). Reported as keepone=<verdict>;
 # it fails the gate only with STAGE_GATE_KEEPONE=1 (line: KEEP-ONE verdict=pass|fail ...; --list names the candidates).
 ko=skip
