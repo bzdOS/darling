@@ -20,3 +20,7 @@ if [ "$valid" -eq 10 ] && [ "$old" -eq 11 ] && [ "$fwdmiss" -eq 3 ] && ! printf 
 else
 	echo "SERIES-COUNT-SELFTEST FAIL N=10 valid=$valid old=$old fwdmiss=$fwdmiss"; exit 1
 fi
+# window count: the textual count over get_tree JSON includes a floating node (modal panel) next to a tiled one (same expression as chrome-sr-batch.sh)
+TREE_J="{\"nodes\":[{\"type\":\"workspace\",\"nodes\":[{\"type\":\"con\",\"shell\":\"xdg_shell\",\"nodes\":[],\"floating_nodes\":[]}],\"floating_nodes\":[{\"type\":\"floating_con\",\"shell\":\"xdg_shell\",\"nodes\":[],\"floating_nodes\":[]}]}]}"
+fw=$(printf "%s\n" "$TREE_J" | tr "," "\n" | grep -c "\"shell\"")
+if [ "$fw" -eq 2 ]; then echo "WINDOW-COUNT-SELFTEST pass tiled+floating=$fw"; else echo "WINDOW-COUNT-SELFTEST FAIL got=$fw want=2"; exit 1; fi
