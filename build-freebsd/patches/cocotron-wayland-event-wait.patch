@@ -1,18 +1,12 @@
 diff --git a/AppKit/Wayland.backend/WaylandDisplay.m b/AppKit/Wayland.backend/WaylandDisplay.m
-index 28d2ad84..f9206d67 100644
+index 28d2ad8..f9206d6 100644
 --- a/AppKit/Wayland.backend/WaylandDisplay.m
 +++ b/AppKit/Wayland.backend/WaylandDisplay.m
-@@ -33,6 +33,7 @@
- #import <Foundation/NSValue.h>
- 
+@@ -35,2 +35,3 @@
  #import <errno.h>
 +#import <poll.h>
  #import <stdio.h>
- #import <stdlib.h>
- #import <string.h>
-@@ -731,20 +732,54 @@ static const struct wl_seat_listener _wayland_seat_listener = {
-     }
- }
+@@ -733,2 +734,21 @@ static const struct wl_seat_listener _wayland_seat_listener = {
  
 +/* Wait for the compositor socket: up to `seconds`, returns early when events arrived. A readable socket is read and
 + * dispatched with wl_display_dispatch (the wayland shim exports no prepare_read/read_events), so configure, frame, key
@@ -34,9 +28,7 @@ index 28d2ad84..f9206d67 100644
 +}
 +
  - (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
-                           untilDate: (NSDate *) untilDate
-                              inMode: (NSRunLoopMode) mode
-                             dequeue: (BOOL) dequeue
+@@ -738,11 +758,26 @@ static const struct wl_seat_listener _wayland_seat_listener = {
  {
 -    /* Give the compositor a chance to process anything we've queued (and
 -     * us a chance to notice buffer releases / configure events) before
@@ -70,18 +62,12 @@ index 28d2ad84..f9206d67 100644
 -                               untilDate: untilDate
 +                               untilDate: [NSDate date]
                                    inMode: mode
-                                  dequeue: dequeue];
- }
 diff --git a/AppKit/Wayland.backend/WaylandInput.h b/AppKit/Wayland.backend/WaylandInput.h
-index e42721a9..ea3cbb51 100644
+index e42721a..ea3cbb5 100644
 --- a/AppKit/Wayland.backend/WaylandInput.h
 +++ b/AppKit/Wayland.backend/WaylandInput.h
-@@ -81,7 +81,7 @@ struct wl_surface;
- /* purpose: stateful translator from wl_keyboard/wl_pointer callback
-  *          arguments to NSEvent instances, posted onto the current
+@@ -83,3 +83,3 @@ struct wl_surface;
   *          NSDisplay's event queue.
 - * input: fed via the -waylandKeyboard*/-waylandPointer* methods below,
 + * input: fed via the -waylandKeyboard... and -waylandPointer... methods below,
   *        called directly from wl_keyboard_listener/wl_pointer_listener
-  *        trampolines set up by WaylandDisplay.
-  * output: none directly - NSEvents are posted as a side effect (see

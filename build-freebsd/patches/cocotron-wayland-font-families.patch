@@ -2,22 +2,15 @@ diff --git a/AppKit/Wayland.backend/WaylandDisplay.m b/AppKit/Wayland.backend/Wa
 index f9206d6..f40a873 100644
 --- a/AppKit/Wayland.backend/WaylandDisplay.m
 +++ b/AppKit/Wayland.backend/WaylandDisplay.m
-@@ -28,10 +28,12 @@
- #import <AppKit/NSPasteboard.h>
- #import <AppKit/NSRaise.h>
+@@ -30,2 +30,3 @@
  #import <AppKit/NSScreen.h>
 +#import <AppKit/NSFontTypeface.h>
  #import <AppKit/NSWindow.h>
- #import <Foundation/NSException.h>
- #import <Foundation/NSValue.h>
+@@ -34,2 +35,3 @@
  
 +#import <dlfcn.h>
  #import <errno.h>
- #import <poll.h>
- #import <stdio.h>
-@@ -648,6 +650,40 @@ static const struct wl_seat_listener _wayland_seat_listener = {
-      * missing wiring to add here — there is no Wayland equivalent). */
- }
+@@ -650,2 +652,36 @@ static const struct wl_seat_listener _wayland_seat_listener = {
  
 +- (NSSet *) allFontFamilyNames {
 +    /* The family list comes from the CoreText implementation (the same one
@@ -54,5 +47,3 @@ index f9206d6..f40a873 100644
 +}
 +
  - (CGFloat) scrollerWidth {
-     return 15.0;
- }
