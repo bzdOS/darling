@@ -7,7 +7,7 @@ SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?
 WAIT="${1:-240}"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 [ -f "${SRC}/tests/semtw-probe-macho" ] || { echo "FATAL: build it with probes/semtw-build.sh" >&2; exit 2; }
-if pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+. "$(dirname "$0")/../series-guard.sh"; series_guard || exit 2
 XDG=$(mktemp -d /tmp/semtw-xdg.XXXXXX); chmod 700 "$XDG"
 LOG="${BD}/semtw-probe-$(date +%m%d-%H%M%S).log"
 before=$(pgrep -x darlingserver | tr "\n" " ")

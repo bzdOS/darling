@@ -9,7 +9,7 @@ WAIT="${1:-120}"
 export XDG_RUNTIME_DIR="$(mktemp -d)"; export XDG_CACHE_HOME="$XDG_RUNTIME_DIR"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 [ -f "${SRC}/tests/catx-kvc-probe-macho" ] || { echo "FATAL: build it with probes/catx-kvc-build.sh" >&2; exit 2; }
-if pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+. "$(dirname "$0")/../series-guard.sh"; series_guard || exit 2
 LOG="${BD}/catx-kvc-probe-$(date +%m%d-%H%M%S).log"
 before=$(pgrep -x darlingserver | tr "\n" " ")
 ( sudo timeout -k 5 $((WAIT+30)) env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \

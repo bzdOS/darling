@@ -9,7 +9,7 @@ PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 for t in coretext-probe-macho coretext-extras-probe-macho; do
     [ -f "${SRC}/tests/$t" ] || { echo "FATAL: build it with build-coretext-probe.sh" >&2; exit 2; }
 done
-if [ -z "$DARLING_LOCK_HELD" ] && pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+. "$(dirname "$0")/series-guard.sh"; series_guard || exit 2
 tot=0; allbad=""; rc=0
 for t in coretext-probe-macho coretext-extras-probe-macho; do
     LOG="${BD}/${t}-$(date +%m%d-%H%M%S).log"

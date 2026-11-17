@@ -8,7 +8,7 @@ SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?
 WAIT="${1:-120}"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 [ -f "${SRC}/tests/task-threads-probe-macho" ] || { echo "FATAL: build it with build-task-threads-probe.sh" >&2; exit 2; }
-if pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+. "$(dirname "$0")/series-guard.sh"; series_guard || exit 2
 LOG="${BD}/task-threads-probe-$(date +%m%d-%H%M%S).log"
 before=$(pgrep -x darlingserver | tr "\n" " ")
 ( sudo timeout -k 5 $((WAIT+30)) env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \

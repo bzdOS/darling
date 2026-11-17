@@ -13,7 +13,7 @@ SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?
 WAIT="${1:-180}"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 [ -f "${SRC}/tests/psynch-ring-probe-macho" ] || { echo "FATAL: build it with probes/psynch-ring-build.sh" >&2; exit 2; }
-if pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+. "$(dirname "$0")/../series-guard.sh"; series_guard || exit 2
 TS=$(date +%m%d-%H%M%S)
 LOG="${BD}/psynch-ring-probe-${TS}.log"; DUMP="${BD}/psynch-ring-probe-${TS}.dump"
 before=$(pgrep -x darlingserver | tr "\n" " ")

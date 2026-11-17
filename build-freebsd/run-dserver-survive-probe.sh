@@ -12,7 +12,7 @@
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"
 PATH="/usr/local/bin/:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 [ -f "${SRC}/tests/dserver-survive-probe-macho" ] || { echo "FATAL: build it with build-dserver-survive-probe.sh" >&2; exit 2; }
-if [ -z "$DARLING_LOCK_HELD" ] && pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+. "$(dirname "$0")/series-guard.sh"; series_guard || exit 2
 . "${SRC}/build-freebsd/dserver-prefix.sh"
 dsp_new || exit 2
 LOG="${BD}/dserver-survive-probe-$(date +%m%d-%H%M%S).log"
