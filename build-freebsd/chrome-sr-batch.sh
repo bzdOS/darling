@@ -56,7 +56,9 @@ while [ $valid -lt "$N" ] && [ $i -le $((2*N)) ]; do
 			# without it swaymsg printed "Unable to retrieve socket path" and the count was always 0, whatever was on screen
 			# (read-only get_tree; a view node carries a "shell" key, an app_id may be unset)
 			SS=$(ls "$XR"/sway-ipc.* 2>/dev/null | head -1)
-			w=$(SWAYSOCK=$SS swaymsg -t get_tree 2>/dev/null | grep -c '"shell"')
+			# self-check: no socket, or swaymsg failing/empty, is "unknown", never 0
+			TREE=$([ -n "$SS" ] && SWAYSOCK=$SS swaymsg -t get_tree 2>/dev/null)
+			if [ -n "$TREE" ]; then w=$(printf '%s\n' "$TREE" | grep -c '"shell"'); else w=unknown; fi
 			echo "SNAP windows=$w png=$PNG" >> "$L"
 		fi
 	) &
