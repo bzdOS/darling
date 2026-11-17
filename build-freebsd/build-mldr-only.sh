@@ -52,6 +52,7 @@ configure_file(
 include_directories(
   \${SRC}/external/cctools-port/cctools/include
   \${SRC}/startup/mldr/include
+  \${SRC}/startup/xlate
   \${SRC}/startup/mldr
   \${DRPC}/include
   \${DS}/include

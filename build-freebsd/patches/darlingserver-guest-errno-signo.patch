@@ -1,0 +1,184 @@
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -61,10 +61,12 @@
+  * spaces and are left as they are; ENOSYS is the one that is not.
+  */
+ #ifdef DARLING_FREEBSD
+-	#define DSERVER_GUEST_ENOSYS (-38)
+-#else
+-	#define DSERVER_GUEST_ENOSYS (-ENOSYS)
++	#include <bsdos_linux_xlate.h>
++	#define DSERVER_GUEST_ERR(hostErrno) (-bsdos_errno_host_to_guest(hostErrno))
++#else
++	#define DSERVER_GUEST_ERR(hostErrno) (-(hostErrno))
+ #endif
++#define DSERVER_GUEST_ENOSYS DSERVER_GUEST_ERR(ENOSYS)
+ 
+ DarlingServer::Log DarlingServer::Call::rpcReplyLog("replies");
+ 
+@@ -370,11 +372,11 @@
+ 				// make it non-blocking
+ 				int flags = fcntl(_body.exec_listener_pipe, F_GETFL);
+ 				if (flags < 0) {
+-					code = -errno;
++					code = DSERVER_GUEST_ERR(errno);
+ 				} else {
+ 					flags |= O_NONBLOCK;
+ 					if (fcntl(_body.exec_listener_pipe, F_SETFL, flags) < 0) {
+-						code = -errno;
++						code = DSERVER_GUEST_ERR(errno);
+ 					} else {
+ 						// now monitor it
+ 						auto fd = std::make_shared<FD>(_body.exec_listener_pipe);
+@@ -450,7 +452,7 @@
+ 
+ 				if (!process->writeMemory(_body.buffer, tmpstr.c_str(), len, &code)) {
+ 					// writeMemory returns a positive error code, but we want a negative one
+-					code = -code;
++					code = DSERVER_GUEST_ERR(code);
+ 				}
+ 			}
+ 		} else {
+@@ -504,7 +506,7 @@
+ 					kprintfLog.info() << tmp << kprintfLog.endLog;
+ 				} else {
+ 					// readMemory returns a positive error code, but we want a negative one
+-					code = -code;
++					code = DSERVER_GUEST_ERR(code);
+ 				}
+ 
+ 				free(tmp);
+@@ -608,7 +610,7 @@
+ 			code = -ESRCH;
+ 		}
+ 	} catch (std::system_error err) {
+-		code = -err.code().value();
++		code = DSERVER_GUEST_ERR(err.code().value());
+ 	} catch (...) {
+ 		code = std::numeric_limits<int>::min();
+ 	}
+@@ -629,7 +631,7 @@
+ 
+ 			if (!process->writeMemory(_body.buffer, tmpstr.c_str(), len, &code)) {
+ 				// writeMemory returns a positive error code, but we want a negative one
+-				code = -code;
++				code = DSERVER_GUEST_ERR(code);
+ 			}
+ 		} else {
+ 			code = -ESRCH;
+@@ -654,9 +656,18 @@
+ 
+ 	if (auto targetThread = Thread::threadForPort(_body.thread_port)) {
+ 		try {
+-			targetThread->sendSignal(_body.signal);
++			// the guest names the signal in Linux numbering (SIGUSR1 is 10 there, SIGBUS on a FreeBSD host);
++			// Thread::sendSignal hands it straight to the host kernel
++			int signal = _body.signal;
++#ifdef DARLING_FREEBSD
++			signal = bsdos_signo_guest_to_host(signal);
++			if (signal < 0) {
++				throw std::system_error(EINVAL, std::generic_category());
++			}
++#endif
++			targetThread->sendSignal(signal);
+ 		} catch (std::system_error e) {
+-			code = -e.code().value();
++			code = DSERVER_GUEST_ERR(e.code().value());
+ 		}
+ 	} else {
+ 		code = -ESRCH;
+@@ -669,7 +680,7 @@
+ 	int code = 0;
+ 
+ 	callLog.warning() << "TODO: " << __PRETTY_FUNCTION__ << callLog.endLog;
+-	code = -ENOSYS;
++	code = DSERVER_GUEST_ENOSYS;
+ 
+ 	_sendReply(code);
+ };
+@@ -679,7 +690,7 @@
+ 
+ 	if (auto targetThread = Thread::threadForPort(_body.thread_port)) {
+ 		callLog.warning() << "TODO: " << __PRETTY_FUNCTION__ << callLog.endLog;
+-		code = -ENOSYS;
++		code = DSERVER_GUEST_ENOSYS;
+ 	} else {
+ 		code = -ESRCH;
+ 	}
+@@ -698,7 +709,7 @@
+ 			try {
+ 				socket = kqchan->setup();
+ 			} catch (std::system_error e) {
+-				code = -e.code().value();
++				code = DSERVER_GUEST_ERR(e.code().value());
+ 			} catch (...) {
+ 				// just report that we couldn't find the port
+ 				code = -ESRCH;
+@@ -726,7 +737,7 @@
+ 			try {
+ 				socket = kqchan->setup();
+ 			} catch (std::system_error e) {
+-				code = -e.code().value();
++				code = DSERVER_GUEST_ERR(e.code().value());
+ 			} catch (...) {
+ 				// just report that we couldn't find the process
+ 				code = -ESRCH;
+@@ -773,7 +784,7 @@
+ 			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
+ 			newBSDSignal = thread->pendingSignal();
+ 		} catch (std::system_error e) {
+-			code = -e.code().value();
++			code = DSERVER_GUEST_ERR(e.code().value());
+ 		}
+ 	} else {
+ 		code = -ESRCH;
+@@ -843,11 +854,11 @@
+ 		// make our side non-blocking
+ 		int flags = fcntl(sockets[0], F_GETFL);
+ 		if (flags < 0) {
+-			code = -errno;
++			code = DSERVER_GUEST_ERR(errno);
+ 		} else {
+ 			flags |= O_NONBLOCK;
+ 			if (fcntl(sockets[0], F_SETFL, flags) < 0) {
+-				code = -errno;
++				code = DSERVER_GUEST_ERR(errno);
+ 			} else {
+ 				// now monitor it
+ 				auto fd = std::make_shared<FD>(sockets[0]);
+@@ -1051,7 +1062,7 @@
+ 			std::string tmpstr;
+ 			tmpstr.resize(_body.buffer_size);
+ 			if (!process->readMemory((uintptr_t)_body.buffer, tmpstr.data(), _body.buffer_size, &code)) {
+-				code = -code;
++				code = DSERVER_GUEST_ERR(code);
+ 			} else {
+ 				process->setExecutablePath(tmpstr.c_str());
+ 			}
+@@ -1076,7 +1087,7 @@
+ 				auto path = targetProcess->executablePath();
+ 				auto len = std::min(path.length() + 1, _body.buffer_size);
+ 				if (!callingProcess->writeMemory((uintptr_t)_body.buffer, path.c_str(), len, &code)) {
+-					code = -code;
++					code = DSERVER_GUEST_ERR(code);
+ 				}
+ 				fullLength = path.length();
+ 			} else {
+@@ -1107,7 +1118,7 @@
+ 				newGroups.resize(_body.new_group_count);
+ 
+ 				if (!process->readMemory((uintptr_t)_body.new_groups, newGroups.data(), newGroups.size() * sizeof(uint32_t), &code)) {
+-					code = -code;
++					code = DSERVER_GUEST_ERR(code);
+ 				} else {
+ 					process->setGroups(newGroups);
+ 				}
+@@ -1116,7 +1127,7 @@
+ 			if (code == 0 && _body.old_groups != 0 && _body.old_group_space > 0) {
+ 				auto len = std::min(oldGroups.size(), _body.old_group_space) * sizeof(uint32_t);
+ 				if (!process->writeMemory((uintptr_t)_body.old_groups, oldGroups.data(), len, &code)) {
+-					code = -code;
++					code = DSERVER_GUEST_ERR(code);
+ 				}
+ 			}
+ 		} else {

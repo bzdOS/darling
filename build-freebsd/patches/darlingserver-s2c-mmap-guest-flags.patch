@@ -1,30 +1,44 @@
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
-@@ -1253,6 +1253,23 @@
- 	return std::move(*reply);
- };
+@@ -17,6 +17,9 @@
+  * along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+  */
  
++#ifdef DARLING_FREEBSD
++#include <bsdos_linux_xlate.h>
++#endif
+ #include "darlingserver/registry.hpp"
+ #include <darlingserver/thread.hpp>
+ #include <darlingserver/process.hpp>
+@@ -1251,6 +1254,27 @@
+ 	}
+ 
+ 	return std::move(*reply);
++};
++
 +// The S2C mmap request is executed by the guest through its Linux-ABI syscall layer, so its flags travel in
 +// Linux numbering. The server builds them from host constants, which differ on non-Linux hosts
 +// (e.g. MAP_ANONYMOUS is 0x20 on Linux but 0x1000 elsewhere): translate them, or an anonymous request
 +// would be read as a file mapping of fd -1 and fail with EBADF.
 +static int _guestMmapFlags(int hostFlags) {
-+	enum { GUEST_MAP_SHARED = 0x1, GUEST_MAP_PRIVATE = 0x2, GUEST_MAP_FIXED = 0x10, GUEST_MAP_ANONYMOUS = 0x20, GUEST_MAP_FIXED_NOREPLACE = 0x100000 };
-+	int flags = 0;
-+	if (hostFlags & MAP_SHARED) flags |= GUEST_MAP_SHARED;
-+	if (hostFlags & MAP_PRIVATE) flags |= GUEST_MAP_PRIVATE;
-+	if (hostFlags & MAP_FIXED) flags |= GUEST_MAP_FIXED;
-+	if (hostFlags & MAP_ANONYMOUS) flags |= GUEST_MAP_ANONYMOUS;
-+#ifdef MAP_FIXED_NOREPLACE
-+	if (hostFlags & MAP_FIXED_NOREPLACE) flags |= GUEST_MAP_FIXED_NOREPLACE;
++#ifdef DARLING_FREEBSD
++	return bsdos_mmap_flags_host_to_guest(hostFlags);
++#else
++	return hostFlags;
 +#endif
-+	return flags;
 +};
 +
++// The reply's errno comes from the guest (Linux numbering); the server reasons in host errno values.
++static int _guestErrnoToHost(int guestErrno) {
++#ifdef DARLING_FREEBSD
++	return guestErrno ? bsdos_errno_guest_to_host(guestErrno) : 0;
++#else
++	return guestErrno;
++#endif
+ };
+ 
  uintptr_t DarlingServer::Thread::_mmap(uintptr_t address, size_t length, int protection, int flags, int fd, off_t offset, int& outErrno) {
- 	// XXX: not sure if we want to force all allocations in 32-bit processes to be in the 32-bit address space.
- 	//      for now, we leave it up to the caller.
-@@ -1276,7 +1293,7 @@
+@@ -1276,7 +1300,7 @@
  	call->address = address;
  	call->length = length;
  	call->protection = protection;
@@ -32,4 +46,40 @@
 +	call->flags = _guestMmapFlags(flags);
  	call->fd = (fd < 0) ? -1 : 0;
  	call->offset = offset;
+ 
+@@ -1303,7 +1327,7 @@
+ 
+ 	s2cLog.debug() << "_mmap returned address=" << reply->address << ", errno_result=" << reply->errno_result << s2cLog.endLog;
+ 
+-	outErrno = reply->errno_result;
++	outErrno = _guestErrnoToHost(reply->errno_result);
+ 	return reply->address;
+ };
+ 
+@@ -1330,7 +1354,7 @@
+ 
+ 	s2cLog.debug() << "_munmap returned return_value=" << reply->return_value << ", errno_result=" << reply->errno_result << s2cLog.endLog;
+ 
+-	outErrno = reply->errno_result;
++	outErrno = _guestErrnoToHost(reply->errno_result);
+ 	return reply->return_value;
+ };
+ 
+@@ -1358,7 +1382,7 @@
+ 
+ 	s2cLog.debug() << "_mprotect returned return_value=" << reply->return_value << ", errno_result=" << reply->errno_result << s2cLog.endLog;
+ 
+-	outErrno = reply->errno_result;
++	outErrno = _guestErrnoToHost(reply->errno_result);
+ 	return reply->return_value;
+ };
+ 
+@@ -1386,7 +1410,7 @@
+ 
+ 	s2cLog.debug() << "_msync returned return_value=" << reply->return_value << ", errno_result=" << reply->errno_result << s2cLog.endLog;
+ 
+-	outErrno = reply->errno_result;
++	outErrno = _guestErrnoToHost(reply->errno_result);
+ 	return reply->return_value;
+ };
  

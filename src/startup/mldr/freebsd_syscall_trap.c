@@ -123,6 +123,7 @@
 #include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
 #include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
 #include <sys/mount.h> /* native struct statfs — statfs/fstatfs translation */
+#include <bsdos_linux_xlate.h> /* the one host<->guest constant table: errno, signals, mmap/msync flags */
 #include "sigaction_translate.h" /* mldr_sys_rt_sigaction — see LINUX_SYS_rt_sigaction */
 #include "trap_log.h"            /* exit-caller logging slice — write(2) markers */
 #include <darlingserver/rpc.h>
@@ -278,6 +279,7 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_exit          60
 #define LINUX_SYS_wait4         61
 #define LINUX_SYS_kill          62
+#define LINUX_SYS_msync         26
 #define LINUX_SYS_sigaltstack  131
 #define LINUX_SYS_arch_prctl   158
 #define LINUX_SYS_gettid       186
@@ -638,25 +640,14 @@ mldr_mmap_log(const char *path, long len, long prot, long gflags, long gfd,
 static int
 mldr_linux_signo_to_freebsd(int linux_signo)
 {
-    /* Indexed by Linux signal number; 0 = no FreeBSD equivalent. */
-    static const unsigned char map[32] = {
-        [1]  = SIGHUP,  [2]  = SIGINT,  [3]  = SIGQUIT, [4]  = SIGILL,
-        [5]  = SIGTRAP, [6]  = SIGABRT, [7]  = SIGBUS,  [8]  = SIGFPE,
-        [9]  = SIGKILL, [10] = SIGUSR1, [11] = SIGSEGV, [12] = SIGUSR2,
-        [13] = SIGPIPE, [14] = SIGALRM, [15] = SIGTERM,
-        [16] = 0,            /* SIGSTKFLT — no FreeBSD counterpart */
-        [17] = SIGCHLD, [18] = SIGCONT, [19] = SIGSTOP, [20] = SIGTSTP,
-        [21] = SIGTTIN, [22] = SIGTTOU, [23] = SIGURG,  [24] = SIGXCPU,
-        [25] = SIGXFSZ, [26] = SIGVTALRM, [27] = SIGPROF, [28] = SIGWINCH,
-        [29] = SIGIO,
-        [30] = 0,            /* SIGPWR — no FreeBSD counterpart */
-        [31] = SIGSYS,
-    };
+    /* One table for the whole boundary (bsdos_linux_xlate.h); 0 = no counterpart, and the guest realtime
+     * numbers 65..126 are not part of the 1..64 range this helper answers for. */
+    int r;
 
-    if (linux_signo < 1 || linux_signo >= (int)(sizeof(map) / sizeof(map[0])))
+    if (linux_signo < 1 || linux_signo > 64)
         return 0;
-
-    return (int)map[linux_signo];
+    r = bsdos_signo_guest_to_host(linux_signo);
+    return r < 0 ? 0 : r;
 }
 
 /* ── raw FreeBSD syscall helper ────────────────────────────────────────────── */
@@ -1986,8 +1977,10 @@ mldr_abort_trace(const mcontext_t *mc)
  * output:   FreeBSD kernel retval (negative = -errno) or 0/positive on success
  * sideEffects: performs the requested kernel operation.
  */
+static long mldr_linux_fcntl(long fd, long cmd, long arg);
+
 static long
-dispatch_linux_syscall(unsigned int linux_nr,
+dispatch_linux_syscall_host_errno(unsigned int linux_nr,
                        long a1, long a2, long a3,
                        long a4, long a5, long a6,
                        mcontext_t *mc)
@@ -2125,10 +2118,7 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * so it tried to map fd=-1 as a real file-backed mapping, failed,
          * and _simple_salloc silently returned NULL — surfacing many calls
          * later as dyld's generic "mkstringf, out of memory error". */
-        long freebsd_flags = a4 & 0x3;      /* MAP_SHARED | MAP_PRIVATE */
-        if (a4 & 0x10)    freebsd_flags |= MAP_FIXED;
-        if (a4 & 0x20)    freebsd_flags |= MAP_ANON;     /* MAP_ANONYMOUS */
-        if (a4 & 0x20000) freebsd_flags |= MAP_STACK;
+        long freebsd_flags = bsdos_mmap_flags_guest_to_host(a4);
         /* Darwin ignores fd under MAP_ANON; FreeBSD rejects a non-(-1) fd
          * with EINVAL, so anonymous mappings forward fd=-1. */
         /* Snapshot what is handed to the host: the syscall wrapper leaves
@@ -2167,6 +2157,10 @@ dispatch_linux_syscall(unsigned int linux_nr,
 #endif
         return mr;
     }
+    case LINUX_SYS_msync:
+        /* Linux MS_SYNC is 4 where the host's is 0 (its 4 is undefined): translate or every sync request
+         * is refused. Reached by the server-initiated msync (vm_msync) and by the guest's own msync(2). */
+        return freebsd_raw_syscall(SYS_msync, a1, a2, bsdos_msync_flags_guest_to_host(a3), 0, 0, 0);
     case LINUX_SYS_mprotect:
         return freebsd_raw_syscall(SYS_mprotect, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_munmap:
@@ -2976,8 +2970,7 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * source guest-socket-wait's socketpair leg needs. */
         return freebsd_raw_syscall(SYS_socketpair, a1, a2, a3, a4, 0, 0);
     case LINUX_SYS_fcntl:
-        /* Same BSD-lineage passthrough as MACOS_SYS_fcntl above. */
-        return freebsd_raw_syscall(SYS_fcntl, a1, a2, a3, 0, 0, 0);
+        return mldr_linux_fcntl(a1, a2, a3);
     case LINUX_SYS_eventfd: {
         /* FreeBSD has no eventfd(2) at all — no native counter-semantics fd
          * exists to translate this to. socketpair(2) gives back a real,
@@ -3206,12 +3199,18 @@ dispatch_linux_syscall(unsigned int linux_nr,
     case LINUX_SYS_wait4:
         return freebsd_raw_syscall(SYS_wait4, a1, a2, a3, a4, 0, 0);
     case LINUX_SYS_kill:
-        if (a2 == SIGABRT && (a1 == 0 || a1 == (long)getpid())) {
+        if (a2 == 6 /* Linux SIGABRT */ && (a1 == 0 || a1 == (long)getpid())) {
             const char *e = getenv("MLDR_ABORT_TRACE");
             if (e != NULL && e[0] == '1')
                 mldr_abort_trace(mc);
         }
-        return freebsd_raw_syscall(SYS_kill, a1, a2, 0, 0, 0, 0);
+        {
+            /* the guest names Linux signals: SIGUSR1 is 10 there, SIGBUS on this host */
+            int host_sig = bsdos_signo_guest_to_host((int)a2);
+            if (host_sig < 0)
+                return -EINVAL;
+            return freebsd_raw_syscall(SYS_kill, a1, host_sig, 0, 0, 0, 0);
+        }
     case LINUX_SYS_rt_sigaction:
         /* Was a passthrough, which cannot work: the two struct sigaction
          * layouts differ (Linux carries sa_restorer and an 8-byte mask,
@@ -3470,9 +3469,98 @@ dispatch_linux_syscall(unsigned int linux_nr,
          * Linux errno. FreeBSD's ENOSYS is 78, which the guest takes for
          * EREMCHG and, in sys_fork, for a pid (fork() returned -78 with errno 0).
          * Linux ENOSYS is 38. */
-        return -38;
+        return -ENOSYS;
     }
 }
+/*
+ * purpose:  fcntl(2) for the guest. Command numbers, the file-status flag word and struct flock all differ
+ *           between Linux and the host (Linux F_GETLK is 5 where the host's 5 is F_GETOWN; Linux O_NONBLOCK
+ *           is 0x800 where the host's is 0x4), so a plain passthrough silently did something else.
+ * input:    fd, Linux command, argument.
+ * output:   result or -errno (host errno; the caller translates).
+ */
+static long
+mldr_linux_fcntl(long fd, long cmd, long arg)
+{
+    enum { L_DUPFD = 0, L_GETFD = 1, L_SETFD = 2, L_GETFL = 3, L_SETFL = 4, L_GETLK = 5, L_SETLK = 6,
+           L_SETLKW = 7, L_SETOWN = 8, L_GETOWN = 9, L_DUPFD_CLOEXEC = 1030 };
+    switch (cmd) {
+    case L_DUPFD:         return freebsd_raw_syscall(SYS_fcntl, fd, F_DUPFD, arg, 0, 0, 0);
+    case L_DUPFD_CLOEXEC: return freebsd_raw_syscall(SYS_fcntl, fd, F_DUPFD_CLOEXEC, arg, 0, 0, 0);
+    case L_GETFD:         return freebsd_raw_syscall(SYS_fcntl, fd, F_GETFD, 0, 0, 0, 0);
+    case L_SETFD:         return freebsd_raw_syscall(SYS_fcntl, fd, F_SETFD, arg, 0, 0, 0);
+    case L_SETOWN:        return freebsd_raw_syscall(SYS_fcntl, fd, F_SETOWN, arg, 0, 0, 0);
+    case L_GETOWN:        return freebsd_raw_syscall(SYS_fcntl, fd, F_GETOWN, 0, 0, 0, 0);
+    case L_GETFL: {
+        long r = freebsd_raw_syscall(SYS_fcntl, fd, F_GETFL, 0, 0, 0, 0);
+        long g;
+        if (r < 0)
+            return r;
+        g = r & 0x3;
+        if (r & O_NONBLOCK) g |= LINUX_O_NONBLOCK;
+        if (r & O_APPEND)   g |= LINUX_O_APPEND;
+        return g;
+    }
+    case L_SETFL:
+        /* only the status flags F_SETFL can change; access mode and creation flags are ignored by it */
+        return freebsd_raw_syscall(SYS_fcntl, fd, F_SETFL,
+                                   ((arg & LINUX_O_NONBLOCK) ? O_NONBLOCK : 0) | ((arg & LINUX_O_APPEND) ? O_APPEND : 0),
+                                   0, 0, 0);
+    case L_GETLK:
+    case L_SETLK:
+    case L_SETLKW: {
+        /* Linux x86-64 struct flock: short type @0, short whence @2, off_t start @8, off_t len @16, int pid @24;
+         * type RDLCK/WRLCK/UNLCK = 0/1/2 (host 1/3/2). */
+        unsigned char *lf = (unsigned char *)arg;
+        struct flock hf;
+        long r;
+        int hcmd = (cmd == L_GETLK) ? F_GETLK : (cmd == L_SETLK) ? F_SETLK : F_SETLKW;
+        short lt;
+
+        if (lf == NULL)
+            return -EFAULT;
+        memset(&hf, 0, sizeof(hf));
+        lt = *(short *)(lf + 0);
+        hf.l_type = (lt == 0) ? F_RDLCK : (lt == 1) ? F_WRLCK : F_UNLCK;
+        hf.l_whence = *(short *)(lf + 2);
+        hf.l_start = *(long *)(lf + 8);
+        hf.l_len = *(long *)(lf + 16);
+        r = freebsd_raw_syscall(SYS_fcntl, fd, hcmd, (long)&hf, 0, 0, 0);
+        if (r == 0 && cmd == L_GETLK) {
+            *(short *)(lf + 0) = (hf.l_type == F_RDLCK) ? 0 : (hf.l_type == F_WRLCK) ? 1 : 2;
+            *(short *)(lf + 2) = hf.l_whence;
+            *(long *)(lf + 8) = hf.l_start;
+            *(long *)(lf + 16) = hf.l_len;
+            *(int *)(lf + 24) = hf.l_pid;
+        }
+        return r;
+    }
+    default:
+        return -EINVAL;
+    }
+}
+
+/*
+ * purpose:  Entry point for every raw Linux-ABI syscall of the guest. The cases above run FreeBSD syscalls and
+ *           so produce FreeBSD errno values; the guest compares what it gets against Linux numbers, where
+ *           EAGAIN is 11 (not 35), ETIMEDOUT 110 (not 60), ENOTEMPTY 39 (not 66) and so on. Translate every
+ *           error here, once, through the shared table, instead of case by case.
+ * input:    as dispatch_linux_syscall_host_errno.
+ * output:   retval, or -(Linux errno) on error.
+ */
+static long
+dispatch_linux_syscall(unsigned int linux_nr,
+                       long a1, long a2, long a3,
+                       long a4, long a5, long a6,
+                       mcontext_t *mc)
+{
+    long r = dispatch_linux_syscall_host_errno(linux_nr, a1, a2, a3, a4, a5, a6, mc);
+
+    if (r < 0 && r > -4096)
+        r = -(long)bsdos_errno_host_to_guest((int)-r);
+    return r;
+}
+
 /* ── raw-Linux-syscall trampoline patching (dyld load-time, #198) ─────────── */
 
 /*

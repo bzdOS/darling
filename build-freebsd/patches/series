@@ -19,4 +19,5 @@ configd configd-sc-stubs-sane-values.patch
 darlingserver darlingserver-resume-pending-wakeup.patch
 darlingserver darlingserver-s2c-mmap-guest-flags.patch
 darlingserver darlingserver-send-peer-gone.patch
-xnu xnu-ulock-wait-eintr.patch
+xnu xnu-ulock-wait-no-errno.patch
+darlingserver darlingserver-guest-errno-signo.patch
