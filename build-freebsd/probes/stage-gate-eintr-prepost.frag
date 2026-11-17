@@ -1,0 +1,5 @@
+# --- EINTR-PREPOST fragment for stage-gate.sh (not wired in): paste after the PSYNCH-RING block. Needs the darlingserver
+# with the psynch ring. Prints "EINTR-PREPOST-VERDICT iters=N lost=K early=X eintr_conts=E shape=y|n addr=..": a signal-interrupted rwlock
+# waiter must still wake after the holder unlocks, so the gate passes only for lost=0. Skipped when the run lock is busy.
+[ "${STAGE_GATE_EINTR_PREPOST_RUN:-0}" = 1 ] && { _e=$(sh "$HERE/probes/eintr-prepost-build.sh" >/dev/null 2>&1; if [ -n "$DARLING_LOCK_HELD" ]; then DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/eintr-prepost-run.sh" 2>/dev/null
+	else lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" env DARLING_LOCK_HELD=1 DARLING_SRC_DIR="$SRCD" sh "$HERE/probes/eintr-prepost-run.sh" 2>/dev/null; [ $? -eq 75 ] && echo "EINTR-PREPOST-VERDICT skipped lock-busy"; fi | grep -a "^EINTR-PREPOST-VERDICT" | tail -1); echo "${_e:-EINTR-PREPOST-VERDICT fail no-verdict}"; case "$_e" in *" lost=0 "*|*"skipped"*) ;; *) echo "STAGECHK FAIL eintr-prepost=FAIL"; exit 1;; esac; }
