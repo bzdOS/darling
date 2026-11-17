@@ -10,7 +10,11 @@
  *   systemFontOfSize:weight: monospacedDigitSystemFontOfSize:weight: fontWithName:size: fontWithDescriptor:size:
  *   +systemFontSize smallSystemFontSize labelFontSize buttonFontSize
  *   -ascender descender capHeight xHeight leading pointSize italicAngle underlinePosition underlineThickness numberOfGlyphs
- *   -fontName familyName displayName fontDescriptor isFixedPitch isVertical screenFont printerFont copyWithZone: */
+ *   -fontName familyName displayName fontDescriptor isFixedPitch isVertical screenFont printerFont copyWithZone:
+ * The Wayland AppKit backend bundle (loaded later, class WaylandDisplay) does not override NSDisplay -allFontFamilyNames and
+ * -fontTypefacesForFamilyName:, so the first NSFontFamily build raised "only defined for abstract class". Once WaylandDisplay
+ * exists (checked at every image load) both are installed on it: the family set comes from CTFontManagerCopyAvailableFontFamilyNames
+ * (Helvetica when empty), one NSFontTypeface "Regular" per family. */
 typedef void *Class;
 typedef void *SEL;
 typedef void *IMP;
@@ -19,6 +23,7 @@ extern Class objc_getClass(const char *name);
 extern Class object_getClass(id obj);
 extern SEL sel_registerName(const char *name);
 extern IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
+extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern id class_createInstance(Class cls, unsigned long extra);
 extern unsigned long class_getInstanceSize(Class cls);
 extern id objc_msgSend(id, SEL, ...);
@@ -158,10 +163,50 @@ static void try_add(void)
     IM("copyWithZone:", i_copy, "@24@0:8^v16");
     done = 1;
 }
-static void on_image(const struct mach_header *mh, long slide) { (void)mh; (void)slide; try_add(); }
+static id msg0(id o, const char *s) { return objc_msgSend(o, S(s)); }
+static id c_families(id self, SEL c)
+{
+    id set = msg0(msg0((id)objc_getClass("NSMutableSet"), "alloc"), "init");
+    const void *(*copy)(void) = ct("CTFontManagerCopyAvailableFontFamilyNames");
+    long (*cnt)(const void *) = ct("CFArrayGetCount");
+    const void *(*at)(const void *, long) = ct("CFArrayGetValueAtIndex");
+    void (*rel)(const void *) = ct("CFRelease");
+    const void *arr = copy && cnt && at ? copy() : 0;
+    if (arr) {
+        long i, n = cnt(arr);
+        Class sc = objc_getClass("NSString");
+        for (i = 0; i < n; i++) {
+            id name = (id)at(arr, i);
+            if (name && ((unsigned char (*)(id, SEL, Class))objc_msgSend)(name, S("isKindOfClass:"), sc))
+                objc_msgSend(set, S("addObject:"), name);
+        }
+        if (rel) rel(arr);
+    }
+    if (((unsigned long (*)(id, SEL))objc_msgSend)(set, S("count")) == 0) objc_msgSend(set, S("addObject:"), (id)cfs("Helvetica"));
+    return msg0(set, "autorelease");
+}
+static id c_typefaces(id self, SEL c, id name)
+{
+    id f = objc_msgSend((id)objc_getClass("NSFontTypeface"), S("alloc"));
+    f = ((id (*)(id, SEL, id, id, unsigned))objc_msgSend)(f, S("initWithName:traitName:traits:"), name, (id)cfs("Regular"), 0);
+    return objc_msgSend((id)objc_getClass("NSArray"), S("arrayWithObject:"), msg0(f, "autorelease"));
+}
+static int wl_done;
+static void try_wayland(void)
+{
+    Class wd;
+    if (wl_done) return;
+    wd = objc_getClass("WaylandDisplay");
+    if (!wd) return;
+    class_replaceMethod(wd, S("allFontFamilyNames"), (IMP)c_families, "@16@0:8");
+    class_replaceMethod(wd, S("fontTypefacesForFamilyName:"), (IMP)c_typefaces, "@24@0:8@16");
+    wl_done = 1;
+}
+static void on_image(const struct mach_header *mh, long slide) { (void)mh; (void)slide; try_add(); try_wayland(); }
 
 __attribute__((constructor)) static void appkit_extras_font(void)
 {
     try_add();
-    if (!done) _dyld_register_func_for_add_image(on_image);
+    try_wayland();
+    _dyld_register_func_for_add_image(on_image);
 }

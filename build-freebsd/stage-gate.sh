@@ -74,7 +74,7 @@ gate_probe() { # name script
 [ "${STAGE_GATE_FONTRESOLVE_RUN:-1}" = 1 ] && gate_probe FONT-RESOLVE font-resolve-probe.sh
 #   FONT-FAMILIES: [[NSDisplay currentDisplay] allFontFamilyNames] answers a non-empty set and does not raise "only defined for abstract class";
 #          needs the AppKit Wayland backend with cocotron-wayland-font-families deployed, so default 0 until then (font-families-probe.sh).
-[ "${STAGE_GATE_FONTFAMILIES_RUN:-0}" = 1 ] && gate_probe FONT-FAMILIES font-families-probe.sh
+[ "${STAGE_GATE_FONTFAMILIES_RUN:-1}" = 1 ] && gate_probe FONT-FAMILIES font-families-probe.sh
 # STAGE_GATE_SURVIVE_RUN=1 also runs the darlingserver survival probe (DSERVER-SURVIVE-VERDICT: malformed requests and a client killed
 # mid-call must not take the server down; about 75 s, so off by default); needs tests/dserver-survive-probe-macho.
 [ "${STAGE_GATE_SURVIVE_RUN:-0}" = 1 ] && gate_probe DSERVER-SURVIVE run-dserver-survive-probe.sh
