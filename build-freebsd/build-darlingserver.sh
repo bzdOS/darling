@@ -55,6 +55,7 @@ configure_file(
 
 include_directories(
   \${COMPAT}
+  \${SRC}/startup/xlate
   /usr/local/include/libepoll-shim
   \${DS}/include
   \${DS}/internal-include
@@ -112,7 +113,13 @@ cmake .
 make -j$(sysctl -n hw.ncpu)
 # Publish the binary at the canonical path everything else reads from; the
 # scratch directory above is an implementation detail of this script.
-install -m 755 "${SCRATCH}/darlingserver" "${BUILD}/darlingserver"
+# ${BUILD}/darlingserver may be a symlink to the scratch binary (same file): install(1) refuses that
+# (rc=64), and nothing needs copying. A real failure still aborts under set -e.
+if [ "${SCRATCH}/darlingserver" -ef "${BUILD}/darlingserver" ]; then
+    chmod 755 "${SCRATCH}/darlingserver"
+else
+    install -m 755 "${SCRATCH}/darlingserver" "${BUILD}/darlingserver"
+fi
 
 echo "=== Built: ${BUILD}/darlingserver ==="
 ls -lh "${BUILD}/darlingserver"

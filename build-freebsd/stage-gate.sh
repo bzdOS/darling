@@ -54,7 +54,17 @@ done
 if [ "$cgp" = FAIL ]; then
 	echo "STAGECHK FAIL cgpatch=FAIL (CoreGraphics CGColor accessors not NULL-safe; run build-freebsd/cg-color-nullsafe.py on the overlay and staged copy)"; exit 1
 fi
+# No script here may stop processes by name (pkill/killall hit other users' processes): comments are ignored,
+# this file is skipped (it names the words). NOKILL_DIR overrides the scanned directory (for tests).
+nk=ok; NKD="${NOKILL_DIR:-$HERE}"
+for f in "$NKD"/*.sh; do
+	[ "$(basename "$f")" = stage-gate.sh ] && continue
+	if sed 's/#.*//' "$f" 2>/dev/null | grep -Eq '(^|[^[:alnum:]_-])(pkill|killall)([^[:alnum:]_-]|$)'; then nk=FAIL; nkf="$nkf $(basename "$f")"; fi
+done
+if [ "$nk" = FAIL ]; then
+	echo "STAGECHK FAIL nokill=FAIL (name-based process kill in:${nkf}; stop own processes by pid)"; exit 1
+fi
 if [ -z "$bad" ] && [ "$ML" != none ]; then
-	echo "STAGECHK ok cfinit=ok cgpatch=$cgp images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
+	echo "STAGECHK ok cfinit=ok cgpatch=$cgp nokill=$nk images=$n mldr=$ML restaged=[${fixed# }] key:$sel"; exit 0
 fi
 echo "STAGECHK FAIL images=$n mldr=$ML mismatches:${bad:- none}"; exit 1

@@ -33,7 +33,8 @@ export PATH DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR
 
 LOG="${DARLING_BUILD_DIR}/smoke-${TEST}-$(date +%m%d-%H%M%S).log"
 
-sudo pkill -9 darlingserver 2>/dev/null
+# Only processes this script starts are stopped (by pid); pre-existing servers are left alone.
+DS_BEFORE=$(pgrep -x darlingserver | tr "\n" " ")
 sleep 1
 sudo rm -rf /tmp/darling-dynamic-smoke /tmp/darling-local-overlay
 
@@ -66,7 +67,9 @@ fi
 
 ( sudo ${SUDO_ENV} "${DARLING_BUILD_DIR}/launch-dynamic" > "${LOG}" 2>&1 & )
 sleep "${WAIT_SECS}"
-sudo pkill -9 darlingserver 2>/dev/null
+for p in $(pgrep -x darlingserver); do
+  case " $DS_BEFORE " in *" $p "*) ;; *) sudo kill -9 "$p" 2>/dev/null ;; esac
+done
 [ -z "${KEEP}" ] || echo "overlay kept at /tmp/darling-local-overlay"
 
 echo "=== ${TEST} ($(basename "${LOG}")) ==="

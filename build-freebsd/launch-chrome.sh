@@ -47,7 +47,9 @@ export PATH DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR
 [ -f "$CHROME_APP/Contents/MacOS/Google Chrome for Testing" ] || {
   echo "FATAL: Chrome launcher binary missing" >&2; exit 1; }
 
-sudo pkill -9 darlingserver 2>/dev/null; sleep 1
+# Only processes this script starts are stopped (by pid); pre-existing servers are left alone.
+DS_BEFORE=$(pgrep -x darlingserver | tr "\n" " ")
+sleep 1
 
 # Source tree layout launch-dynamic expects: $DARLING_SRC_DIR/tests/<binary>.
 TMP_SRC="$(mktemp -d /tmp/darling-chrome-src.XXXXXX)"
@@ -95,7 +97,9 @@ while [ "$i" -lt "$WAIT_SECS" ]; do
   i=$((i+1))
 done
 sleep 1   # let trailing output flush
-sudo pkill -9 darlingserver 2>/dev/null
+for p in $(pgrep -x darlingserver); do
+  case " $DS_BEFORE " in *" $p "*) ;; *) sudo kill -9 "$p" 2>/dev/null ;; esac
+done
 
 echo "=== chrome launch result ($(basename "$LOG"), waited ${i}s) ==="
 # Quiet summary: drop per-image dyld noise; show lifecycle + errors only.
