@@ -23,6 +23,11 @@
 # DARLING_LOCK_HELD is set. Stops only the sway/darlingserver/mldr pids it started (by pid, ps line printed to stderr first).
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"
 KIND="${SR_KIND:?}"
+# Guard: the overlay source must never be the launcher's local cache (/tmp/darling-local-overlay); refuse before anything runs.
+LOCAL_OVL=/tmp/darling-local-overlay
+if [ "$(realpath "$DARLING_OVERLAY" 2>/dev/null || echo "$DARLING_OVERLAY")" = "$(realpath "$LOCAL_OVL" 2>/dev/null || echo "$LOCAL_OVL")" ]; then
+    echo "RUN-INVALID overlay-source-is-local"; exit 4
+fi
 case "$KIND" in
     rwlock) LABEL=SUSPEND-RWLOCK; WOP=rd_lock; COP=rd_cont ;;
     mutex)  LABEL=SUSPEND-MUTEX;  WOP=mutexwait; COP=mutex_cont ;;

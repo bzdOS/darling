@@ -23,6 +23,11 @@ SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
 DARLING_SRC_DIR="${SRC}"
 DARLING_OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 DARLING_BUILD_DIR="${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR to your build dir}"
+# Guard: the overlay source must never be the launcher's local cache (/tmp/darling-local-overlay); refuse before anything runs.
+LOCAL_OVL=/tmp/darling-local-overlay
+if [ "$(realpath "$DARLING_OVERLAY" 2>/dev/null || echo "$DARLING_OVERLAY")" = "$(realpath "$LOCAL_OVL" 2>/dev/null || echo "$LOCAL_OVL")" ]; then
+    echo "RUN-INVALID overlay-source-is-local"; exit 4
+fi
 TEST="${1:-load-wayland-backend-macho}"
 WAIT_SECS="${WAIT_SECS:-14}"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
