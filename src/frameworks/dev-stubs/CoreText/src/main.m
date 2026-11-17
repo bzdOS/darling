@@ -25,6 +25,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* The CTFont* entry points CTFontCreateWithName, CTFontDescriptorCreate*, CTFontCopyFamilyName ... have ONE implementation, the
+ * behaviour build-freebsd/stub-frameworks/behaviors/CoreText/coretext.c (linked into the CoreText image by rebuild-stub-data.py).
+ * They are not stubbed here: a NULL stub answering a name the behaviour implements is what +[NSFont systemFontOfSize:] got
+ * through the injected darling-extras.dylib (rc133). Names the behaviour does not define stay stubs below. */
 static int verbose = 0;
 
 __attribute__((constructor))
@@ -47,66 +51,6 @@ NSString *const kCTParagraphStyleAttributeName = @"kCTParagraphStyleAttributeNam
 NSString *const kCTRunDelegateAttributeName = @"kCTRunDelegateAttributeName";
 NSString *const kCTUnderlineColorAttributeName = @"kCTUnderlineColorAttributeName";
 NSString *const kCTUnderlineStyleAttributeName = @"kCTUnderlineStyleAttributeName";
-
-void* CTFontCopyFamilyName(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontCopyFamilyName called\n");
-	return NULL;
-};
-
-void* CTFontCopyFullName(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontCopyFullName called\n");
-	return NULL;
-};
-
-void* CTFontCreatePathForGlyph(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontCreatePathForGlyph called\n");
-	return NULL;
-};
-
-void* CTFontCreateWithName(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontCreateWithName called\n");
-	return NULL;
-};
-
-void* CTFontDescriptorCopyAttribute(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontDescriptorCopyAttribute called\n");
-	return NULL;
-};
-
-void* CTFontDescriptorCopyLocalizedAttribute(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontDescriptorCopyLocalizedAttribute called\n");
-	return NULL;
-};
-
-void* CTFontDescriptorCreateMatchingFontDescriptors(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontDescriptorCreateMatchingFontDescriptors called\n");
-	return NULL;
-};
-
-void* CTFontDescriptorCreateWithAttributes(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontDescriptorCreateWithAttributes called\n");
-	return NULL;
-};
-
-void* CTFontDrawGlyphs(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontDrawGlyphs called\n");
-	return NULL;
-};
-
-void* CTFontGetAdvancesForGlyphs(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontGetAdvancesForGlyphs called\n");
-	return NULL;
-};
-
-void* CTFontGetGlyphsForCharacters(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontGetGlyphsForCharacters called\n");
-	return NULL;
-};
-
-void* CTFontGetSymbolicTraits(void) {
-	if (verbose) LOG_FUNC("STUB: CTFontGetSymbolicTraits called\n");
-	return NULL;
-};
 
 void* CTFontManagerRegisterFontsForURL(void) {
 	if (verbose) LOG_FUNC("STUB: CTFontManagerRegisterFontsForURL called\n");

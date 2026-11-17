@@ -13,6 +13,9 @@ rebuilds such an image from its own export list and load commands:
     libSystem re-export closure) defines as DATA are not emitted at all: the
     provider is reached through a re-export, nothing is shadowed
     (_NSConcreteStackBlock and friends come from libsystem_blocks);
+  * an INJECTED image (darling-extras.dylib: DYLD_INSERT_LIBRARIES puts it first in the flat lookup order, so a
+    dlsym(RTLD_DEFAULT) or flat bind finds it before the framework) exports no name that a hand written behaviour
+    (stub-frameworks/behaviors/<image>/*.c) of a SHADOW_FROM image defines: the single implementation lives in the behaviour;
   * everything else stays a function (`xorl %eax,%eax; ret`).
 Install name, versions, re-exports and dependencies are kept. An image with nothing
 to fix is left alone. With --install the old file is copied to <file>.pre-dataascode
@@ -74,6 +77,38 @@ def load_info(path):
     return info
 
 
+INJECTED = ("darling-extras.dylib",)
+# behaviour directories whose names an injected image must not shadow. Widen the list one image at a time, once the framework
+# that carries the behaviour is known to be loaded wherever the injected image is (a name left out of both has no provider).
+SHADOW_FROM = ("CoreText", "CoreTextExtras.dylib")
+BEHAVIORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub-frameworks", "behaviors")
+
+
+def compile_behaviors(img_name, work):
+    """compile stub-frameworks/behaviors/<img_name>/*.c; returns the object files"""
+    objs = []
+    bdir = os.path.join(BEHAVIORS, img_name)
+    if os.path.isdir(bdir):
+        for fn in sorted(os.listdir(bdir)):
+            if fn.endswith(".c"):
+                bo = os.path.join(work, img_name + "." + fn + ".o")
+                run("clang", "-target", "x86_64-apple-macos10.12", "-O1", "-fno-stack-protector",
+                    "-c", os.path.join(bdir, fn), "-o", bo, check=True)
+                objs.append(bo)
+    return objs
+
+
+def behavior_names(work, skip=None):
+    """names exported by the behaviours of the SHADOW_FROM images (except `skip`)"""
+    names = set()
+    if os.path.isdir(BEHAVIORS):
+        for d in sorted(os.listdir(BEHAVIORS)):
+            if d != skip and d in SHADOW_FROM:
+                for bo in compile_behaviors(d, work):
+                    names |= set(exports(bo))
+    return names
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--overlay", required=True)
@@ -132,17 +167,14 @@ def main():
                 funcs.append(n)
         # hand written behaviour (stub-frameworks/behaviors/<image file name>/*.c) replaces the
         # generic no-op for the names it defines; it is compiled and linked into the image
-        behaviors = []
-        bdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub-frameworks",
-                            "behaviors", os.path.basename(path))
-        if os.path.isdir(bdir):
-            cf = ov + "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
-            for fn in sorted(os.listdir(bdir)):
-                if fn.endswith(".c"):
-                    bo = os.path.join(a.work, os.path.basename(path) + "." + fn + ".o")
-                    run("clang", "-target", "x86_64-apple-macos10.12", "-O1", "-fno-stack-protector",
-                        "-c", os.path.join(bdir, fn), "-o", bo, check=True)
-                    behaviors.append(bo)
+        behaviors = compile_behaviors(os.path.basename(path), a.work)
+        shadow = []
+        if os.path.basename(path) in INJECTED:
+            real = behavior_names(a.work, skip=os.path.basename(path))
+            shadow = sorted(n for n in funcs + datas if n in real)
+            funcs = [n for n in funcs if n not in real]
+            datas = [n for n in datas if n not in real]
+        if behaviors:
             defined = set()
             for bo in behaviors:
                 defined |= set(exports(bo))
@@ -154,7 +186,7 @@ def main():
         # a string constant exported as a zero filled object is rebuilt as a pointer to a CFString
         fix += [n for n in datas if R.is_string_const(n) and n not in fix and
                 ex[n][0].startswith("__DATA") and n not in drop]
-        if not fix and not behaviors:
+        if not fix and not behaviors and not shadow:
             print("unchanged %s" % os.path.relpath(path, ov))
             continue
         base = re.sub(r"[^A-Za-z0-9_]", "_", os.path.basename(path))
@@ -208,6 +240,8 @@ def main():
             os.path.relpath(path, ov), len(funcs), len(datas), len(classes), len(drop), len(fix)))
         if drop:
             print("  dropped: " + " ".join(drop))
+        if shadow:
+            print("  not exported (a behaviour of another image implements them): %d: %s" % (len(shadow), " ".join(shadow)))
         rebuilt += 1
         if a.install:
             bak = path + ".pre-dataascode"
