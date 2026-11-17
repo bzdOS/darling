@@ -7,6 +7,7 @@
 # Env: DARLING_SRC_DIR DARLING_BUILD_DIR DARLING_OVERLAY. Optional REPRO_KEEP=1 keeps the outdirs.
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "$1" = --static ]; then
+	grep -q -- "libsyscall" "$HERE/relink-libsystem-kernel-dirty.sh" || { echo "RELINK-REPRO fail diff=static (libsyscall sources missing in the dirty-object scan of relink-libsystem-kernel-dirty.sh)"; exit 1; }
 	grep -q -- "-Wl,-S " "$HERE/relink-libsystem-kernel-objs.sh" && exit 0
 	echo "RELINK-REPRO fail diff=static (-Wl,-S missing in relink-libsystem-kernel-objs.sh)"; exit 1
 fi

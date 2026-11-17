@@ -1,7 +1,9 @@
 #!/bin/sh
 # relink-libsystem-kernel-dirty.sh -- rebuild libsystem_kernel.dylib from EVERY source the xnu tree changes
-# (modified or added .c/.S under libsystem_kernel in the xnu submodule, plus the generated bsdsyscalls stubs
-# that build-freebsd/patches touch), via relink-libsystem-kernel-objs.sh. Relinking only the object of the
+# (modified or added .c/.S under libsystem_kernel, libsyscall and gen/bsdsyscalls in the xnu submodule, plus the generated
+# bsdsyscalls stubs that build-freebsd/patches touch), via relink-libsystem-kernel-objs.sh. libsyscall is scanned because
+# libsyscall/mach/mach_init.c was once missed: _mach_fork_parent kept its stale body (no failed-fork check) and a failed
+# fork blocked the parent in fork_wait_for_child forever. Relinking only the object of the
 # latest edit leaves every earlier fix at the tree's stale object (an installed dylib silently lost the
 # sysctl string-length fix that way). Writes <outdir>/libsystem_kernel.dylib; with INSTALL=1 copies it over
 # $DARLING_OVERLAY/usr/lib/system/libsystem_kernel.dylib (previous copy kept as <outdir>/libsystem_kernel.dylib.prev).
@@ -14,7 +16,7 @@ X="${SRC}/src/external/xnu"
 TARGET=src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib
 mkdir -p "$OUT"
 ( cd "$BD" && ninja -t commands "$TARGET" ) > "$OUT/all-commands.txt"
-{ ( cd "$X" && git status --short -- darling/src/libsystem_kernel | sed -n 's/^.. //p' )
+{ ( cd "$X" && git status --short -- darling/src/libsystem_kernel libsyscall gen/bsdsyscalls | sed -n 's/^.. //p' )
   grep -h '^+++ b/.*bsdsyscalls/.*\.S$' "${SRC}/build-freebsd/patches/"xnu-*.patch 2>/dev/null | sed 's/^+++ b\///'; } |
 while read -r f; do
 	case "$f" in *.c|*.S) ;; *) continue;; esac

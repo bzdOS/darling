@@ -44,12 +44,25 @@ if [ "${STAGE_GATE_CFINIT_RUN:-0}" = 1 ]; then
 	cfv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/cfinit-check.sh" 2>&1 | grep -a "^CFINIT-VERDICT" | tail -1); echo "$cfv"
 	case "$cfv" in "CFINIT-VERDICT pass"*) ;; *) echo "STAGECHK FAIL cfinit=FAIL"; exit 1;; esac
 fi
-# The FSOPS probe (3 s) always runs; STAGE_GATE_FSOPS_RUN=0 skips it. It is the file system probe (FSOPS-VERDICT line: statfs/fstatfs, byte-range locks, fsync, mmap as a
-# browser's SQLite databases use them; starts its own darlingserver). Needs tests/fsops-probe-macho (build-fsops-probe.sh).
-if [ "${STAGE_GATE_FSOPS_RUN:-1}" = 1 ]; then
-	fsv=$(DARLING_SRC_DIR="$SRCD" sh "$HERE/run-fsops-probe.sh" 2>&1 | grep -a "^FSOPS-VERDICT" | tail -1); echo "$fsv"
-	case "$fsv" in "FSOPS-VERDICT pass"*) ;; *) echo "STAGECHK FAIL fsops=FAIL"; exit 1;; esac
-fi
+# Guest probes that are cheap (about 3 s each) always run; STAGE_GATE_<NAME>_RUN=0 skips one. Each starts its own darlingserver, so it
+# runs under the shared run lock (taken here unless the caller, e.g. chrome-series.sh, already holds it); a busy lock gives
+# "<NAME>-VERDICT skipped lock-busy" and does not fail the gate (another run is using the machine).
+#   FSOPS: file system probe (statfs/fstatfs, byte-range locks, fsync, mmap as a browser SQLite databases use them);
+#          needs tests/fsops-probe-macho (build-fsops-probe.sh).
+#   FORK:  fork/posix_spawn must return when the host cannot create the child (a stale _mach_fork_parent blocked in
+#          fork_wait_for_child); needs tests/fork-fail-probe-macho (build-fork-fail-probe.sh).
+gate_probe() { # name script
+	_o=$(if [ -n "$DARLING_LOCK_HELD" ]; then DARLING_SRC_DIR="$SRCD" sh "$HERE/$2" 2>&1
+	else lockf -t 0 "$DARLING_BUILD_DIR/.darling-run.lock" env DARLING_LOCK_HELD=1 DARLING_SRC_DIR="$SRCD" sh "$HERE/$2" 2>&1; [ $? -eq 75 ] && echo "$1-VERDICT skipped lock-busy"; fi | grep -a "^$1-VERDICT" | tail -1)
+	[ -n "$_o" ] || _o="$1-VERDICT FAIL no-verdict"
+	echo "$_o"
+	case "$_o" in "$1-VERDICT pass"*|"$1-VERDICT skipped"*) ;; *) echo "STAGECHK FAIL $(echo "$1" | tr A-Z a-z)=FAIL"; exit 1;; esac
+}
+[ "${STAGE_GATE_FSOPS_RUN:-1}" = 1 ] && gate_probe FSOPS run-fsops-probe.sh
+[ "${STAGE_GATE_FORK_RUN:-1}" = 1 ] && gate_probe FORK run-fork-fail-probe.sh
+# STAGE_GATE_SURVIVE_RUN=1 also runs the darlingserver survival probe (DSERVER-SURVIVE-VERDICT: malformed requests and a client killed
+# mid-call must not take the server down; about 75 s, so off by default); needs tests/dserver-survive-probe-macho.
+[ "${STAGE_GATE_SURVIVE_RUN:-0}" = 1 ] && gate_probe DSERVER-SURVIVE run-dserver-survive-probe.sh
 # STAGE_GATE_WINDOW_RUN=1 also runs the window draw probe (WINDOW-DRAW-VERDICT line: an NSWindow with a red background must
 # map in an own headless sway and show that colour in a grim snapshot; own sway and darlingserver, off by default).
 if [ "${STAGE_GATE_WINDOW_RUN:-0}" = 1 ]; then

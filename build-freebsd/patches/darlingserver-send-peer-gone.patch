@@ -8,7 +8,7 @@ index 64b0fab..e48ac73 100644
  				continue;
 -			} else if (errno == EPIPE || errno == ECONNREFUSED) {
 -				// this means that peer of the first message we tried to send has died.
-+			} else if (errno == EPIPE || errno == ECONNREFUSED || errno == ENOENT || errno == ECONNRESET) {
++			} else if (errno == EPIPE || errno == ECONNREFUSED || errno == ENOENT || errno == ECONNRESET || errno == ENOTCONN || errno == ECONNABORTED) {
 +				// this means that peer of the first message we tried to send has died
 +				// (ENOENT: its socket path is already gone, e.g. a thread that exited before the reply).
  				// we'll just drop that message and try the others.

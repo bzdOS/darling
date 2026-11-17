@@ -8,7 +8,7 @@ SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?
 WAIT="${1:-120}"
 PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 [ -f "${SRC}/tests/fsops-probe-macho" ] || { echo "FATAL: build it with build-fsops-probe.sh" >&2; exit 2; }
-if pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
+if [ -z "$DARLING_LOCK_HELD" ] && pgrep -f "lockf.*darling-run.lock" >/dev/null 2>&1; then echo "FATAL: a series is running" >&2; exit 2; fi
 LOG="${BD}/fsops-probe-$(date +%m%d-%H%M%S).log"
 before=$(pgrep -x darlingserver | tr "\n" " ")
 ( sudo timeout -k 5 $((WAIT+30)) env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \

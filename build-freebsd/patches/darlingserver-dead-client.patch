@@ -1,0 +1,101 @@
+diff --git a/src/call.cpp b/src/call.cpp
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -200,8 +200,13 @@
+ 			throw std::runtime_error("Failed to extract reply-push synchronization pipe");
+ 		}
+ 
++		// the client may already be dead (or its memory unreadable) by the time we read the pushed reply: that is the
++		// client's problem, never the server's. Drop the reply, but release the synchronization pipe so nobody blocks on it.
+ 		if (!process->readMemory(pushReplyCall->reply, replyToSave.data().data(), pushReplyCall->reply_size)) {
+-			throw std::runtime_error("Failed to read client-pushed reply body");
++			callLog.warning() << "Dropping client-pushed reply: client memory unreadable (client dead?)" << callLog.endLog;
++			write(pipeDesc, &tmp, sizeof(tmp));
++			close(pipeDesc);
++			return nullptr;
+ 		}
+ 
+ 		replyToSave.replaceDescriptors(requestMessage.descriptors());
+@@ -218,10 +223,16 @@
+ 				thread->_pendingSavedReply = std::move(replyToSave);
+ 			} else {
+ 				if (thread->_interrupts.empty()) {
+-					throw std::runtime_error("Client tried to push reply outside of interrupt");
++					callLog.error() << "Client tried to push reply outside of interrupt; dropping it" << callLog.endLog;
++					write(pipeDesc, &tmp, sizeof(tmp));
++					close(pipeDesc);
++					return nullptr;
+ 				}
+ 				if (thread->_interrupts.top().savedReply) {
+-					throw std::runtime_error("Client-pushed reply overwriting existing saved reply");
++					callLog.error() << "Client-pushed reply would overwrite existing saved reply; dropping it" << callLog.endLog;
++					write(pipeDesc, &tmp, sizeof(tmp));
++					close(pipeDesc);
++					return nullptr;
+ 				}
+ 				thread->_interrupts.top().savedReply = std::move(replyToSave);
+ 			}
+diff --git a/src/server.cpp b/src/server.cpp
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -558,7 +558,17 @@
+ 
+ 			while (auto msg = _inbox.pop()) {
+ 				// TODO: this could be done concurrently
+-				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
++				// a malformed or stale request (dead client, bad PID, wrong state) must drop that one call, never the server
++				std::shared_ptr<DarlingServer::Call> call = nullptr;
++				try {
++					call = DarlingServer::Call::callFromMessage(std::move(*msg));
++				} catch (const std::exception& e) {
++					fprintf(stderr, "[dserver] dropped a call that could not be parsed: %s\n", e.what());
++					fflush(stderr);
++				} catch (...) {
++					fprintf(stderr, "[dserver] dropped a call that could not be parsed: unknown exception\n");
++					fflush(stderr);
++				}
+ 				if (call) {
+ 					_workQueue.push(call->thread());
+ 				}
+diff --git a/src/thread.cpp b/src/thread.cpp
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -388,7 +388,18 @@
+ 
+ 	currentContinuation = nullptr;
+ 	currentThreadVar->makePendingCallActive();
+-	currentThreadVar->_activeCall->processCall();
++	try {
++		currentThreadVar->_activeCall->processCall();
++	} catch (const std::exception& e) {
++		// the client died or its state is gone mid-call: end this call, keep the server
++		fprintf(stderr, "[dserver] call handler failed: %s\n", e.what());
++		fflush(stderr);
++		try { if (currentThreadVar->_activeCall) currentThreadVar->_activeCall->sendBasicReply(-EIO); } catch (...) {}
++	} catch (...) {
++		fprintf(stderr, "[dserver] call handler failed: unknown exception\n");
++		fflush(stderr);
++		try { if (currentThreadVar->_activeCall) currentThreadVar->_activeCall->sendBasicReply(-EIO); } catch (...) {}
++	}
+ 
+ 	if (currentThreadVar->_handlingInterruptedCall) {
+ 		currentThreadVar->_didSyscallReturnDuringInterrupt = true;
+@@ -417,7 +428,17 @@
+ 	// FIXME: we probably should never see `currentContinuation == nullptr`
+ 	if (currentContinuation) {
+ 		currentThreadVar->_continuationCallback = nullptr;
+-		currentContinuation();
++		try {
++			currentContinuation();
++		} catch (const std::exception& e) {
++			fprintf(stderr, "[dserver] call continuation failed: %s\n", e.what());
++			fflush(stderr);
++			try { if (currentThreadVar->_activeCall) currentThreadVar->_activeCall->sendBasicReply(-EIO); } catch (...) {}
++		} catch (...) {
++			fprintf(stderr, "[dserver] call continuation failed: unknown exception\n");
++			fflush(stderr);
++			try { if (currentThreadVar->_activeCall) currentThreadVar->_activeCall->sendBasicReply(-EIO); } catch (...) {}
++		}
+ 		currentContinuation = nullptr;
+ 	}
+ 
