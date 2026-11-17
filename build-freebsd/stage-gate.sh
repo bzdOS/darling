@@ -68,6 +68,8 @@ gate_probe() { # name script
 # STAGE_GATE_SURVIVE_RUN=1 also runs the darlingserver survival probe (DSERVER-SURVIVE-VERDICT: malformed requests and a client killed
 # mid-call must not take the server down; about 75 s, so off by default); needs tests/dserver-survive-probe-macho.
 [ "${STAGE_GATE_SURVIVE_RUN:-0}" = 1 ] && gate_probe DSERVER-SURVIVE run-dserver-survive-probe.sh
+# STAGE_GATE_MLDRSOCK_RUN=1 also runs the mldr socket leak test (MLDR-SOCKET-LEAK-VERDICT pass|fail runs= leaked=; needs the fixed mldr deployed; off by default).
+[ "${STAGE_GATE_MLDRSOCK_RUN:-0}" = 1 ] && gate_probe MLDR-SOCKET-LEAK mldr-socket-leak-test.sh
 # STAGE_GATE_SUSPEND_RUN=1 also runs the suspend/resume lost-wakeup probe (SUSPEND-WAKE-VERDICT pass|fail n= stalls= starved=: a thread is
 # suspended/resumed while it waits on a Mach semaphore; fail = a wakeup never arrives, even with the suspender stopped; up to
 # ~2 min, so off by default); needs tests/suspend-wake-probe-macho (build-suspend-wake-probe.sh).

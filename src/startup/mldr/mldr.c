@@ -823,6 +823,44 @@ static pid_t __mldr_rpc_socket_pid(int fd) {
 	return getpid();
 }
 #endif // DARLING_FREEBSD
+#ifdef DARLING_FREEBSD
+
+/*
+ * The client socket path cannot be unlinked right after bind: darlingserver
+ * remembers each thread's address and addresses replies to it. So instead:
+ * unlink our own sockets at normal exit, and at startup sweep sockets left by
+ * dead pids (crash/kill/_exit) that are older than 30 minutes.
+ */
+#include <dirent.h>
+#include <signal.h>
+#include <time.h>
+static void __mldr_rpc_socket_atexit(void) {
+	char path[108];
+	for (int i = 0; i < __mldr_rpc_socket_count; ++i) {
+		if (__mldr_rpc_socket_pids[i] != getpid()) continue;
+		snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d", (int)__mldr_rpc_socket_pids[i], __mldr_rpc_socket_fds[i]);
+		unlink(path);
+	}
+}
+
+__attribute__((constructor)) static void __mldr_rpc_socket_sweep(void) {
+	atexit(__mldr_rpc_socket_atexit);
+	DIR* d = opendir("/tmp");
+	if (!d) return;
+	struct dirent* e;
+	time_t now = time(NULL);
+	while ((e = readdir(d))) {
+		int pid, fd, n = 0;
+		if (sscanf(e->d_name, "darling-mldr-%d-%d%n", &pid, &fd, &n) != 2 || e->d_name[n] != '\0') continue;
+		if (pid <= 0 || (kill(pid, 0) == 0 || errno != ESRCH)) continue;
+		char path[300];
+		snprintf(path, sizeof(path), "/tmp/%s", e->d_name);
+		struct stat st;
+		if (lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) && now - st.st_mtime > 1800) unlink(path);
+	}
+	closedir(d);
+}
+#endif
 
 int __mldr_create_rpc_socket(void) {
 	int pre_fd = -1;

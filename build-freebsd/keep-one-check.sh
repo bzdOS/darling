@@ -1,6 +1,7 @@
 #!/bin/sh
 # keep-one-check.sh - "one tree, one final build, nothing grows" check. READ-ONLY: never deletes anything.
 # usage: keep-one-check.sh           prints exactly one line: KEEP-ONE verdict=pass|fail <details>; exit 1 on fail
+#        keep-one-check.sh --clean-sockets  removes only stale /tmp/darling-mldr-<pid>-<fd> sockets (dead pid, >30 min); prints KEEP-ONE sockets removed=N kept_live=M
 #        keep-one-check.sh --list    prints the candidate paths (one per line); still deletes nothing
 # Env: KEEPONE_ROOT (default: parent of DARLING_BUILD_DIR; one of the two is required)  KEEPONE_MAX_GB (default 14)
 #      KEEPONE_ALLOW  extra build/ dir names (space separated globs) that are not experiment dirs
@@ -18,6 +19,24 @@
 ROOT="${KEEPONE_ROOT:-$(dirname "${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR or KEEPONE_ROOT}")}"; B="$ROOT/build"; BK="$ROOT/backup"; MAXG="${KEEPONE_MAX_GB:-14}"
 FOREIGN="${KEEPONE_FOREIGN:-alt2-r}"; AGE="${KEEPONE_MIN_AGE_MIN:-120}"
 MODE=check; [ "$1" = "--list" ] && MODE=list
+[ "$1" = "--clean-sockets" ] && MODE=clean
+# stale mldr RPC sockets: /tmp/darling-mldr-<pid>-<fd>, a socket, pid dead, older than 30 min (every condition re-checked per entry)
+stale_sock() { # $1 = path
+	[ -S "$1" ] || return 1
+	_b=${1##*/}; _x=${_b#darling-mldr-}; _pid=${_x%%-*}
+	case "$_pid" in ''|*[!0-9]*) return 1;; esac
+	kill -0 "$_pid" 2>/dev/null && return 1
+	[ -n "$(find "$1" -mmin +30 2>/dev/null)" ]
+}
+if [ $MODE = clean ]; then
+	rm_n=0; live=0
+	for _f in /tmp/darling-mldr-[0-9]*-[0-9]*; do
+		[ -S "$_f" ] || continue
+		if stale_sock "$_f"; then { rm -f "$_f" 2>/dev/null || sudo -n rm -f "$_f" 2>/dev/null; } && [ ! -e "$_f" ] && rm_n=$((rm_n+1)); else live=$((live+1)); fi
+	done
+	echo "KEEP-ONE sockets removed=$rm_n kept_live=$live"; exit 0
+fi
+ns=0; for _f in /tmp/darling-mldr-[0-9]*-[0-9]*; do stale_sock "$_f" && ns=$((ns+1)); done
 
 # dirs holding sources that are not in git (cc.sh, link.sh, *.c, *.m, *.s, headers)
 KEEP_SRC="dyld-raw *-relink* lsk-* me-lsk marker-suppl suppl-stubs* supl-bind* un-bind atomic-* extras-noobjc objc-suppl wl-debug-src"
@@ -99,6 +118,6 @@ over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
 cb=$(awk -F'\t' '{s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
-v=pass; { [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ $over = 1 ]; } && v=fail
-echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb candidate_bytes=$cb total=${gb}G max=${MAXG}G"
+v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ $over = 1 ]; } && v=fail
+echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G"
 [ $v = pass ]
