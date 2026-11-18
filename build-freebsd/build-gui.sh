@@ -469,7 +469,10 @@ AK_FLAGS="${AK_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 # AppKit headers/sources assume CoreGraphics geometry types (CGFloat, CGSize,
 # CGPoint, CGRect) are available without explicit imports. Force-include the
 # header that defines them.
+AK_FLAGS="${AK_FLAGS} -I${SRC}/src/frameworks/OpenGL/include"
+AK_FLAGS="${AK_FLAGS} -I${AK}/private-include"
 AK_FLAGS="${AK_FLAGS} -include CoreGraphics/CGGeometry.h"
+AK_FLAGS="${AK_FLAGS} -include math.h -include stdlib.h -include CoreFoundation/CoreFoundation.h -include Foundation/Foundation.h"
 AK_FLAGS="${AK_FLAGS} $(pkg-config --cflags freetype2 fontconfig 2>/dev/null)"
 ak_objs=$(compile_component AppKit "${AK}" AppKit_sources "${AK_FLAGS}")
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/AppKit.framework/Versions/C"

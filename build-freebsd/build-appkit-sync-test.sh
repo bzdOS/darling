@@ -46,6 +46,18 @@ cmp_part include-paths p_incs
 _g=$(p_hdrcp "${G}" | norm); _a=$(p_hdrcp "${A}" | norm)
 [ "${_g}" = "${_a}" ] || fails="${fails} header-copies"
 grep -q 'QuartzCore/include' "${G}" && grep -q 'QuartzCore/include' "${A}" || fails="${fails} quartzcore-include-missing"
+# explicit: the "-include <header>" pairs of AK_FLAGS must match, in order, and be the expected set
+p_forced() { grep -E '^AK_FLAGS=' "$1" | tr ' ' '\n' | tr -d '"' | sed -n '/^-include$/{n;p;}'; }
+_g=$(p_forced "${G}"); _a=$(p_forced "${A}")
+[ -n "${_g}" ] && [ "${_g}" = "${_a}" ] || fails="${fails} forced-includes-mismatch"
+for _h in CoreGraphics/CGGeometry.h math.h stdlib.h CoreFoundation/CoreFoundation.h Foundation/Foundation.h; do
+	printf '%s\n' "${_a}" | grep -qx "${_h}" || fails="${fails} forced-include-missing(${_h})"
+done
+# presence of the OpenGL include dir and AppKit private-include dir in both AK_FLAGS
+for _f in "${G}" "${A}"; do
+	grep -E '^AK_FLAGS=' "${_f}" | grep -q 'frameworks/OpenGL/include' || fails="${fails} opengl-include-missing"
+	grep -E '^AK_FLAGS=' "${_f}" | grep -q '\${AK}/private-include' || fails="${fails} private-include-missing"
+done
 cmp_part ak-flags p_ak
 cmp_part sources-call p_call
 cmp_part ld-flags-modulo-sysroot p_ldflags
