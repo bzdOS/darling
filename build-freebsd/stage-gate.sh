@@ -12,6 +12,7 @@
 # SUSPEND_RWLOCK/MUTEX/CV. ImageIO stays off. The last line is always "GATE mode=full|partial skipped=<n> rc=<n>": full means no line
 # printed "skipped"; skipped counts the lines that did; rc is the real exit code of the gate (the same value the gate exits with).
 if [ "${STAGE_GATE_FULL:-0}" = 1 ]; then
+	: "${STAGE_GATE_KEEPONE:=1}"; export STAGE_GATE_KEEPONE
 	STAGE_GATE_RUN_ALL=1; STAGE_GATE_SYSCALL482_RUN=1; STAGE_GATE_PORTCONSTRUCT_RUN=1; STAGE_GATE_SUSPEND_RUN=1
 	STAGE_GATE_SUSPEND_RWLOCK_RUN=1; STAGE_GATE_SUSPEND_MUTEX_RUN=1; STAGE_GATE_SUSPEND_CV_RUN=1
 	export STAGE_GATE_RUN_ALL STAGE_GATE_SYSCALL482_RUN STAGE_GATE_PORTCONSTRUCT_RUN STAGE_GATE_SUSPEND_RUN \
@@ -294,7 +295,7 @@ for f in "$HERE"/build-*.sh; do
 done
 if [ "$sd" = 0 ]; then echo "STAGED-DRIFT pass files=0"; else echo "STAGED-DRIFT fail files=$sd in:$sdf"; echo "STAGECHK FAIL staged-drift=FAIL"; stage_fail; fi
 # One tree, one final build, nothing grows: keep-one-check.sh is read-only (never deletes). Reported as keepone=<verdict>;
-# it fails the gate only with STAGE_GATE_KEEPONE=1 (line: KEEP-ONE verdict=pass|fail ...; --list names the candidates).
+# it fails the gate only with STAGE_GATE_KEEPONE=1 (default 1 in the full gate, STAGE_GATE_FULL=1; set STAGE_GATE_KEEPONE=0 to opt out; line: KEEP-ONE verdict=pass|fail ...; --list names the candidates).
 ko=skip
 if [ -f "$HERE/keep-one-check.sh" ]; then
 	kol=$(sh "$HERE/keep-one-check.sh" 2>/dev/null | tail -1)
