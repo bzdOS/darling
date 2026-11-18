@@ -120,7 +120,7 @@ echo "mldr md5=$M"; echo "darlingserver md5=$D"
 # environment preflight (leftover servers, dserver md5, load, N=1 probe); see env-preflight.sh
 sh "$DARLING_SRC_DIR/build-freebsd/env-preflight.sh" || exit 1
 # md5 gate: built vs overlay vs staged copy of mldr and every rebuilt stub image (stage-gate.sh); mismatch -> exit 1
-sh "$DARLING_SRC_DIR/build-freebsd/stage-gate.sh" || exit 1
+STAGE_GATE_KEEPONE=1 sh "$DARLING_SRC_DIR/build-freebsd/stage-gate.sh" || exit 1
 if [ -n "$EXPECT_MLDR_MD5" ] && [ "$EXPECT_MLDR_MD5" != "$M" ]; then
 	echo "GATE FAIL: expected mldr md5 $EXPECT_MLDR_MD5, installed $M"; exit 1
 fi

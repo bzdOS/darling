@@ -9,8 +9,8 @@
 # The gated set is images.txt plus EXTRA_IMAGES (own-generator images that images.txt omits).
 # Output: one "STAGECHK" line; exit 1 on any mismatch. STAGE_GATE_RUN_ALL=1 runs every line and exits 1 at the end if any was red.
 # STAGE_GATE_FULL=1: every line runs (RUN_ALL=1) and the optional probes are on: SYSCALL482, PORTCONSTRUCT, SUSPEND (wake) and
-# SUSPEND_RWLOCK/MUTEX/CV. ImageIO stays off. The last line is always "GATE mode=full|partial skipped=<n> rc=<n>": full means no line
-# printed "skipped"; skipped counts the lines that did; rc is the real exit code of the gate (the same value the gate exits with).
+# SUSPEND_RWLOCK/MUTEX/CV. ImageIO stays off. The last line is always "GATE mode=full|quick skipped=<n> rc=<n>": full only when RUN_ALL=1
+# (every line runs), else quick; skipped counts the lines that did; rc is the real exit code of the gate (the same value the gate exits with).
 if [ "${STAGE_GATE_FULL:-0}" = 1 ]; then
 	: "${STAGE_GATE_KEEPONE:=1}"; export STAGE_GATE_KEEPONE
 	STAGE_GATE_RUN_ALL=1; STAGE_GATE_SYSCALL482_RUN=1; STAGE_GATE_PORTCONSTRUCT_RUN=1; STAGE_GATE_SUSPEND_RUN=1
@@ -20,12 +20,12 @@ if [ "${STAGE_GATE_FULL:-0}" = 1 ]; then
 fi
 if [ -z "$STAGE_GATE_INNER" ]; then
 	# Every line reaches the terminal as soon as its probe is done (tee); the copy in $_gt only feeds the skipped count.
-	_gt=$(mktemp "${TMPDIR:-/tmp}/stage-gate.XXXXXX") || { echo "GATE mode=partial skipped=0 rc=1"; exit 1; }
-	_rcf=$(mktemp "${TMPDIR:-/tmp}/stage-gate-rc.XXXXXX") || { rm -f "$_gt"; echo "GATE mode=partial skipped=0 rc=1"; exit 1; }
+	_gt=$(mktemp "${TMPDIR:-/tmp}/stage-gate.XXXXXX") || { echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
+	_rcf=$(mktemp "${TMPDIR:-/tmp}/stage-gate-rc.XXXXXX") || { rm -f "$_gt"; echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
 	{ STAGE_GATE_INNER=1 sh "$0" 2>&1; echo $? >"$_rcf"; } | tee "$_gt"
 	_rc=$(cat "$_rcf"); [ -n "$_rc" ] || _rc=1
 	_sk=$(grep -c "skipped" "$_gt"); rm -f "$_gt" "$_rcf"
-	_md=partial; [ "$_sk" = 0 ] && _md=full
+	_md=quick; [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ] && _md=full
 	echo "GATE mode=$_md skipped=$_sk rc=$_rc"; exit "$_rc"
 fi
 # DARLING_BUILD_DIR / DARLING_OVERLAY unset: take them from the node env file (KEY=VALUE lines, read as data, never sourced).
