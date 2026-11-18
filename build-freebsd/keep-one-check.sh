@@ -13,6 +13,7 @@
 #                           (e.g. suspend-cv-1117-133903.*) protects that pair and it does not count toward the limit below
 #      KEEPONE_SUSPEND_KEEP (default 3)  newest complete log+dump pairs kept per suspend-(rwlock|mutex|cv) kind; older ones are candidates
 # Checks:
+#  (series files under 1 KB are aborted starts and are not counted as series)
 #  1. build/ top-level *.log *.png *.core core.* chrome-sr-* series-*.out *-series.out only from the latest two
 #     series (series = a series-<p>.out or <p>-series.out file, newest first by mtime; a chrome-sr-* file belongs
 #     to the series with the longest matching prefix <p>; other logs/pngs/cores count as stale).
@@ -78,6 +79,7 @@ trap 'rm -f "$T"' EXIT INT TERM
 SER=""
 if [ -d "$B" ]; then
 	for f in $(cd "$B" && ls -t series-*.out *-series.out 2>/dev/null); do
+		[ "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" -ge 1024 ] || continue	# under 1 KB: an aborted start, not a series
 		case "$f" in series-*.out) p=${f#series-}; p=${p%.out};; *) p=${f%-series.out};; esac
 		case " $SER " in *" $p "*) ;; *) SER="$SER $p";; esac
 	done
