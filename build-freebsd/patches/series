@@ -32,3 +32,4 @@ libkqueue libkqueue-copyout-diag.patch
 darlingserver darlingserver-memaccess-serialize.patch
 darlingserver darlingserver-psynch-ring.patch
 darlingserver darlingserver-bsd-eintr-sign.patch
+cocotron cocotron-appkit-canInit-null.patch

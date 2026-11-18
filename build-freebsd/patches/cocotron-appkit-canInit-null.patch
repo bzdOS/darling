@@ -1,0 +1,13 @@
+diff --git a/AppKit/NSBitmapImageRep.m b/AppKit/NSBitmapImageRep.m
+--- a/AppKit/NSBitmapImageRep.m
++++ b/AppKit/NSBitmapImageRep.m
+@@ -122,7 +122,8 @@ + (BOOL) canInitWithData: (NSData *) data {
+     CGImageSourceRef imageSource =
+             CGImageSourceCreateWithData((CFDataRef) data, nil);
+     BOOL result = (imageSource != NULL) ? YES : NO;
+-    CFRelease(imageSource);
++    if (imageSource != NULL)
++        CFRelease(imageSource);
+     return result;
+ }
+ 
