@@ -50,6 +50,7 @@ out=$(stage_check); rc=$?; [ "$rc" = 1 ] && case "$out" in "STAGED-MUTATED FAIL 
 grep -q 'STAGED-MUTATED FAIL staged tree mutated' "$GATE"; ck gate-has-message $?
 grep -q 'stage_check || { echo "STAGECHK FAIL staged-mutated=FAIL' "$GATE"; ck gate-wires-check $?
 grep -q 'STAGE_GATE_KEEP_STAGED=1; export STAGE_GATE_KEEP_STAGED' "$GATE"; ck gate-exports-keep $?
+grep -q '^EXTRA_IMAGES=.*System/Library/Frameworks/AppKit.framework/Versions/C/AppKit' "$GATE"; ck gate-gates-appkit $?
 
 # --- orphan report with a stubbed ps
 PSF="$T/ps.txt"; STAGE_GATE_PS_CMD="cat '$PSF'"; STAGE_GATE_ORPHAN_WAIT=0; export STAGE_GATE_PS_CMD STAGE_GATE_ORPHAN_WAIT

@@ -94,7 +94,9 @@ trap 'rm -f "$SLIST" "$SBASE" "$SAFTR"' EXIT
 ML=$(m "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
 # images with their own generator that build-stub-data.sh leaves out of images.txt but whose md5 is still gated
 # (SystemConfigurationExtras.dylib: build-sc-stubs.sh; it was counted until it was excluded from images.txt)
-EXTRA_IMAGES="usr/lib/SystemConfigurationExtras.dylib"
+# (AppKit: build-appkit.sh stages it into the overlay only; there is no stub-data copy, so the line compares overlay vs staged:
+# a missing built file leaves built=overlay below, a stale staged copy is refreshed or reported like any other image)
+EXTRA_IMAGES="usr/lib/SystemConfigurationExtras.dylib System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"
 n=0; bad=""; fixed=""; sel=""
 while read -r p; do
 	[ -n "$p" ] || continue
