@@ -15,9 +15,9 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 	|| { echo "TZ-VERDICT FAIL [build]"; exit 1; }
 LOG="$BD/tz-check.log"
 PRE=" $(pgrep -x darlingserver | tr '\n' ' ') "
-( sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
-	DARLING_SMOKE_REFRESH=1 DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc:private/var/db "$BD/launch-dynamic" > "$LOG" 2>&1 & )
-i=0; while [ $i -lt "$WAIT" ]; do grep -qa "^TZ-VERDICT\|FATAL signal" "$LOG" 2>/dev/null && break; sleep 1; i=$((i+1)); done
+. "$(dirname "$0")/probe-launch.sh"
+probe_launch "$LOG" "$WAIT" "^TZ-VERDICT\|FATAL signal" sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
+	DARLING_SMOKE_REFRESH=1 DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc:private/var/db "$BD/launch-dynamic"
 sleep 1
 for p in $(pgrep -x darlingserver); do case "$PRE" in *" $p "*) ;; *) sudo kill -9 "$p" 2>/dev/null;; esac; done
 grep -a "^TZPROBE" "$LOG" | head

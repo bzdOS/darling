@@ -24,9 +24,9 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 	|| { echo "$F0 bad=[build: $(tail -1 "$W/link.err")]"; exit 1; }
 LOG="$BD/font-metrics-probe.log"
 PRE=" $(pgrep -x darlingserver | tr '\n' ' ') "
-( sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
-	$([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc "$BD/launch-dynamic" > "$LOG" 2>&1 & )
-i=0; while [ $i -lt "$WAIT" ]; do grep -qa "FONTM-PROBE DONE\|FONTM-SUMMARY\|FATAL signal" "$LOG" 2>/dev/null && break; sleep 1; i=$((i+1)); done
+. "$(dirname "$0")/probe-launch.sh"
+probe_launch "$LOG" "$WAIT" "FONTM-PROBE DONE\|FONTM-SUMMARY\|FATAL signal" sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
+	$([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc "$BD/launch-dynamic"
 sleep 1
 for p in $(pgrep -x darlingserver); do case "$PRE" in *" $p "*) ;; *) sudo kill -9 "$p" 2>/dev/null;; esac; done
 L=$(grep -a "^FONTM-SUMMARY " "$LOG" | tail -1)
