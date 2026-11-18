@@ -18,7 +18,7 @@ TS=$(date +%m%d-%H%M%S)
 LOG="${BD}/psynch-ring-probe-${TS}.log"; DUMP="${BD}/psynch-ring-probe-${TS}.dump"
 before=$(pgrep -x darlingserver | tr "\n" " ")
 ( sudo timeout -k 5 $((WAIT+30)) env DSERVER_PSYNCH_RING=1 DSERVER_PSYNCH_RING_SIZE=16384 "DSERVER_PSYNCH_RING_CLASSES=${PSYNCH_RING_CLASSES:-7}" "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \
-    "DARLING_TEST_BINARY=psynch-ring-probe-macho" DARLING_SMOKE_REFRESH=1 "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
+    "DARLING_TEST_BINARY=psynch-ring-probe-macho" $([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
 i=0
 while [ "$i" -lt "$WAIT" ]; do
     grep -qa "^RWLABEL-WAIT\|PROBE-FAIL\|FATAL signal\|Terminating due to uncaught" "${LOG}" 2>/dev/null && break

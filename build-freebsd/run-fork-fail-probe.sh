@@ -12,7 +12,7 @@ PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 LOG="${BD}/fork-fail-probe-$(date +%m%d-%H%M%S).log"
 before=$(pgrep -x darlingserver | tr "\n" " ")
 ( sudo timeout -k 5 $((WAIT+30)) env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \
-    "DARLING_TEST_BINARY=fork-fail-probe-macho" DARLING_SMOKE_REFRESH=1 ${PROBE_ENV} \
+    "DARLING_TEST_BINARY=fork-fail-probe-macho" $([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) ${PROBE_ENV} \
     "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
 i=0
 while [ "$i" -lt "$WAIT" ]; do

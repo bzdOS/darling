@@ -20,7 +20,7 @@ LOG="${BD}/dserver-survive-probe-$(date +%m%d-%H%M%S).log"
 n=0; nbad=0; bad=""
 chk() { n=$((n+1)); if [ "$2" = ok ]; then :; else nbad=$((nbad+1)); bad="${bad}$1,"; fi; echo "SURVIVE-T $1 $2 $3" >> "$LOG"; }
 ( sudo timeout -k 5 100 env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" "DARLING_PREFIX=${DARLING_PREFIX}" \
-    "DARLING_TEST_BINARY=dserver-survive-probe-macho" DARLING_SMOKE_REFRESH=1 \
+    "DARLING_TEST_BINARY=dserver-survive-probe-macho" $([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) \
     "${BD}/launch-dynamic" >>"${LOG}" 2>&1 & )
 ticks() { grep -ac "^SURVIVE-GUEST tick" "$LOG"; }
 srvpid() { ps -axww -o pid,command | awk -v P="$DARLING_PREFIX" '$2 ~ /(^|\/)darlingserver$/ && $3 == P {printf "%s%s", (n++?",":""), $1}'; }

@@ -23,7 +23,7 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 LOG="$BD/imageio-probe.log"
 PRE=" $(pgrep -x darlingserver | tr '\n' ' ') "
 ( sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
-	DARLING_SMOKE_REFRESH=1 DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc "$BD/launch-dynamic" > "$LOG" 2>&1 & )
+	$([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc "$BD/launch-dynamic" > "$LOG" 2>&1 & )
 i=0; while [ $i -lt "$WAIT" ]; do grep -qa "IMAGEIO-PROBE-DONE\|FATAL signal" "$LOG" 2>/dev/null && break; grep -qa "IMGREP-BEGIN" "$LOG" 2>/dev/null && [ $i -gt 20 ] && break; sleep 1; i=$((i+1)); done
 sleep 2
 for p in $(pgrep -x darlingserver); do case "$PRE" in *" $p "*) ;; *) sudo kill -9 "$p" 2>/dev/null;; esac; done
