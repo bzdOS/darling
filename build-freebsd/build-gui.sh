@@ -464,6 +464,7 @@ AK_FLAGS="${AK_FLAGS} -I${AK}/NSTextView.subproj -I${AK}/NSEvent.subproj -I${AK}
 AK_FLAGS="${AK_FLAGS} -I${AK}/RTF.subproj -I${AK}/NSToolbar.subproj -I${AK}/NSDrawer.subproj"
 AK_FLAGS="${AK_FLAGS} -I${AK}/X11.backend -I${COCOTRON}/CoreText -I${COCOTRON}/CoreText/include -I${COCOTRON}/CoreGraphics/include"
 AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/Onyx2D/include"
+AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/QuartzCore/include"
 AK_FLAGS="${AK_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 # AppKit headers/sources assume CoreGraphics geometry types (CGFloat, CGSize,
 # CGPoint, CGRect) are available without explicit imports. Force-include the

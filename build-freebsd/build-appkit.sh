@@ -151,6 +151,7 @@ AK_FLAGS="${AK_FLAGS} -I${AK}/NSTextView.subproj -I${AK}/NSEvent.subproj -I${AK}
 AK_FLAGS="${AK_FLAGS} -I${AK}/RTF.subproj -I${AK}/NSToolbar.subproj -I${AK}/NSDrawer.subproj"
 AK_FLAGS="${AK_FLAGS} -I${AK}/X11.backend -I${COCOTRON}/CoreText -I${COCOTRON}/CoreText/include -I${COCOTRON}/CoreGraphics/include"
 AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/Onyx2D/include"
+AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/QuartzCore/include"
 AK_FLAGS="${AK_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 AK_FLAGS="${AK_FLAGS} -include CoreGraphics/CGGeometry.h"
 AK_FLAGS="${AK_FLAGS} $(pkg-config --cflags freetype2 fontconfig 2>/dev/null)"
