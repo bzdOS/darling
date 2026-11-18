@@ -14,6 +14,8 @@
 # Also written to $SERIES_SUMMARY_DIR/<prefix>.txt (default <parent of the build dir>/series-summaries) with a per-run table; a run whose
 #      sway was not healthy afterwards is RUN-INVALID (not counted, retried). CHROME_APP defaults to the CfT bundle, missing -> SERIES-ABORT reason=chrome-app.
 # Exit 1 if the gate fails or valid=0.
+# The batch runs in the background and is waited for by pid (kill -0, SERIES_PIDWAIT_MAX s, default N*(TIMEOUT+600)+600; then killed, SERIES-PIDWAIT-TIMEOUT line).
+# Very last line: SERIES-EXIT rc=<n> pid=<series pid> (after LEFTOVER); watchers wait on it instead of pgrep -f.
 #      chrome-series.sh --dump-selftest   (no Chrome: fake launcher + fake dump scripts, checks the rc124 hang dump)
 #      CHROME_SR_SERVER_LOG=debug  server runs with DSERVER_LOG_LEVEL=debug; its log is saved as chrome-sr-<run>-dserver.txt
 #      Hang dump (rc124 runs): chrome-sr-<run>-dsdump.txt / -guest.txt, taken CHROME_SR_DUMP_LEAD (40) s before the timeout, CHROME_SR_DUMP=0 off.
@@ -92,9 +94,21 @@ leftover_report() {
 	type cores_prune >/dev/null 2>&1 && cores_prune
 	LEFT=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)darlingserver$/ && ($3 ~ /^\/tmp\/darling-run\./ || $3 == "/tmp/darling-dynamic-smoke-fresh") {n++} END{print n+0}')
 	echo "LEFTOVER dservers=$LEFT"
-	[ "$LEFT" -eq 0 ] || exit 1
+	[ "$LEFT" -eq 0 ] || _rc=1
+	echo "SERIES-EXIT rc=$_rc pid=$$"
 	exit $_rc
 }
+# BEGIN series_pidwait
+# series_pidwait PID MAX_SECONDS: 0 when PID is gone (or a zombie), 124 after MAX_SECONDS; liveness = kill -0
+series_pidwait() {
+	_wp=$1; _wm=$2; _ws=0
+	while kill -0 "$_wp" 2>/dev/null && [ "$(ps -o stat= -p "$_wp" 2>/dev/null | cut -c1)" != Z ]; do
+		[ "$_ws" -ge "$_wm" ] && return 124
+		sleep 1; _ws=$((_ws+1))
+	done
+	return 0
+}
+# END series_pidwait
 trap leftover_report EXIT
 export CHROME_EXTRA_ARGS; P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_BUILD_DIR:?}"
@@ -127,7 +141,12 @@ fi
 # disk guard: refuse to start above SERIES_DISK_MAX (default 84) % root use (the batch loop stops at >= SERIES_DISK_STOP, default 85, see chrome-sr-batch.sh)
 DISK_USE=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5+0}')
 [ "$DISK_USE" -gt "${SERIES_DISK_MAX:-84}" ] && { echo "SERIES-ABORT reason=disk use=${DISK_USE}%"; exit 1; }
-sh "$DARLING_SRC_DIR/build-freebsd/chrome-sr-batch.sh" "$P" "$N" "$T"
+# was a foreground call; now background + wait by pid (the batch's own per-run timeouts still apply, this is the outer bound)
+SERIES_PIDWAIT_MAX=${SERIES_PIDWAIT_MAX:-$((N*(T+600)+600))}
+sh "$DARLING_SRC_DIR/build-freebsd/chrome-sr-batch.sh" "$P" "$N" "$T" &
+BP=$!
+series_pidwait "$BP" "$SERIES_PIDWAIT_MAX" || { echo "SERIES-PIDWAIT-TIMEOUT pid=$BP after=${SERIES_PIDWAIT_MAX}s"; kill -TERM "$BP" 2>/dev/null; sleep 5; kill -KILL "$BP" 2>/dev/null; }
+wait "$BP"
 . "$DARLING_SRC_DIR/build-freebsd/series-count.sh"
 series_count "$DARLING_BUILD_DIR" "$P" "$N" || exit 1
 top="rc?x0"
