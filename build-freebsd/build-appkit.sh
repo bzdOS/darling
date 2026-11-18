@@ -143,6 +143,38 @@ compile_component() {
 	echo "${objs}"
 }
 
+# APPKIT_KEEP_GOING=1 (this script only, diagnostic): compile every source without stopping, report, never link/stage
+# when anything failed. The redefinition is indented on purpose so build-appkit-sync-test.sh still compares the
+# column-0 compile_component above with build-gui.sh's.
+if [ "${APPKIT_KEEP_GOING:-}" = 1 ]; then
+	compile_component() {
+		comp_name="$1"; comp_dir="$2"; sources_var="$3"; extra_flags="$4"
+		obj_dir="${BUILD}/${comp_name}-build"
+		mkdir -p "${obj_dir}"
+		objs=""; kg_ok=0; kg_fail=0
+		: > "${obj_dir}/failed.txt"
+		extract_sources "${sources_var}" "${comp_dir}/CMakeLists.txt" > "${obj_dir}/sources.txt"
+		if [ ! -s "${obj_dir}/sources.txt" ]; then
+			echo "FATAL: ${sources_var} extracted empty from ${comp_dir}/CMakeLists.txt" >&2
+			exit 1
+		fi
+		while IFS= read -r rel; do
+			[ -z "${rel}" ] && continue
+			obj="${obj_dir}/$(echo "${rel}" | tr '/' '_').o"
+			# shellcheck disable=SC2086
+			if clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${extra_flags} ${SDK_INCLUDES} -w -O0 -c "${comp_dir}/${rel}" -o "${obj}" > "${obj}.err" 2>&1; then
+				kg_ok=$((kg_ok + 1))
+				objs="${objs} ${obj}"
+			else
+				kg_fail=$((kg_fail + 1))
+				echo "${rel}" >> "${obj_dir}/failed.txt"
+			fi
+		done < "${obj_dir}/sources.txt"
+		echo "${kg_ok} ${kg_fail}" > "${obj_dir}/counts.txt"
+		echo "${objs}"
+	}
+fi
+
 echo "=== AppKit (only) ==="
 AK="${COCOTRON}/AppKit"
 AK_FLAGS="-I${AK} -I${AK}/.. -I${AK}/include -I${AK}/include/AppKit"
@@ -154,11 +186,26 @@ AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/Onyx2D/include"
 AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/QuartzCore/include"
 AK_FLAGS="${AK_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 AK_FLAGS="${AK_FLAGS} -I${SRC}/src/frameworks/OpenGL/include"
+AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/CoreData/include"
+AK_FLAGS="${AK_FLAGS} -I${SRC}/src/frameworks/CoreServices/include"
 AK_FLAGS="${AK_FLAGS} -I${AK}/private-include"
 AK_FLAGS="${AK_FLAGS} -include CoreGraphics/CGGeometry.h"
 AK_FLAGS="${AK_FLAGS} -include math.h -include stdlib.h -include CoreFoundation/CoreFoundation.h -include Foundation/Foundation.h"
 AK_FLAGS="${AK_FLAGS} $(pkg-config --cflags freetype2 fontconfig 2>/dev/null)"
 ak_objs=$(compile_component AppKit "${AK}" AppKit_sources "${AK_FLAGS}")
+if [ "${APPKIT_KEEP_GOING:-}" = 1 ]; then
+	read -r kg_ok kg_fail < "${BUILD}/AppKit-build/counts.txt"
+	echo "BUILD-APPKIT compile ok=${kg_ok} fail=${kg_fail}"
+	while IFS= read -r kg_f; do
+		[ -z "${kg_f}" ] && continue
+		kg_e=$(grep -a -m1 'error:' "${BUILD}/AppKit-build/$(echo "${kg_f}" | tr '/' '_').o.err" || true)
+		echo "FAILED ${kg_f}: ${kg_e}"
+	done < "${BUILD}/AppKit-build/failed.txt"
+	if [ "${kg_fail}" -gt 0 ]; then
+		echo "BUILD-APPKIT keep-going: failures, no link, no staging" >&2
+		exit 1
+	fi
+fi
 AK_NEW="${BUILD}/AppKit.new"
 # shellcheck disable=SC2086
 ld64.lld ${LD_FLAGS} -dylib \

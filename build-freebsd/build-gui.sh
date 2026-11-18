@@ -470,6 +470,8 @@ AK_FLAGS="${AK_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
 # CGPoint, CGRect) are available without explicit imports. Force-include the
 # header that defines them.
 AK_FLAGS="${AK_FLAGS} -I${SRC}/src/frameworks/OpenGL/include"
+AK_FLAGS="${AK_FLAGS} -I${COCOTRON}/CoreData/include"
+AK_FLAGS="${AK_FLAGS} -I${SRC}/src/frameworks/CoreServices/include"
 AK_FLAGS="${AK_FLAGS} -I${AK}/private-include"
 AK_FLAGS="${AK_FLAGS} -include CoreGraphics/CGGeometry.h"
 AK_FLAGS="${AK_FLAGS} -include math.h -include stdlib.h -include CoreFoundation/CoreFoundation.h -include Foundation/Foundation.h"

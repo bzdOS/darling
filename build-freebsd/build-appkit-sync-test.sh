@@ -58,6 +58,14 @@ for _f in "${G}" "${A}"; do
 	grep -E '^AK_FLAGS=' "${_f}" | grep -q 'frameworks/OpenGL/include' || fails="${fails} opengl-include-missing"
 	grep -E '^AK_FLAGS=' "${_f}" | grep -q '\${AK}/private-include' || fails="${fails} private-include-missing"
 done
+for _f in "${G}" "${A}"; do
+	grep -E '^AK_FLAGS=' "${_f}" | grep -q '\${COCOTRON}/CoreData/include' || fails="${fails} coredata-include-missing"
+	grep -E '^AK_FLAGS=' "${_f}" | grep -q 'frameworks/CoreServices/include' || fails="${fails} coreservices-include-missing"
+done
+# APPKIT_KEEP_GOING: the keep-going compile_component wrapper (indented, so not part of the compared column-0 body)
+# is allowed in build-appkit.sh only.
+grep -q 'APPKIT_KEEP_GOING' "${A}" || fails="${fails} keep-going-missing-in-appkit"
+! grep -q 'APPKIT_KEEP_GOING' "${G}" || fails="${fails} keep-going-in-build-gui"
 cmp_part ak-flags p_ak
 cmp_part sources-call p_call
 cmp_part ld-flags-modulo-sysroot p_ldflags
