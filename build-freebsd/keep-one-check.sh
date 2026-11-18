@@ -23,7 +23,9 @@
 #  KEEPONE_FOREIGN (default alt2-r, another owner's series) and files open in a live process (fstat) are never candidates.
 # Never flagged: build/dserver/*, last-two-series files, /tmp/rs-* (outside the scanned dirs), and the dir keep-list
 # below (sources not in git, dirs scripts write to).
-ROOT="${KEEPONE_ROOT:-$(dirname "${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR or KEEPONE_ROOT}")}"; B="$ROOT/build"; BK="$ROOT/backup"; MAXG="${KEEPONE_MAX_GB:-14}"
+ROOT="${KEEPONE_ROOT:-}"; [ -z "$ROOT" ] && [ -n "${DARLING_BUILD_DIR:-}" ] && ROOT=$(dirname "$DARLING_BUILD_DIR")
+[ -n "$ROOT" ] || { echo "KEEP-ONE verdict=fail no-root"; exit 2; }
+B="$ROOT/build"; BK="$ROOT/backup"; MAXG="${KEEPONE_MAX_GB:-14}"
 FOREIGN="${KEEPONE_FOREIGN:-alt2-r}"; AGE="${KEEPONE_MIN_AGE_MIN:-120}"
 MODE=check; [ "$1" = "--list" ] && MODE=list
 [ "$1" = "--clean-sockets" ] && MODE=clean
