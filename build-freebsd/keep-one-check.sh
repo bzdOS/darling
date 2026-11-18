@@ -67,7 +67,7 @@ KEEP_DIRS="$KEEP_SRC $KEEP_OUT $KEEP_INFRA $KEEP_PROBE $KEEPONE_ALLOW"
 # (suspend-(rwlock|mutex|cv)-* pairs are limited to the newest KEEPONE_SUSPEND_KEEP per kind, see section 1b)
 KEEP_FILES="window-draw* imageio-probe.log series-fix20*.out series-fix21*.out series-fix22*.out chrome-sr-fix20* chrome-sr-fix21* chrome-sr-fix22* $KEEPONE_ALLOW_FILES"
 # backup/ entries that are rollback points (named so in the handoff notes) or not yet understood; never candidates
-KEEP_BACKUPS="ImageIO ImageIO.pre-r5 ImageIO.real-r5.* stub-data-ImageIO.pre-r5 AppKitExtras.dylib.pre-b4-fontfamilies AppKitExtras.pre-resize darlingserver.pre-q1.* darlingserver.pre-b6.* darlingserver.pre-d2.* darlingserver.pre-d5.* darlingserver.pre-f1.* libdtape.a.pre-q1 libdtape.a.pre-b6 libdtape.a.pre-d5 stubdata-pre-b5 darling-extras.dylib.pre-ctresolve libsystem_kernel.pre-statfs-deploy.* $KEEPONE_ALLOW_BACKUPS"
+KEEP_BACKUPS="ImageIO ImageIO.pre-r5 ImageIO.real-r5.* stub-data-ImageIO.pre-r5 AppKitExtras.dylib.pre-b4-fontfamilies AppKitExtras.pre-resize darlingserver.pre-q1.* darlingserver.pre-b6.* darlingserver.pre-d2.* darlingserver.pre-d5.* darlingserver.pre-f1.* darlingserver.pre-rebuild libdtape.a.pre-q1 libdtape.a.pre-b6 libdtape.a.pre-d5 stubdata-pre-b5 darling-extras.dylib.pre-ctresolve libsystem_kernel.pre-statfs-deploy.* $KEEPONE_ALLOW_BACKUPS"
 
 T=$(mktemp -t keepone.XXXXXX) || exit 2
 trap 'rm -f "$T"' EXIT INT TERM
