@@ -91,6 +91,13 @@ owner() {
 		case "$_n" in
 		"$_p"[0-9]*|"$_p"-r[0-9]*) [ ${#_p} -gt ${#_best} ] && _best=$_p;;
 		esac
+		# a series name with a trailing letter suffix (fix23c) also owns the logs named <base><N> (fix231)
+		_b=${_p%[a-z]}
+		if [ "$_b" != "$_p" ] && [ -n "$_b" ]; then
+			case "$_n" in
+			"$_b"[0-9]*|"$_b"-r[0-9]*) [ ${#_p} -gt ${#_best} ] && _best=$_p;;
+			esac
+		fi
 	done
 	printf '%s' "$_best"
 }
