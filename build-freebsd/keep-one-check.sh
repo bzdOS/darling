@@ -61,7 +61,7 @@ KEEP_SRC="dyld-raw *-relink* lsk-* me-lsk marker-suppl suppl-stubs* supl-bind* u
 # dirs the scripts write to
 KEEP_OUT="dserver real-macho crash-probe coredata-coreservices wayland-window-test wayland-backend quartzcore stub-data cores src"
 # build infrastructure and per-script scratch/output dirs (recreated by their scripts)
-KEEP_INFRA="CMakeFiles Developer -I i386 x86_64 x86_64-apple-darwin20 dtape cg-supl suppl wl-debug-copy wlr-protocols-gen constdict-desc got-slot-undoc msgSend-imp-undoc bundle-principal-class-test sc-stubs extras-objc-classes opendirectory-stub bootstrap-shim bootstrap-probe cfinit const-objc window-draw-probe screens objc-only tz-check *-probe-test bitmap-check bitmap-draw-check nscgcolor-check kqueue-close-probe font-metrics-probe throw-trace"
+KEEP_INFRA="CMakeFiles Developer -I i386 x86_64 x86_64-apple-darwin20 dtape cg-supl suppl wl-debug-copy wlr-protocols-gen constdict-desc got-slot-undoc msgSend-imp-undoc bundle-principal-class-test sc-stubs extras-objc-classes opendirectory-stub bootstrap-shim bootstrap-probe cfinit const-objc window-draw-probe screens objc-only tz-check *-probe-test scratch bitmap-check bitmap-draw-check nscgcolor-check kqueue-close-probe font-metrics-probe throw-trace"
 # work dirs of the current probes and of everything the gate (stage-gate.sh, probes/*.sh) rebuilds or uses
 KEEP_PROBE="imageio imageio-probe suspend-rwlock-probe suspend-mutex-probe suspend-cv-probe suspend-wake-probe* window-draw* netsegv nullsrc unwind-resume v5store catx-kvc-probe eintr-prepost-probe psynch-ring-probe ptattach-probe semtw-probe port-construct-probe font-families-probe font-resolve-probe syscall482-probe throw-trace-selftest"
 KEEP_DIRS="$KEEP_SRC $KEEP_OUT $KEEP_INFRA $KEEP_PROBE $KEEPONE_ALLOW"
