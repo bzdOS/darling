@@ -24,7 +24,13 @@ if [ -z "$STAGE_GATE_INNER" ]; then
 	_rcf=$(mktemp "${TMPDIR:-/tmp}/stage-gate-rc.XXXXXX") || { rm -f "$_gt"; echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
 	{ STAGE_GATE_INNER=1 sh "$0" 2>&1; echo $? >"$_rcf"; } | tee "$_gt"
 	_rc=$(cat "$_rcf"); [ -n "$_rc" ] || _rc=1
-	_sk=$(grep -c "skipped" "$_gt"); rm -f "$_gt" "$_rcf"
+	# START_GATE_SKIPCNT
+	# Contract: a vanished own log copy (full-gate 1119a: TMPDIR pointed into the caller's
+	# sandbox, swept mid-run; grep then printed "No such file or directory" into the log)
+	# leaves the skipped count empty with a note line, never a raw grep error.
+	if [ -f "$_gt" ]; then _sk=$(grep -c "skipped" "$_gt"); else _sk=""; echo "GATE note: own log copy vanished during the run (TMPDIR swept); skipped count unavailable"; fi
+	# END_GATE_SKIPCNT
+	rm -f "$_gt" "$_rcf"
 	_md=quick; [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ] && _md=full
 	echo "GATE mode=$_md skipped=$_sk rc=$_rc"; exit "$_rc"
 fi
@@ -92,6 +98,20 @@ orphan_end() { # name
 SLIST=$(mktemp "${TMPDIR:-/tmp}/stage-gate-list.XXXXXX"); SBASE=$(mktemp "${TMPDIR:-/tmp}/stage-gate-base.XXXXXX"); SAFTR=$(mktemp "${TMPDIR:-/tmp}/stage-gate-aftr.XXXXXX")
 trap 'rm -f "$SLIST" "$SBASE" "$SAFTR"' EXIT
 ML=$(m "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
+# START_MLDR_REASON
+# Contract: when the mldr hash reads "none" the FAIL line names the reason, not a bare none
+# (full-gate 1119a failed "mldr=none mismatches: none" with the file present: md5 was outside
+# PATH, so every hash read as none and they all "matched"). ML keeps "none" for the ok/fail
+# logic; only the FAIL line carries the reason.
+MLWHY=""
+if [ "$ML" = none ]; then
+	if [ -f "$DARLING_BUILD_DIR/dserver/mldr-real/mldr" ]; then
+		if command -v md5 >/dev/null 2>&1; then MLWHY=" (md5 -q failed on an existing file)"; else MLWHY=" (md5 not in PATH; every image hash read as none)"; fi
+	else
+		MLWHY=' (no mldr at $DARLING_BUILD_DIR/dserver/mldr-real/mldr)'
+	fi
+fi
+# END_MLDR_REASON
 # images with their own generator that build-stub-data.sh leaves out of images.txt but whose md5 is still gated
 # (SystemConfigurationExtras.dylib: build-sc-stubs.sh; it was counted until it was excluded from images.txt)
 # (AppKit: build-appkit.sh stages it into the overlay only; there is no stub-data copy, so the line compares overlay vs staged:
@@ -316,6 +336,6 @@ fi
 if [ "$RED" = 1 ] && [ -z "$bad" ] && [ "$ML" != none ]; then
 	echo "STAGECHK FAIL red lines above (STAGE_GATE_RUN_ALL=1); images=$n mldr=$ML"
 else
-	echo "STAGECHK FAIL images=$n mldr=$ML mismatches:${bad:- none}"
+	echo "STAGECHK FAIL images=$n mldr=$ML$MLWHY mismatches:${bad:- none}"
 fi
 exit 1
