@@ -208,6 +208,42 @@ def data_asm(name, size=DATA_SIZE, strings=False):
             ".space %d, 0" % size]
 
 
+# Per-class additions to the template (classes_m): ivars and methods appended verbatim,
+# only for the named class. NSConstantDictionary answers its nine measured selectors
+# itself instead of the global forward handler: build-freebsd/SERIES-FIX24-DIAG.md
+# measured all nine as OBJC-FWD-MISS in every fix24 run (41 % of the hits), and the
+# forward handler's nil/0 is the empty-dictionary answer the rc133 class hangs on.
+# Its instances are the constant records the linker emits into __objc_dictobj: measured
+# over the six records of one framework binary, the record is
+# {isa, word, count, keys, values}, 40 bytes, the key/value arrays holding `count`
+# pointers each. length answers the stored pair count; _fastCharacterContents answers
+# NULL — the stored pairs have no flat character buffer (the tree's own
+# -[NSString _fastCharacterContents] answers NULL the same way, NSString.m). The six
+# isX__ are the NSObject-level NO (NSObject (__NSIsKinds) in
+# src/external/corefoundation/NSObject.m); release is a no-op on a static record.
+# The generated file is compiled without an include path, so BOOL/NO come from this
+# typedef: the runtime's x86_64 BOOL is signed char (objc.h).
+_NSCT_PRELUDE = "typedef signed char BOOL;\n#define NO ((BOOL)0)\n\n"
+_NSCT_IVARS = ("    unsigned long _flags;\n    unsigned long _count;\n"
+               "    id *_keys;\n    id *_values;\n")
+_NSCT_METHODS = (
+    "- (unsigned long)length { return _count; }\n"
+    "- (const unsigned short *)_fastCharacterContents { return 0; }\n"
+    "- (BOOL)isNSArray__ { return NO; }\n"
+    "- (BOOL)isNSData__ { return NO; }\n"
+    "- (BOOL)isNSDate__ { return NO; }\n"
+    "- (BOOL)isNSDictionary__ { return NO; }\n"
+    "- (BOOL)isNSNumber__ { return NO; }\n"
+    "- (BOOL)isNSString__ { return NO; }\n"
+    "- (void)release { }\n")
+EXTRAS = {"NSConstantDictionary": (_NSCT_PRELUDE, _NSCT_IVARS, _NSCT_METHODS)}
+
+
+# Contract: classes_m emits the seven root-class methods every stub class gets; a class
+# named in EXTRAS additionally gets its ivars in the @interface and its own methods after
+# the seven, and its prelude (typedefs the header-free generated file cannot include).
+# Without an entry the output is byte-identical to the seven-method template.
+# START_CLASSES_M_EXTRAS
 def classes_m(classes):
     """Objective-C source: one real root class per name (valid isa, metaclass).
 
@@ -217,7 +253,11 @@ def classes_m(classes):
     """
     out = []
     for c in classes:
-        out.append("__attribute__((objc_root_class))\n@interface %s\n@end\n"
+        prelude, ivars, extra = EXTRAS.get(c, ("", "", ""))
+        if prelude:
+            out.append(prelude)
+        body = ("{\n" + ivars + "}") if ivars else ""
+        out.append("__attribute__((objc_root_class))\n@interface %s%s\n@end\n"
                    "@implementation %s\n"
                    "+ (id)alloc { return 0; }\n+ (id)allocWithZone:(void *)z { (void)z; return 0; }\n"
                    "+ (id)new { return 0; }\n"
@@ -225,5 +265,7 @@ def classes_m(classes):
                    "- (id)copyWithZone:(void *)zone { (void)zone; return self; }\n"
                    "- (id)copy { return self; }\n"
                    "- (id)class { return self; }\n"
-                   "@end\n" % (c, c))
+                   "%s"
+                   "@end\n" % (c, body, c, extra))
     return "".join(out)
+# END_CLASSES_M_EXTRAS
