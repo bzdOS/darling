@@ -315,7 +315,7 @@ long mldr_sys_execve(const char *macos_path, char *const argv[], char *const env
  *     control flow by that point.
  *   - Applies (see process_spawn.c for exact ordering, which matters —
  *     e.g. file actions run after attribute flags, matching upstream):
- *     RESETIDS, SETPGROUP, SETSIGMASK, START_SUSPENDED (via
+ *     RESETIDS, SETPGROUP, SETSIGMASK, POSIX_SPAWN_START_SUSPENDED (via
  *     dserver_rpc_stop_after_exec(), same as upstream), and file actions
  *     OPEN/CLOSE/DUP2/INHERIT/CHDIR/FCHDIR.
  *   - Explicitly REJECTS (-ENOTSUP, does not spawn) rather than silently

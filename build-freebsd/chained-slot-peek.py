@@ -85,7 +85,7 @@ def main():
         foff0 = segs[segname][2] + (page * page_size)
         first = starts[page]
         if first == 0xffff:
-            print(f"{segname} page {page}: no chain (START_NONE)")
+            print(f"{segname} page {page}: no chain (start slot 0xffff)")
             return
         off = first
         while True:
