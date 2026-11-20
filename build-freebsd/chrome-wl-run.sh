@@ -45,7 +45,18 @@ LOG=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S.log
 . "$DARLING_SRC_DIR/build-freebsd/dserver-prefix.sh"
 dsp_new || exit 1
 START=$(date +%s)
-echo "WRAPPER_START=$START timeout=$T" > "$LOG"
+# Provenance header: a run whose binaries cannot be named is not evidence. Every batch log names the
+# installed mldr and darlingserver by md5 plus the source HEAD, and repeats the build binaries that
+# actually run (the installed pair may differ or be absent; MISSING says so, it is not a silent zero).
+# DARLING_INSTALLED_LIBEXEC overrides the installed prefix (default: the standard Darling host prefix).
+prov_md5() { [ -f "$1" ] || { echo MISSING; return; }; md5 -q "$1" 2>/dev/null || md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
+PROV_LIBEXEC=${DARLING_INSTALLED_LIBEXEC:-/usr/local/libexec/darling/usr/libexec/darling}
+{
+	echo "WRAPPER_START=$START timeout=$T"
+	echo "PROVENANCE git_head=$(cd "$DARLING_SRC_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo unknown)"
+	echo "PROVENANCE mldr_installed=$(prov_md5 "$PROV_LIBEXEC/mldr") darlingserver_installed=$(prov_md5 "$PROV_LIBEXEC/darlingserver")"
+	echo "PROVENANCE mldr_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr") darlingserver_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/darlingserver")"
+} > "$LOG"
 SUDO=${CHROME_SR_SUDO:-/usr/local/bin/sudo -n}
 LAUNCH=${CHROME_SR_LAUNCH:-$DARLING_BUILD_DIR/launch-dynamic}
 BASE=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S
