@@ -1,0 +1,49 @@
+# darling.toml - single source for the node env, the keep-one lists and the series run presets.
+# Generated from it by gen-from-schema.py (validated against darling.schema.json) into [env].DARLING_BUILD_DIR:
+#   darling.env        KEY=VALUE lines of [env] (read as data by stage-gate.sh and chrome-series.sh, never sourced)
+#   keepone.env        KEEPONE_FILES / KEEPONE_BACKUPS (read by keep-one-check.sh; env KEEPONE_ALLOW_* still adds to them)
+#   run-<NAME>.env     one per [run.series.<NAME>] (read by chrome-series.sh --series NAME)
+# After any edit here: python3 gen-from-schema.py ; stage-gate.sh runs gen-from-schema.py --check (SCHEMA-DRIFT pass|FAIL).
+schema_version = 1
+
+[env]
+DARLING_SRC_DIR = "/opt/darling/src"
+DARLING_BUILD_DIR = "/opt/darling/build"
+DARLING_OVERLAY = "/opt/darling/overlay"
+KEEPONE_ROOT = "/opt/darling"
+# the one disk threshold (% use of /): a series does not start, and the batch loop stops, at >= this value
+DARLING_DISK_MAX = 85
+
+[keepone]
+# top-level build/ file globs that are never candidates
+files = [
+  "darling.env", "keepone.env", "run-*.env",
+  "window-draw*", "imageio-probe.log",
+  "series-fix20*.out", "series-fix21*.out", "series-fix22*.out",
+  "chrome-sr-fix20*", "chrome-sr-fix21*", "chrome-sr-fix22*",
+  "chrome-sr-fix24*", "fix24-series-*", "*fix24-1119*", "*fix23c*",
+  "chrome-sr-fix26*", "chrome-sr-fix27*", "fix26-series-*", "fix27-series-*",
+  "fix28-*", "chrome-sr-fix28*", "fix29-*", "chrome-sr-fix29*", "fix29b-*", "chrome-sr-fix29b*",
+  "fix30-*", "chrome-sr-fix30*", "fix31-*", "chrome-sr-fix31*", "fix32-*", "chrome-sr-fix32*",
+  "fix33-*", "chrome-sr-fix33*", "fix34-*", "chrome-sr-fix34*", "fix35-*", "chrome-sr-fix35*",
+  "fix36-*", "chrome-sr-fix36*", "fix37-*", "chrome-sr-fix37*",
+  "coretext-*probe-macho-1121-*", "preflight-1795*-1.log",
+]
+# backup/ entries that are rollback points or not yet understood; never candidates
+backups = [
+  "ImageIO", "ImageIO.pre-r5", "ImageIO.real-r5.*", "stub-data-ImageIO.pre-r5",
+  "AppKitExtras.dylib.pre-b4-fontfamilies", "AppKitExtras.pre-resize",
+  "darlingserver.pre-q1.*", "darlingserver.pre-b6.*", "darlingserver.pre-d2.*", "darlingserver.pre-d5.*",
+  "darlingserver.pre-f1.*", "darlingserver.pre-rebuild",
+  "libdtape.a.pre-q1", "libdtape.a.pre-b6", "libdtape.a.pre-d5", "stubdata-pre-b5",
+  "darling-extras.dylib.pre-ctresolve", "libsystem_kernel.pre-statfs-deploy.*",
+  "*.pre-*-2111",
+]
+
+# chrome-series.sh --series NAME  ==  chrome-series.sh <prefix> <runs> <timeout> with the env below
+[run.series.fix35]
+prefix = "fix35"
+runs = 1
+timeout = 120
+chrome_extra_args = "--lang=en-US"
+trap_log = 0

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "darling.toml",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "env", "keepone"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "env": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["DARLING_SRC_DIR", "DARLING_BUILD_DIR", "DARLING_OVERLAY", "KEEPONE_ROOT", "DARLING_DISK_MAX"],
+      "properties": {
+        "DARLING_SRC_DIR": {"$ref": "#/$defs/abspath"},
+        "DARLING_BUILD_DIR": {"$ref": "#/$defs/abspath"},
+        "DARLING_OVERLAY": {"$ref": "#/$defs/abspath"},
+        "KEEPONE_ROOT": {"$ref": "#/$defs/abspath"},
+        "DARLING_DISK_MAX": {"type": "integer", "minimum": 50, "maximum": 99}
+      }
+    },
+    "keepone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "backups"],
+      "properties": {
+        "files": {"$ref": "#/$defs/globs"},
+        "backups": {"$ref": "#/$defs/globs"}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "series": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+          "additionalProperties": {"$ref": "#/$defs/series"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "abspath": {"type": "string", "pattern": "^/[^'\"\\s]*$"},
+    "glob": {"type": "string", "minLength": 1, "pattern": "^[^'\"\\s/]+$"},
+    "globs": {"type": "array", "items": {"$ref": "#/$defs/glob"}},
+    "series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prefix", "runs", "timeout"],
+      "properties": {
+        "prefix": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "runs": {"type": "integer", "minimum": 1, "maximum": 100},
+        "timeout": {"type": "integer", "minimum": 10, "maximum": 3600},
+        "chrome_extra_args": {"type": "string", "pattern": "^[^'\\n]*$"},
+        "trap_log": {"type": "integer", "enum": [0, 1]},
+        "ktrace": {"type": "string", "pattern": "^(/[^'\"\\s]*)?$"},
+        "ktrace_points": {"type": "string", "pattern": "^[a-zA-Z+]*$"}
+      }
+    }
+  }
+}
