@@ -34,9 +34,19 @@ if [ -z "$STAGE_GATE_INNER" ]; then
 	# END_GATE_SKIPCNT
 	# START_GATE_PROBELOGS
 	# rc=0 only: remove this run's own <name>-probe-<stamp>.log and preflight-<epoch>*.log, top level of the build directory,
-	# nothing outside it; a failed gate keeps every log. Unset build directory or marker: nothing is removed.
-	if [ "$_rc" = 0 ] && [ -n "$_mk" ] && [ -f "$_mk" ] && [ -n "$DARLING_BUILD_DIR" ] && [ -d "$DARLING_BUILD_DIR" ]; then
-		find "$DARLING_BUILD_DIR" -maxdepth 1 -type f \( -name '*-probe-*.log' -o -name 'preflight-*.log' \) -newer "$_mk" -exec rm -f {} +
+	# nothing outside it; a failed gate keeps every log. The build directory is DARLING_BUILD_DIR or, when unset, the value in the
+	# node env file (read as data like the inner part does). An empty value, a missing directory or a missing marker is a failure
+	# of the gate (GATE-PROBE-CLEAN FAIL, rc=1), never a silent skip.
+	if [ "$_rc" = 0 ]; then
+		_bd=$DARLING_BUILD_DIR; _ef="${DARLING_ENV_FILE:-/opt/darling/build/darling.env}"
+		if [ -z "$_bd" ] && [ -f "$_ef" ]; then
+			_bd=$(sed -n 's/^DARLING_BUILD_DIR=//p' "$_ef" | tail -1 | tr -d "\"'")
+		fi
+		if [ -n "$_bd" ] && [ -d "$_bd" ] && [ -n "$_mk" ] && [ -f "$_mk" ]; then
+			find "$_bd" -maxdepth 1 -type f \( -name '*-probe-*.log' -o -name 'preflight-*.log' \) -newer "$_mk" -exec rm -f {} +
+		else
+			echo "GATE-PROBE-CLEAN FAIL build_dir=$_bd"; _rc=1
+		fi
 	fi
 	# END_GATE_PROBELOGS
 	rm -f "$_gt" "$_rcf" "$_mk"
