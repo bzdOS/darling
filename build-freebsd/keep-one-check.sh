@@ -1,7 +1,7 @@
 #!/bin/sh
 # keep-one-check.sh - "one tree, one final build, nothing grows" check. READ-ONLY: never deletes anything.
 # usage: keep-one-check.sh           prints exactly one line: KEEP-ONE verdict=pass|fail <details>; exit 1 on fail
-#        keep-one-check.sh --clean-sockets  removes only stale /tmp/darling-mldr-<pid>-<fd> sockets (dead pid, >30 min); prints KEEP-ONE sockets removed=N kept_live=M
+#        keep-one-check.sh --clean-sockets  removes only stale /tmp/darling-mldr-<pid>-<fd> sockets (dead pid, >5 min); prints KEEP-ONE sockets removed=N kept_live=M
 #        keep-one-check.sh --list    prints the candidate paths (one per line); still deletes nothing
 #        keep-one-check.sh --apply   deletes exactly the paths --list prints, then prints the verdict again. Only paths whose
 #                                    realpath is inside <root>/build or <root>/backup; any other path: refuse, delete nothing, rc 4.
