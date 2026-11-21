@@ -43,11 +43,34 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	[ -e "$LOG" ] && { echo "exists $LOG"; exit 1; }
 	dsp_new || exit 1
 	START=$(date +%s)
+	# Host-state snapshot of a stalled guest process (before the timeout kill): when the run log has been quiet for PROBE_SNAP_S seconds
+	# (default 30) the watcher writes procstat -kk / -t and ps -H of every guest process (match: the probe binary name) to
+	# PREFIX-<stamp>-procstat.txt, once. It shows whether the whole process is stopped (SIGSTOP, task_suspend hitting the wrong thread) or
+	# where each thread sits (kernel wait channel, sigsuspend). Nothing is written when the log never goes quiet.
+	SNAP="$DARLING_BUILD_DIR/$P-$STAMP-procstat.txt"
+	( while :; do
+		sleep 5
+		[ -f "$LOG" ] || continue
+		lm=$(stat -f %m "$LOG" 2>/dev/null) || continue
+		if [ $(( $(date +%s) - lm )) -ge "${PROBE_SNAP_S:-30}" ] && [ ! -e "$SNAP" ]; then
+			{
+				echo "# snapshot at $(date +%s), log quiet for >= ${PROBE_SNAP_S:-30} s"
+				for gp in $(pgrep -f "$PB"); do
+					echo "== pid $gp"; ps -o pid,state,wchan,command -p "$gp"
+					echo "-- procstat -t"; /usr/local/bin/sudo -n procstat -t "$gp"
+					echo "-- procstat -kk"; /usr/local/bin/sudo -n procstat -kk "$gp"
+					echo "-- ps -H"; ps -H -o pid,tid,state,wchan,comm -p "$gp"
+				done
+			} > "$SNAP" 2>&1
+		fi
+	done ) &
+	SNAPW=$!
 	/usr/local/bin/sudo -n env DARLING_PREFIX="$DARLING_PREFIX" DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
 	  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" DARLING_TEST_BINARY="$PB" DARLING_KEEP_LOCAL=1 \
 	  DARLING_TEST_ARGS="$SU $SP $IW" $PROBE_ENV ${SL:+DSERVER_LOG_LEVEL=$SL} ${DSERVER_SOCKET_RCVBUF:+DSERVER_SOCKET_RCVBUF=$DSERVER_SOCKET_RCVBUF} $PROBE_EXTRA_ENV \
 	  $KT timeout -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" > "$LOG" 2>&1
 	rc=$?
+	kill "$SNAPW" 2>/dev/null; wait "$SNAPW" 2>/dev/null
 	END=$(date +%s); LM=$(stat -f %m "$LOG" 2>/dev/null || echo "$END")
 	# exit code always in the run log and in the per-rc tally of the SUMMARY line (rc0/rc3/rc124/rc137/other)
 	echo "PROBE-RC rc=$rc" >> "$LOG"
