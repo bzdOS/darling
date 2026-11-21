@@ -186,6 +186,15 @@ chrome_extra_args = "--lang=en-US"
 trap_log = 0
 
 # names stub_data_rules.DATA_NAMES treats as data (generated into stub_data_names.py, in the tree)
+
+[run.series.fix55]
+prefix = "fix55"
+runs = 1
+timeout = 120
+chrome_extra_args = "--lang=en-US"
+trap_log = 0
+
+# names stub_data_rules.DATA_NAMES treats as data (generated into stub_data_names.py, in the tree)
 [stubs]
 # _k<PREFIX><Upper>...: framework constants
 k_prefixes = ["CG", "CM", "CA", "CV", "CI", "MT", "OD", "Sec", "CF", "UT", "AX", "NS", "IO", "LS", "AV", "UN"]
