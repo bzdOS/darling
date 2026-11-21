@@ -13,6 +13,7 @@
 #include "elfcalls.h"
 #include "threads.h"
 #include "trap_log.h"
+#include "../freebsd_syscall_trap.h" /* MLDR_GUEST_ENTRY */
 #include <sys/un.h>
 #include <sys/socket.h>
 #include <fcntl.h>
@@ -137,7 +138,7 @@ static int __dserver_get_process_lifetime_pipe() {
 	return __dserver_process_lifetime_pipe_fd;
 }
 
-static int __dserver_process_lifetime_pipe_refresh() {
+MLDR_GUEST_ENTRY static int __dserver_process_lifetime_pipe_refresh() {
 	int pipe[2];
 
 	if (__mldr_create_process_lifetime_pipe(pipe) == -1) {

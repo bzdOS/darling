@@ -8,6 +8,18 @@
 
 #pragma once
 
+/*
+ * Entry points the guest calls directly (elfcalls) - the fork child among them (sys_fork closes and
+ * recreates its RPC socket and lifetime pipe). The guest may reach them with rsp not 16-byte aligned;
+ * host libc then faults on an aligned SSE store (movaps in vfprintf: #GP, delivered as SIGBUS at the
+ * instruction). force_align_arg_pointer realigns the stack on entry.
+ */
+#if defined(__x86_64__)
+#define MLDR_GUEST_ENTRY __attribute__((force_align_arg_pointer))
+#else
+#define MLDR_GUEST_ENTRY
+#endif
+
 #ifdef DARLING_FREEBSD
 
 #include <stddef.h> /* size_t */

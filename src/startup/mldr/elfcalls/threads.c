@@ -147,7 +147,7 @@ static dthread_t dthread_structure_allocate(size_t stack_size, size_t guard_size
 	return dthread_structure_init(dthread, guard_size, *stack_addr, stack_size, base_addr, total_size);
 };
 
-void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_size,
+MLDR_GUEST_ENTRY void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_size,
 				void* entry_point, uintptr_t real_entry_point,
 				uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
 				darling_thread_create_callbacks_t callbacks, void* pth)
@@ -375,7 +375,7 @@ static void* darling_thread_entry(void* p)
 	__builtin_unreachable();
 }
 
-int __darling_thread_terminate(void* stackaddr,
+MLDR_GUEST_ENTRY int __darling_thread_terminate(void* stackaddr,
 				unsigned long freesize, unsigned long pthobj_size)
 {
 	int checkout_result = 0;
@@ -472,7 +472,7 @@ int __darling_thread_rpc_socket(void) {
 	return t_server_socket;
 };
 
-void __darling_thread_rpc_socket_refresh(void) {
+MLDR_GUEST_ENTRY void __darling_thread_rpc_socket_refresh(void) {
 	int new_rpc_fd = __mldr_create_rpc_socket();
 	if (new_rpc_fd < 0) {
 		abort();
