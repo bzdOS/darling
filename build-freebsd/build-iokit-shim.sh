@@ -63,13 +63,11 @@ if [ ! -f "${SRC}/tests/vendor/macosx-sdk-flat.tar.gz" ]; then
 	exit 1
 fi
 
+# IOKitUser headers are optional: the flat SDK (usr/include/IOKit) carries IOKitLib.h and
+# graphics/IOGraphicsLib.h, which is all iokit_shim.c includes.
 if [ ! -d "${IOKITUSER}/darling/include/IOKit" ]; then
-	echo "FATAL: ${IOKITUSER}/darling/include/IOKit missing." >&2
-	echo "  src/external/IOKitUser is a git submodule -- run" >&2
-	echo "  'git submodule update --init src/external/IOKitUser' first." >&2
-	echo "  (Do NOT init src/external/iokitd for this -- it is intentionally" >&2
-	echo "  left empty; see docs/SPEC-iokit-coregraphics-build.md §1.1.)" >&2
-	exit 1
+	echo "NOTE: ${IOKITUSER}/darling/include/IOKit missing; using the flat SDK IOKit headers." >&2
+	IOKITUSER=""
 fi
 
 if [ ! -f "${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" ]; then
@@ -118,7 +116,7 @@ CLANG_FLAGS="${CLANG_FLAGS} -I${SDK_FLAT}/usr/include -I${SRC}/tests/vendor/fake
 # safe (each provides only the identifiers actually referenced by the
 # CoreGraphics sources this shim targets, two of the four are empty).
 CLANG_FLAGS="${CLANG_FLAGS} -I${SRC}/src/freebsd-shims/missing-headers"
-CLANG_FLAGS="${CLANG_FLAGS} -I${IOKITUSER}/darling/include"
+[ -n "${IOKITUSER}" ] && CLANG_FLAGS="${CLANG_FLAGS} -I${IOKITUSER}/darling/include"
 CLANG_FLAGS="${CLANG_FLAGS} -F${SDK_FLAT}/Frameworks"
 LD_FLAGS="-arch x86_64 -platform_version macos 10.10 10.10 -syslibroot ${STAGED_OVERLAY} -Z"
 
@@ -131,6 +129,7 @@ mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A
 # shellcheck disable=SC2086
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit \
+	-compatibility_version 1.0.0 -current_version 275.0.0 \
 	-o "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" \
 	"${BUILD}/obj/iokit_shim.o" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
@@ -143,8 +142,10 @@ file "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOK
 # build-gui.sh's own staging step (which copies FROM $OVERLAY, not from
 # this script's scratch dir) picks it up on a later, separate run.
 mkdir -p "${OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A"
-cp "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" \
-	"${OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+# Through a new inode, so processes that have the old IOKit mapped keep their bytes.
+IDEST="${OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit" "${IDEST}.new-$$"
+mv -f "${IDEST}.new-$$" "${IDEST}"
 
 echo "=== done ==="
 echo "Installed: ${OVERLAY}/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"

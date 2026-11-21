@@ -258,3 +258,45 @@ IODisplayCreateInfoDictionary(
 	(void)options;
 	return NULL;
 }
+
+/*
+ * purpose:     macOS 12+ name of kIOMasterPortDefault, imported by
+ *              chrome_crashpad_handler. Same value as kIOMasterPortDefault.
+ */
+const mach_port_t kIOMainPortDefault = MACH_PORT_NULL;
+
+/*
+ * purpose:     single-service lookup (IOKitLib.h IOServiceGetMatchingService),
+ *              imported by chrome_crashpad_handler.
+ * input:       mainPort - ignored; matching - consumed (one reference released),
+ *              like the real function.
+ * output:      IO_OBJECT_NULL: this port has no IORegistry, so nothing matches.
+ * sideEffects: releases `matching`.
+ */
+io_service_t
+IOServiceGetMatchingService(mach_port_t mainPort, CFDictionaryRef matching)
+{
+	(void)mainPort;
+	if (matching != NULL) {
+		CFRelease(matching);
+	}
+	return (io_service_t) MACH_PORT_NULL;
+}
+
+/*
+ * purpose:     registry property read (IOKitLib.h IORegistryEntryCreateCFProperty),
+ *              imported by chrome_crashpad_handler.
+ * output:      NULL: no registry entries exist here, so no property is available.
+ *              Callers treat NULL as "property absent".
+ * sideEffects: none.
+ */
+CFTypeRef
+IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key,
+		CFAllocatorRef allocator, IOOptionBits options)
+{
+	(void)entry;
+	(void)key;
+	(void)allocator;
+	(void)options;
+	return NULL;
+}
