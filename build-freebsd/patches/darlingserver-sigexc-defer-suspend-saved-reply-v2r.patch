@@ -1,0 +1,192 @@
+diff -ru b/internal-include/darlingserver/thread.hpp c/internal-include/darlingserver/thread.hpp
+--- b/internal-include/darlingserver/thread.hpp	2026-11-21 23:33:00.662143254 +0300
++++ c/internal-include/darlingserver/thread.hpp	2026-11-22 00:22:11.432921584 +0300
+@@ -118,6 +118,9 @@
+ 		std::stack<InterruptContext> _interrupts;
+ 		std::queue<std::shared_ptr<Call>> _pendingInterrupts;
+ 		std::optional<Message> _pendingSavedReply = std::nullopt;
++		bool _suspendSignalDeferred = false;
++		bool _savedReplyInFlight = false;
++		uint64_t _savedReplyGen = 0;
+ 		bool _dead = false;
+ 		std::shared_ptr<Thread> _selfReference = nullptr;
+ 
+@@ -262,6 +265,10 @@
+ 
+ 		void waitWhileUserSuspended(uintptr_t threadStateAddress, uintptr_t floatStateAddress);
+ 		void sendSignal(int signal) const;
++		bool deferSuspendSignal(int signal);
++		void noteSavedReplyResent();
++		void noteCallReceived();
++		void flushDeferredSuspendSignal();
+ 
+ 		/**
+ 		 * Informs this Thread instance that the thread it was managing has died.
+diff -ru b/src/call.cpp c/src/call.cpp
+--- b/src/call.cpp	2026-11-21 23:33:00.662004258 +0300
++++ c/src/call.cpp	2026-11-22 00:22:11.433085258 +0300
+@@ -837,6 +837,7 @@
+ 
+ 	_sendReply(0);
+ 
++	bool resent = false;
+ 	{
+ 		std::unique_lock lock(thread->_rwlock);
+ 
+@@ -849,8 +850,16 @@
+ 			dsdiagRingEvent(3, thread->_tid, thread->_nstid, 0);
+ 			Server::sharedInstance().sendMessage(std::move(*tmp.savedReply));
+ 			tmp.savedReply = std::nullopt;
++			resent = true;
+ 		}
+ 	}
++
++	// a suspend signal held while the thread owned the saved reply goes out once the client has read it
++	if (resent) {
++		thread->noteSavedReplyResent();
++	} else {
++		thread->flushDeferredSuspendSignal();
++	}
+ };
+ 
+ void DarlingServer::Call::ConsoleOpen::processCall() {
+diff -ru b/src/server.cpp c/src/server.cpp
+--- b/src/server.cpp	2026-11-21 23:33:00.661737755 +0300
++++ c/src/server.cpp	2026-11-22 00:22:22.598693274 +0300
+@@ -258,6 +258,10 @@
+ 	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
+ 		try {
+ 			auto sigThread = static_cast<DarlingServer::Thread*>(thread_context);
++			if (sigThread->deferSuspendSignal(signal)) {
++				dsdiagRingEvent(6, sigThread->_tid, sigThread->_nstid, (uint64_t)signal); // held
++				return 0;
++			}
+ 			dsdiagRingEvent(5, sigThread->_tid, sigThread->_nstid, (uint64_t)signal);
+ 			sigThread->sendSignal(signal);
+ 			return 0;
+diff -ru b/src/thread.cpp c/src/thread.cpp
+--- b/src/thread.cpp	2026-11-22 00:04:12.464978576 +0300
++++ c/src/thread.cpp	2026-11-22 00:22:56.379742564 +0300
+@@ -58,6 +58,8 @@
+ #include <sys/wait.h>
+ #include <vector>
+ #ifdef DARLING_FREEBSD
++#include <thread>
++#include <chrono>
+ #include <sys/thr.h>  /* thr_self() — FreeBSD LWP ID */
+ #endif
+ 
+@@ -303,6 +305,8 @@
+ };
+ 
+ void DarlingServer::Thread::setPendingCall(std::shared_ptr<Call> newPendingCall) {
++	bool noteCall = newPendingCall && newPendingCall->number() != Call::Number::InterruptEnter;
++	{
+ 	std::unique_lock lock(_rwlock);
+ 	if (newPendingCall && _pendingCall) {
+ 		if (newPendingCall->number() == Call::Number::InterruptEnter) {
+@@ -316,6 +320,11 @@
+ 		}
+ 	}
+ 	_pendingCall = newPendingCall;
++	}
++	// only after the call is pending: the held suspend signal makes the client send interrupt_enter at once
++	if (noteCall) {
++		noteCallReceived();
++	}
+ };
+ 
+ std::shared_ptr<DarlingServer::Call> DarlingServer::Thread::activeCall() const {
+@@ -1838,6 +1847,92 @@
+ 	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
+ };
+ 
++
++// Suspend signal vs. a saved reply (sig-reentry livelock). When a thread is interrupted while the reply to the call
++// it waits in is already queued, the client pushes that reply back (push_reply) and the server re-sends it after
++// interrupt_exit. A thread_suspend that lands meanwhile (the suspender's next round, issued while the thread is still
++// in its handler) raised SIGRTMIN at once; the signal stayed masked in the handler and was delivered right after
++// sigreturn, before the client read the re-sent reply, so the next interrupt_enter pushed it back again and the
++// thread never returned to user code (progress=0 over 888 suspend rounds). XNU lets a thread whose wait has completed
++// reach user code first, so the suspend signal is held while the thread owns a saved reply and sent once the client
++// makes its next call (it has read the reply) or 2 ms after the re-send, whichever comes first.
++bool DarlingServer::Thread::deferSuspendSignal(int signal) {
++	if (signal != LINUX_SIGRTMIN) {
++		return false;
++	}
++	std::unique_lock lock(_rwlock);
++	bool holding = _savedReplyInFlight || _pendingSavedReply || (!_interrupts.empty() && _interrupts.top().savedReply);
++	if (!holding) {
++		return false;
++	}
++	_suspendSignalDeferred = true;
++	return true;
++};
++
++void DarlingServer::Thread::noteSavedReplyResent() {
++	uint64_t gen;
++	{
++		std::unique_lock lock(_rwlock);
++		_savedReplyInFlight = true;
++		gen = ++_savedReplyGen;
++	}
++	std::weak_ptr<Thread> weak = shared_from_this();
++	std::thread([weak, gen]() {
++		std::this_thread::sleep_for(std::chrono::milliseconds(2));
++		auto self = weak.lock();
++		if (!self) {
++			return;
++		}
++		bool send = false;
++		{
++			std::unique_lock lock(self->_rwlock);
++			if (self->_savedReplyGen != gen || !self->_savedReplyInFlight) {
++				return;
++			}
++			self->_savedReplyInFlight = false;
++			send = self->_suspendSignalDeferred;
++			self->_suspendSignalDeferred = false;
++		}
++		if (send) {
++			dsdiagRingEvent(7, self->_tid, self->_nstid, 1); // held signal released (timer)
++			try { self->sendSignal(LINUX_SIGRTMIN); } catch (...) {}
++		}
++	}).detach();
++};
++
++void DarlingServer::Thread::noteCallReceived() {
++	bool send = false;
++	{
++		std::unique_lock lock(_rwlock);
++		if (!_savedReplyInFlight) {
++			return;
++		}
++		_savedReplyInFlight = false;
++		send = _suspendSignalDeferred;
++		_suspendSignalDeferred = false;
++	}
++	if (send) {
++		dsdiagRingEvent(7, _tid, _nstid, 0); // held signal released (call/flush)
++		try { sendSignal(LINUX_SIGRTMIN); } catch (...) {}
++	}
++};
++
++void DarlingServer::Thread::flushDeferredSuspendSignal() {
++	bool send = false;
++	{
++		std::unique_lock lock(_rwlock);
++		if (_savedReplyInFlight || (!_interrupts.empty() && _interrupts.top().savedReply)) {
++			return;
++		}
++		send = _suspendSignalDeferred;
++		_suspendSignalDeferred = false;
++	}
++	if (send) {
++		dsdiagRingEvent(7, _tid, _nstid, 0); // held signal released (call/flush)
++		try { sendSignal(LINUX_SIGRTMIN); } catch (...) {}
++	}
++};
++
+ // Sigexc/RPC events for the diag ring (DSERVER_DIAG_RING); ret is 0 for these kinds.
+ // 3 = saved reply re-sent at interrupt_exit, 4 = client-pushed reply saved (n 1 = pending, 0 = normal),
+ // 5 = signal sent via duct-tape (n = signal), 8 = call received (n = call number),

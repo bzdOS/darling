@@ -71,4 +71,4 @@ elif hang:
     for tid in sorted(last):
         out.write("HANG-CLASS tid=%d saved_reply=%s last=%s\n" % (tid, saved.get(tid, "no"), last[tid]))
 if counts:
-    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 8, 9))))
+    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9))))
