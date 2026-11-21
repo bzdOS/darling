@@ -1,0 +1,224 @@
+diff -ru a/duct-tape/include/darlingserver/duct-tape/hooks.h b/duct-tape/include/darlingserver/duct-tape/hooks.h
+--- a/duct-tape/include/darlingserver/duct-tape/hooks.h
++++ b/duct-tape/include/darlingserver/duct-tape/hooks.h
+@@ -40,7 +40,10 @@
+ typedef dtape_thread_t* (*dtape_hook_thread_lookup_f)(int id, bool id_is_nsid, bool retain);
+ typedef dtape_thread_t* (*dtape_hook_thread_lookup_eternal_f)(dtape_eternal_id_t eid, bool retain);
+ typedef dtape_thread_state_t (*dtape_hook_thread_get_state_f)(void* thread_context);
++// returns 1 when the target was in a server-side wait: no signal was sent, the thread is marked suspended and its reply is held
++// until thread_release_held (macOS semantics: a suspended thread stops on return to user mode, its kernel wait is not interrupted)
+ typedef int (*dtape_hook_thread_send_signal_f)(void* thread_context, int signal);
++typedef void (*dtape_hook_thread_release_held_f)(void* thread_context);
+ typedef void (*dtape_hook_thread_context_dispose_f)(void* thread_context);
+ typedef dtape_eternal_id_t (*dtape_hook_thread_eternal_id_f)(void* thread_context);
+ 
+@@ -92,6 +95,7 @@
+ 	dtape_hook_thread_lookup_eternal_f thread_lookup_eternal;
+ 	dtape_hook_thread_get_state_f thread_get_state;
+ 	dtape_hook_thread_send_signal_f thread_send_signal;
++	dtape_hook_thread_release_held_f thread_release_held;
+ 	dtape_hook_thread_context_dispose_f thread_context_dispose;
+ 	dtape_hook_thread_eternal_id_f thread_eternal_id;
+ 
+diff -ru a/duct-tape/internal-include/darlingserver/duct-tape/thread.h b/duct-tape/internal-include/darlingserver/duct-tape/thread.h
+--- a/duct-tape/internal-include/darlingserver/duct-tape/thread.h
++++ b/duct-tape/internal-include/darlingserver/duct-tape/thread.h
+@@ -38,6 +38,8 @@
+ 	bool processing_signal;
+ 
+ 	bool waiting_suspended;
++	// thread_hold found the thread in a server-side wait and sent no signal; reply held until thread_release
++	bool suspended_nosignal;
+ 	dtape_mutex_t suspension_mutex;
+ 	dtape_condvar_t suspension_condvar;
+ 
+diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+--- a/duct-tape/src/thread.c
++++ b/duct-tape/src/thread.c
+@@ -55,6 +55,7 @@
+ 	thread->processing_signal = false;
+ 	thread->name = NULL;
+ 	thread->waiting_suspended = false;
++	thread->suspended_nosignal = false;
+ 	LIST_INIT(&thread->user_states);
+ 	dtape_mutex_init(&thread->suspension_mutex);
+ 	dtape_condvar_init(&thread->suspension_condvar);
+@@ -1428,7 +1429,10 @@
+ 	if (xthread->suspend_count++ == 0) {
+ 		// This signal leads to sigexc.c which will end up calling darlingserver;
+ 		// darlingserver will hold the caller so long as the suspend_count > 0.
+-		dtape_hooks->thread_send_signal(thread->context, LINUX_SIGRTMIN);
++		if (dtape_hooks->thread_send_signal(thread->context, LINUX_SIGRTMIN) == 1) {
++			// server-side wait: no signal, nothing will park; thread_wait and thread_release take the no-signal path
++			thread->suspended_nosignal = true;
++		}
+ 	}
+ };
+ 
+@@ -1440,7 +1444,13 @@
+ 		libsimple_lock_lock(&dtape_suspend_lock);
+ 	}
+ 	xthread->suspend_count--;
+-	dtape_hooks->thread_resume(thread->context);
++	if (thread->suspended_nosignal) {
++		// the thread never parked: no wakeup to deliver (a resume() token would absorb a later real suspend)
++		thread->suspended_nosignal = false;
++		dtape_hooks->thread_release_held(thread->context);
++	} else {
++		dtape_hooks->thread_resume(thread->context);
++	}
+ 	if (use_lock) {
+ 		libsimple_lock_unlock(&dtape_suspend_lock);
+ 	}
+@@ -1448,6 +1458,11 @@
+ 
+ void thread_wait(thread_t xthread, boolean_t until_not_runnable) {
+ 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
++	if (thread->suspended_nosignal || xthread->suspend_count <= 0) {
++		// (suspend_count <= 0: already resumed, nothing to wait for either)
++		// nothing to wait for: the thread is in a server-side wait and was suspended without a signal
++		return;
++	}
+ 	dtape_mutex_lock(&thread->suspension_mutex);
+ 	while (!thread->waiting_suspended) {
+ 		dtape_condvar_wait(&thread->suspension_condvar, &thread->suspension_mutex);
+diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
+--- a/internal-include/darlingserver/thread.hpp
++++ b/internal-include/darlingserver/thread.hpp
+@@ -107,6 +107,9 @@
+ 		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
+ 		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
+ 		bool _deferReplyForS2C = false;
++		// Suspended without a signal while in a server-side wait (macOS semantics): replies pushed meanwhile are held here until resume.
++		bool _suspendedNoSignal = false;
++		std::optional<Message> _heldReply = std::nullopt;
+ 		std::optional<Message> _deferredReply = std::nullopt;
+ 
+ 		struct InterruptContext {
+@@ -201,6 +204,10 @@
+ 		 */
+ 		void suspend(std::function<void()> continuationCallback = nullptr, libsimple_lock_t* unlockMe = nullptr);
+ 		void resume();
++		// thread_suspend of a thread that sits in a server-side wait: mark it suspended, send no signal. false = caller must signal.
++		bool suspendWithoutSignal();
++		// thread_resume of such a thread: clear the mark, send the held reply (if any)
++		void releaseHeld();
+ 		void terminate();
+ 
+ 		void setThreadHandles(uintptr_t pthreadHandle, uintptr_t dispatchQueueAddress);
+diff -ru a/src/server.cpp b/src/server.cpp
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -258,6 +258,9 @@
+ 	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
+ 		try {
+ 			auto sigThread = static_cast<DarlingServer::Thread*>(thread_context);
++			if (sigThread->suspendWithoutSignal()) {
++				return 1;
++			}
+ 			dsdiagRingEvent(5, sigThread->_tid, sigThread->_nstid, (uint64_t)signal);
+ 			sigThread->sendSignal(signal);
+ 			return 0;
+@@ -266,6 +269,10 @@
+ 		}
+ 	};
+ 
++	static void dtape_hook_thread_release_held(void* thread_context) {
++		static_cast<DarlingServer::Thread*>(thread_context)->releaseHeld();
++	};
++
+ 	static void dtape_hook_thread_context_dispose(void* thread_context) {
+ 		static_cast<DarlingServer::Thread*>(thread_context)->_dispose();
+ 	};
+@@ -462,6 +469,7 @@
+ 		.thread_lookup_eternal = dtape_hook_thread_lookup_eternal,
+ 		.thread_get_state = dtape_hook_thread_get_state,
+ 		.thread_send_signal = dtape_hook_thread_send_signal,
++		.thread_release_held = dtape_hook_thread_release_held,
+ 		.thread_context_dispose = dtape_hook_thread_context_dispose,
+ 		.thread_eternal_id = dtape_hook_thread_eternal_id,
+ 
+diff -ru a/src/thread.cpp b/src/thread.cpp
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -805,6 +805,39 @@
+ 	}
+ };
+ 
++bool DarlingServer::Thread::suspendWithoutSignal() {
++	std::unique_lock lock(_rwlock);
++	// server-side wait = the client is blocked on an active call and our microthread is parked inside it;
++	// anything else (user code, signal handler, S2C in progress, dying) needs the signal
++	if (_dead || _terminating || !_activeCall || !_suspended || _interruptedForSignal || _processingSignal || _deferReplyForS2C || _suspendedNoSignal) {
++		return false;
++	}
++	_suspendedNoSignal = true;
++	dsdiagRingEvent(10, _tid, _nstid, 0); // suspend without signal
++	return true;
++};
++
++void DarlingServer::Thread::releaseHeld() {
++	std::unique_lock lock(_rwlock);
++	if (!_suspendedNoSignal) {
++		return;
++	}
++	_suspendedNoSignal = false;
++	bool had = _heldReply.has_value();
++	if (had) {
++		auto reply = std::move(*_heldReply);
++		_heldReply = std::nullopt;
++		if (_interruptedForSignal && !_interrupts.top().savedReply) {
++			_interrupts.top().savedReply = std::move(reply);
++		} else if (_deferReplyForS2C) {
++			_deferredReply = std::move(reply);
++		} else if (!_dead) {
++			Server::sharedInstance().sendMessage(std::move(reply));
++		}
++	}
++	dsdiagRingEvent(12, _tid, _nstid, had ? 1 : 0); // released (n 1 = a held reply was sent)
++};
++
+ void DarlingServer::Thread::resume() {
+ 	++dsdiag_resume_calls;
+ 	{
+@@ -1610,7 +1643,11 @@
+ 		_deactivateCallLocked(expectedCall);
+ 	}
+ 
+-	if (_interruptedForSignal) {
++	if (_suspendedNoSignal) {
++		// the thread is user-suspended (suspend_count > 0, no signal was sent): it must not return to user code before resume
++		_heldReply = std::move(reply);
++		dsdiagRingEvent(11, _tid, _nstid, 1); // reply held until resume
++	} else if (_interruptedForSignal) {
+ 		if (_interrupts.top().savedReply) {
+ 			throw std::runtime_error("New reply would overwrite existing saved reply");
+ 		}
+@@ -1841,7 +1878,8 @@
+ // Sigexc/RPC events for the diag ring (DSERVER_DIAG_RING); ret is 0 for these kinds.
+ // 3 = saved reply re-sent at interrupt_exit, 4 = client-pushed reply saved (n 1 = pending, 0 = normal),
+ // 5 = signal sent via duct-tape (n = signal), 8 = call received (n = call number),
+-// 9 = reply put in the outbox (tid -1, n = reply number).
++// 9 = reply put in the outbox (tid -1, n = reply number), 10 = thread_suspend without signal (target in a server wait),
++// 11 = reply held until resume, 12 = released at resume (n 1 = a held reply was sent).
+ // Per-thread last-event table, never overwritten by ring wrap-around: a page-aligned region after the ring in
+ // the same file; header u64 [3] = its offset, u64 [4] = its slot count. Slot (64 bytes), keyed by tid (linear probe):
+ // {i32 tid, i32 nstid, u64 last ns, u32 last kind, u32 pad, u64 last n, u64 last call number, u64 last call ns,
+@@ -1850,6 +1888,7 @@
+ 	std::atomic<int32_t> tid; int32_t nstid; uint64_t ns; uint32_t kind; uint32_t pad; uint64_t n;
+ 	uint64_t callNum; uint64_t callNs; uint64_t sigNs; uint64_t events;
+ 	// 64..127: suspend handshake — signal held (6) / released (7) last time and count, last thread_suspended call (n 23)
++	// pad2: no-signal suspend (10) count in bits 0..20, held reply (11) in 21..41, released (12) in 42..62
+ 	uint64_t heldNs; uint64_t heldCount; uint64_t releasedNs; uint64_t releasedCount; uint64_t suspendedNs; uint64_t suspendedCount; uint64_t sigCount; uint64_t pad2;
+ };
+ static_assert(sizeof(DsdiagLastSlot) == 128, "slot size");
+@@ -1892,6 +1931,9 @@
+ 		if (kind == 5) { sl.sigNs = ns; sl.sigCount++; }
+ 		if (kind == 6) { sl.heldNs = ns; sl.heldCount++; }
+ 		if (kind == 7) { sl.releasedNs = ns; sl.releasedCount++; }
++		if (kind == 10) { sl.pad2 += 1ull; }
++		if (kind == 11) { sl.pad2 += 1ull << 21; }
++		if (kind == 12) { sl.pad2 += 1ull << 42; }
+ 		if (kind == 8 && n == 23) { sl.suspendedNs = ns; sl.suspendedCount++; }
+ 		return;
+ 	}

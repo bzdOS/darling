@@ -11,7 +11,8 @@ import struct
 import sys
 
 KINDS = {0: "resume-scheduled", 1: "resume-EARLY", 3: "saved-reply-resent", 4: "reply-saved",
-         5: "signal", 8: "call", 9: "reply-outbox"}
+         5: "signal", 8: "call", 9: "reply-outbox",
+         10: "suspend-nosignal", 11: "reply-held", 12: "held-released"}
 
 counts = sys.argv[1] == "--counts"
 hang = sys.argv[1] == "--hang-class"
@@ -54,7 +55,7 @@ table = []
 if hang and toff and tslots and len(data) >= toff + tslots * tstride:
     for j in range(tslots):
         tid, nst, lns, lk, _p, ln, cn, cns, sns, ev = struct.unpack_from("<iiQIIQQQQQ", data, toff + j * tstride)
-        ext = struct.unpack_from("<7Q", data, toff + j * tstride + 64) if tstride >= 128 else None
+        ext = struct.unpack_from("<8Q", data, toff + j * tstride + 64) if tstride >= 128 else None
         if tid:
             table.append((tid, nst, lns, lk, ln, cn, cns, sns, ev, ext))
 if hang and toff:
@@ -70,13 +71,21 @@ if table:
                   % (tid, saved.get(tid, "no"), KINDS.get(lk, "kind%d" % lk), ln, (now - lns) / 1e9, cn,
                      (now - cns) / 1e9 if cns else -1, "%.3fs" % ((now - sns) / 1e9) if sns else "never", ev))
         if ext:
-            hns, hc, rns, rc, sus, susc, sigc = ext
-            out.write("HANG-CLASS-SUSP tid=%d sig5=%d last_sig5_age=%s held6=%d last_held6_age=%s released7=%d last_released7_age=%s suspended_call23=%d last_call23_age=%s\n"
-                      % (tid, sigc, _age(sns), hc, _age(hns), rc, _age(rns), susc, _age(sus)))
+            hns, hc, rns, rc, sus, susc, sigc, pk = ext
+            nosig, heldr, rel = pk & 0x1FFFFF, (pk >> 21) & 0x1FFFFF, (pk >> 42) & 0x1FFFFF
+            out.write("HANG-CLASS-SUSP tid=%d sig5=%d last_sig5_age=%s held6=%d last_held6_age=%s released7=%d last_released7_age=%s suspended_call23=%d last_call23_age=%s nosig10=%d reply_held11=%d released12=%d\n"
+                      % (tid, sigc, _age(sns), hc, _age(hns), rc, _age(rns), susc, _age(sus), nosig, heldr, rel))
+    tot = [0, 0, 0, 0, 0, 0]
+    for r in table:
+        if r[9]:
+            e = r[9]
+            tot[0] += e[6]; tot[1] += e[5]; tot[2] += e[7] & 0x1FFFFF; tot[3] += (e[7] >> 21) & 0x1FFFFF; tot[4] += (e[7] >> 42) & 0x1FFFFF; tot[5] += e[1]
+    out.write("HANG-CLASS-SUSP-TOTAL signalled5=%d suspended_call23=%d nosignal10=%d reply_held11=%d released12=%d held6=%d confirmed=%d\n"
+              % (tot[0], tot[1], tot[2], tot[3], tot[4], tot[5], tot[1] + tot[2]))
 elif hang:
     if not last:
         out.write("HANG-CLASS none (ring has no sigexc/RPC events, recorded=%d)\n" % nxt)
     for tid in sorted(last):
         out.write("HANG-CLASS tid=%d saved_reply=%s last=%s\n" % (tid, saved.get(tid, "no"), last[tid]))
 if counts:
-    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9))))
+    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))))
