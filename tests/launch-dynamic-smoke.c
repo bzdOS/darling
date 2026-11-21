@@ -110,10 +110,27 @@ static void stage_tree(const char *od, const char *rel) {
      *
      * A flag kept on a theory outlives the theory, and outliving it is the
      * dangerous part: it reads as load-bearing to the next reader. */
+    /* DARLING_KEEP_LOCAL=1 with the tree already staged (STAGE-ONCE): reuse it.
+     * Re-running pax here re-read the whole tree over virtiofs on every probe
+     * and took the fork probe past its 60 s WAIT. */
+    {
+        struct stat kst;
+        char mark[1100];
+        snprintf(mark, sizeof(mark), "%s/.stage-tree-done", dst);
+        /* The link pass creates dst before this runs, so a directory alone
+         * proves nothing; only the marker written after a finished copy does. */
+        if (getenv("DARLING_KEEP_LOCAL") != NULL && getenv("DARLING_SMOKE_REFRESH") == NULL && stat(mark, &kst) == 0) {
+            printf("kept locally: %s\n", dst);
+            return;
+        }
+    }
     snprintf(cmd, sizeof(cmd),
              "mkdir -p '%s' && cd '%s' && find . -type f | pax -rw '%s'",
              dst, src, dst);
-    (void)system(cmd);
+    if (system(cmd) == 0) {
+        snprintf(cmd, sizeof(cmd), "touch %s/.stage-tree-done", dst);
+        (void)system(cmd);
+    }
     printf("cached locally: %s\n", dst);
 }
 
