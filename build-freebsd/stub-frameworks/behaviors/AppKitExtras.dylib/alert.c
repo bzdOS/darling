@@ -4,15 +4,9 @@
  * call, the message text, the informative text, the button titles and the caller (image + offset) as
  *   ALERT-PROBE runModal message="..." informative="..." buttons=[...] caller=<image>+0x<off>
  * and then calls the original implementation. Replaced once AppKit is mapped (add-image retry as in screen.c). */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
+#include "../objc-proto.h"
 typedef struct { const char *dli_fname; void *dli_fbase; const char *dli_sname; void *dli_saddr; } Dl_info_x;
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
 extern IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
-extern id objc_msgSend(id, SEL, ...);
 extern int dladdr(const void *, Dl_info_x *);
 extern int snprintf(char *, unsigned long, const char *, ...);
 extern long write(int, const void *, unsigned long);
@@ -20,7 +14,6 @@ extern char *strstr(const char *a, const char *b);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
-#define S(x) sel_registerName(x)
 static IMP orig_run_modal;
 
 static const char *utf8(id s)

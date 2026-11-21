@@ -7,13 +7,9 @@
  * neither class. They are registered at load time as plain NSObject subclasses whose
  * methods do nothing (no services are offered), so the check passes and the swizzled
  * methods are never asked for anything. Classes that already exist are left alone. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-extern Class objc_getClass(const char *name);
+#include "../objc-proto.h"
 extern Class objc_allocateClassPair(Class super, const char *name, unsigned long extra);
 extern void objc_registerClassPair(Class cls);
-extern SEL sel_registerName(const char *name);
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 
 static void *ret_nil(void *self, SEL cmd) { (void)self; (void)cmd; return 0; }

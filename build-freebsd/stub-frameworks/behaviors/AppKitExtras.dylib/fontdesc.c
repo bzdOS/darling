@@ -7,19 +7,12 @@
  * selector already. The value is the NSCTFontSymbolicTrait number inside the NSCTFontTraitsAttribute dictionary of the descriptor
  * (the key strings of kCTFontTraitsAttribute / kCTFontSymbolicTrait in coretext.c), 0 when either is missing. */
 /* START_APPKIT_FONTDESC_FILL */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
+#include "../objc-proto.h"
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern unsigned char class_respondsToSelector(Class cls, SEL sel);
-extern id objc_msgSend(id, SEL, ...);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
-#define MSG(ret, ...) ((ret (*)(__VA_ARGS__))objc_msgSend)
 
 static id cfstr(const char *s)
 {

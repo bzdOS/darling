@@ -6,14 +6,8 @@
  *   backingScaleFactor 1.0, maximumFramesPerSecond 60, minimumRefreshInterval 1/60,
  *   maximumExtendedDynamicRangeColorComponentValue 1.0, maximumPotentialExtendedDynamicRangeColorComponentValue 1.0
  *   (no HiDPI, no EDR: SDR display at 60 Hz), colorSpace (sRGB), localizedName ("Built-in Display"). */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
+#include "../objc-proto.h"
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
-extern id objc_msgSend(id, SEL, ...);
 extern unsigned char class_respondsToSelector(Class cls, SEL sel);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));

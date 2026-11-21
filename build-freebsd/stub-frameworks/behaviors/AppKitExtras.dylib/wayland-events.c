@@ -13,19 +13,13 @@
  * already due in NSModalPanelRunLoopMode is lifted to 50 ms. Reads events with wl_display_dispatch once poll reports the socket readable.
  * The same change is kept as a source patch (build-freebsd/patches/cocotron-wayland-event-wait.patch).
  * If the wl_* functions cannot be resolved the original method runs unchanged. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
+#include "../objc-proto.h"
 typedef void *Ivar;
 typedef void *Method;
 struct pollfd { int fd; short events; short revents; };
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
 extern IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
 extern Ivar class_getInstanceVariable(Class cls, const char *name);
 extern long ivar_getOffset(Ivar iv);
-extern id objc_msgSend(id, SEL, ...);
 extern void *dlopen(const char *path, int mode);
 extern void *dlsym(void *handle, const char *name);
 extern unsigned int _dyld_image_count(void);
@@ -38,7 +32,6 @@ extern long write(int, const void *, unsigned long);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
-#define S(x) sel_registerName(x)
 #define RTLD_NOLOAD 0x10
 #define RTLD_LAZY 1
 #define POLLIN 1

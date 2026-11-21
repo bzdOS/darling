@@ -6,11 +6,7 @@
  * and the uncaught exception ends the process. NO (VoiceOver is not running) is the
  * right answer. The method is added to the real class once it is loaded: AppKit may
  * be mapped after this image, so the add-image hook retries until the class exists. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
+#include "../objc-proto.h"
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));

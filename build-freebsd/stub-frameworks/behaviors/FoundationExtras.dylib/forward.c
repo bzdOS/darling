@@ -18,16 +18,12 @@
  * it got garbage before. The struct-return handler hands the caller's return buffer back (RAX = RDI).
  * It is installed from a constructor, after CoreFoundation's own initialiser (this image depends on it),
  * with objc_setForwardHandler. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *id;
+#include "../objc-proto.h"
 extern Class object_getClass(id obj);
 extern const char *class_getName(Class c);
 extern unsigned char class_isMetaClass(Class c);
 extern unsigned char class_respondsToSelector(Class c, SEL s);
 extern const char *sel_getName(SEL s);
-extern SEL sel_registerName(const char *n);
-extern id objc_msgSend(id, SEL, ...);
 extern void objc_setForwardHandler(void *fwd, void *fwd_stret);
 extern char *getenv(const char *);
 extern int snprintf(char *, unsigned long, const char *, ...);

@@ -15,25 +15,18 @@
  * -fontTypefacesForFamilyName:, so the first NSFontFamily build raised "only defined for abstract class". Once WaylandDisplay
  * exists (checked at every image load) both are installed on it (and on NSDisplay, see try_wayland): the family set comes from CTFontManagerCopyAvailableFontFamilyNames
  * (Helvetica when empty), one NSFontTypeface "Regular" per family. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
-extern Class objc_getClass(const char *name);
+#include "../objc-proto.h"
 extern Class object_getClass(id obj);
-extern SEL sel_registerName(const char *name);
 extern IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern id class_createInstance(Class cls, unsigned long extra);
 extern unsigned long class_getInstanceSize(Class cls);
-extern id objc_msgSend(id, SEL, ...);
 extern void *dlsym(void *, const char *);
 extern const void *CFRetain(const void *);
 extern unsigned char CFStringGetCString(const void *, char *, long, unsigned);
 extern const void *CFStringCreateWithCString(const void *, const char *, unsigned);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
-#define S(x) sel_registerName(x)
 #define RTLD_DEFAULT ((void *)-2)
 #define UTF8 0x08000100
 

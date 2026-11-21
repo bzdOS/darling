@@ -17,18 +17,11 @@
  * but the default byte order of the context writes the word in host order, so the bytes landed as A,B,G,R
  * (colour 51,102,153,255 read back 255,153,102,51). 8 bit, 32 bit pixel, integer reps get kCGBitmapByteOrder32Big
  * added to the info (alpha last or first alike), which is the memory order getPixel and bitmapData promise. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
+#include "../objc-proto.h"
 extern IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
-extern id objc_msgSend(id, SEL, ...);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
-#define S(x) sel_registerName(x)
 #define SEND_L(o, s) (((long (*)(id, SEL))objc_msgSend)((o), S(s)))
 
 #define NS_ALPHA_FIRST 1UL

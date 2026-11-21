@@ -7,22 +7,15 @@
  *   +setValue:forKey:, +valueForKey:, +disableActions, +animationDuration (0.25 when unset), +setAnimationDuration:
  * and +setDisableActions: replaced, so that the flag is kept. One process wide dictionary, no transaction stack:
  * begin/commit do not scope the values. A nil value removes the key. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
-extern Class objc_getClass(const char *name);
+#include "../objc-proto.h"
 extern Class object_getClass(id obj);
-extern SEL sel_registerName(const char *name);
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern IMP class_replaceMethod(Class cls, SEL name, IMP imp, const char *types);
-extern id objc_msgSend(id, SEL, ...);
 extern void *dlsym(void *handle, const char *symbol);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
 #define RTLD_DEFAULT ((void *)-2)
-#define MSG(ret, ...) ((ret (*)(__VA_ARGS__))objc_msgSend)
 
 static volatile int lock;
 static id store;

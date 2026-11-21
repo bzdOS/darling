@@ -8,11 +8,7 @@
  * unreachable-default trap. Nominal (0) is the right answer for a machine without a
  * thermal sensor. The method is added at load time to the real class, so
  * respondsToSelector: agrees with it. */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-extern Class objc_getClass(const char *name);
-extern SEL sel_registerName(const char *name);
+#include "../objc-proto.h"
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 
 static long thermal_state(void *self, SEL cmd)

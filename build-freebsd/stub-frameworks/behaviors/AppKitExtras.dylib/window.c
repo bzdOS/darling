@@ -14,25 +14,18 @@
  * x86_64 ABI: an NSPoint (two doubles) is returned in xmm0/xmm1, hence a struct of two doubles as the C return type; an NSRect
  * (four doubles) is returned in memory, hence objc_msgSend_stret. */
 /* START_APPKIT_WINDOW_FILL */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
+#include "../objc-proto.h"
 struct ak_point { double x, y; };
 struct ak_rect { double x, y, w, h; };
-extern Class objc_getClass(const char *name);
 extern Class object_getClass(id obj);
-extern SEL sel_registerName(const char *name);
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern unsigned char class_respondsToSelector(Class cls, SEL sel);
-extern id objc_msgSend(id, SEL, ...);
 extern void objc_msgSend_stret(void *, id, SEL, ...);
 extern void objc_setAssociatedObject(id object, const void *key, id value, unsigned long policy);
 extern id objc_getAssociatedObject(id object, const void *key);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
-#define MSG(ret, ...) ((ret (*)(__VA_ARGS__))objc_msgSend)
 #define ASSOC_RETAIN 01401
 
 static char key_transparent, key_animation, key_accessories, key_minheight, key_hidden, key_layout;

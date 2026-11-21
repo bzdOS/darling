@@ -17,22 +17,15 @@
  * -setGeometryFlipped: (not in cocotron either).
  * An existing method of the same name in the image is left alone (class_addMethod does not replace). */
 /* START_CALAYER_FILL */
-typedef void *Class;
-typedef void *SEL;
-typedef void *IMP;
-typedef void *id;
+#include "../objc-proto.h"
 struct qc_point { double x, y; };
-extern Class objc_getClass(const char *name);
 extern Class object_getClass(id obj);
-extern SEL sel_registerName(const char *name);
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
-extern id objc_msgSend(id, SEL, ...);
 extern void objc_setAssociatedObject(id object, const void *key, id value, unsigned long policy);
 extern id objc_getAssociatedObject(id object, const void *key);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
-#define MSG(ret, ...) ((ret (*)(__VA_ARGS__))objc_msgSend)
 #define ASSOC_RETAIN 01401
 #define ASSOC_ASSIGN 0
 
