@@ -2,7 +2,9 @@
 # sig-reentry-probe-run.sh - run tests/sig-reentry-probe-macho until N valid runs, under launch-dynamic.
 # usage: sig-reentry-probe-run.sh PREFIX N [TIMEOUT] [SUSPENDS] [SPAWNS] [IDLE_WORKER]  (TIMEOUT default: $PROBE_TIMEOUT or 240 s)
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR; PROBE_TRAP_LOG=1 turns the guest trap log on.
-# PROBE_EXTRA_ENV="A=1 B=2" adds env to the guest run.
+# PROBE_EXTRA_ENV="A=1 B=2" adds env to the guest run. PROBE_BINARY=<tests/ name> runs another probe binary.
+# PROBE_SERVER_LOG=<level> (or CHROME_SR_SERVER_LOG) starts darlingserver with DSERVER_LOG_LEVEL=<level> and saves
+# its log as PREFIX-<i>-dserver.txt (last 100 MB), to catch the server dropping its socket (-111).
 # Logs: $DARLING_BUILD_DIR/PREFIX-<i>.log, never overwritten. A run without GUEST-EXEC (never reached the
 # guest, e.g. slow staging) is INVALID and not counted. One line per run, then a SUMMARY line.
 # exclusive run lock: one probe/Chrome run at a time; nested calls (DARLING_LOCK_HELD) do not re-lock
@@ -15,6 +17,7 @@ if [ -z "$DARLING_LOCK_HELD" ]; then
 fi
 P=${1:?}; N=${2:?}; T=${3:-${PROBE_TIMEOUT:-240}}; SU=${4:-3000}; SP=${5:-300}; IW=${6:-0}
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
+PB=${PROBE_BINARY:-sig-reentry-probe-macho}; SL=${PROBE_SERVER_LOG:-$CHROME_SR_SERVER_LOG}
 PROBE_ENV=PROBE_RUN=1; [ -n "$PROBE_TRAP_LOG" ] && PROBE_ENV=DARLING_TRAP_LOG=1
 KT=; [ -n "$PROBE_KTRACE" ] && KT="ktrace -i -t cs -f $DARLING_BUILD_DIR/$P-ktr.out"
 . "$DARLING_SRC_DIR/build-freebsd/dserver-prefix.sh"
@@ -25,10 +28,11 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	dsp_new || exit 1
 	START=$(date +%s)
 	/usr/local/bin/sudo -n env DARLING_PREFIX="$DARLING_PREFIX" DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
-	  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" DARLING_TEST_BINARY=sig-reentry-probe-macho DARLING_KEEP_LOCAL=1 \
-	  DARLING_TEST_ARGS="$SU $SP $IW" $PROBE_ENV $PROBE_EXTRA_ENV \
+	  DARLING_BUILD_DIR="$DARLING_BUILD_DIR" DARLING_TEST_BINARY="$PB" DARLING_KEEP_LOCAL=1 \
+	  DARLING_TEST_ARGS="$SU $SP $IW" $PROBE_ENV ${SL:+DSERVER_LOG_LEVEL=$SL} $PROBE_EXTRA_ENV \
 	  $KT timeout --foreground -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" > "$LOG" 2>&1
 	rc=$?
+	[ -n "$SL" ] && /usr/local/bin/sudo -n tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$i-dserver.txt" 2>/dev/null
 	dsp_reap
 	d=$(( $(date +%s) - START ))
 	if ! grep -aq 'GUEST-EXEC' "$LOG"; then
