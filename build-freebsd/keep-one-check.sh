@@ -28,14 +28,20 @@ ROOT="${KEEPONE_ROOT:-}"; [ -z "$ROOT" ] && [ -n "${DARLING_BUILD_DIR:-}" ] && R
 [ -n "$ROOT" ] || { echo "KEEP-ONE verdict=fail no-root"; exit 2; }
 B="$ROOT/build"; BK="$ROOT/backup"; MAXG="${KEEPONE_MAX_GB:-14}"
 FOREIGN="${KEEPONE_FOREIGN:-alt2-r}"; AGE="${KEEPONE_MIN_AGE_MIN:-120}"
-MODE=check; [ "$1" = "--list" ] && MODE=list
-[ "$1" = "--clean-sockets" ] && MODE=clean
-[ "$1" = "--apply" ] && MODE=apply
+# flags combine in any order: --clean-sockets runs first, then --list / --apply / the check
+# (only $1 used to be read, so "--apply --clean-sockets" silently skipped the socket cleanup)
+MODE=check; CLEAN=0
+for _a in "$@"; do
+	case "$_a" in
+	--list) MODE=list;; --apply) MODE=apply;; --clean-sockets) CLEAN=1;;
+	*) echo "KEEP-ONE verdict=fail unknown-arg $_a"; exit 2;;
+	esac
+done
 SKEEP="${KEEPONE_SUSPEND_KEEP:-3}"
 # --apply runs itself once under the run lock (lockf -t 0 as the series scripts do); lockf rc 73/75 = lock not available
 if [ $MODE = apply ] && [ -z "$KEEPONE_LOCKED" ]; then
 	[ -d "$B" ] || { echo "KEEP-ONE apply skipped: no $B"; exit 3; }
-	KEEPONE_LOCKED=1 lockf -t 0 "$B/.darling-run.lock" sh "$0" --apply; _rc=$?
+	KEEPONE_LOCKED=1 lockf -t 0 "$B/.darling-run.lock" sh "$0" "$@"; _rc=$?
 	case $_rc in 73|75) echo "KEEP-ONE apply skipped: $B/.darling-run.lock is held (a series is running)"; exit 3;; esac
 	exit $_rc
 fi
@@ -51,13 +57,14 @@ stale_sock() { # $1 = path
 	_h=$(sudo -n fstat "$1" 2>/dev/null) || return 1
 	[ -z "$(printf '%s\n' "$_h" | sed 1d)" ]
 }
-if [ $MODE = clean ]; then
+if [ $CLEAN = 1 ]; then
 	rm_n=0; live=0
 	for _f in /tmp/darling-mldr-[0-9]*-[0-9]*; do
 		[ -S "$_f" ] || continue
 		if stale_sock "$_f"; then { rm -f "$_f" 2>/dev/null || sudo -n rm -f "$_f" 2>/dev/null; } && [ ! -e "$_f" ] && rm_n=$((rm_n+1)); else live=$((live+1)); fi
 	done
-	echo "KEEP-ONE sockets removed=$rm_n kept_live=$live"; exit 0
+	echo "KEEP-ONE sockets removed=$rm_n kept_live=$live"
+	[ $# -eq 1 ] && exit 0
 fi
 ns=0; for _f in /tmp/darling-mldr-[0-9]*-[0-9]*; do stale_sock "$_f" && ns=$((ns+1)); done
 
