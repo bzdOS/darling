@@ -1,0 +1,40 @@
+--- a/darling/src/libsystem_kernel/emulation/include/linux_premigration/resources/dserver-rpc-defs.h
++++ b/darling/src/libsystem_kernel/emulation/include/linux_premigration/resources/dserver-rpc-defs.h
+@@ -76,6 +76,9 @@
+ 
+ #define dserver_rpc_hooks_memcpy memcpy
+ 
++// The single-shot sender below is renamed to dserver_rpc_hooks_send_message_once; the retrying
++// dserver_rpc_hooks_send_message is defined at the end of this header.
++#define dserver_rpc_hooks_send_message dserver_rpc_hooks_send_message_once
+ static long int dserver_rpc_hooks_send_message(int socket, const dserver_rpc_hooks_msghdr_t* message) {
+ #ifdef __NR_socketcall
+ 	return LINUX_SYSCALL(__NR_socketcall, LINUX_SYS_SENDMSG, ((long[6]) { socket, message, 0 }));
+@@ -381,3 +384,27 @@
+ 
+ extern void __dserver_rpc_hooks_push_reply(int socket, const dserver_rpc_hooks_msghdr_t* reply, size_t size);
+ #define dserver_rpc_hooks_push_reply __dserver_rpc_hooks_push_reply
++
++// A full server receive queue makes sendmsg fail with ENOBUFS (or EAGAIN); every caller turns that
++// into an abort. Retry with a bounded backoff: a few sched_yield()s, then poll() sleeps of 1, 2, 4, 8
++// and then 10 ms, about 2 s in total, after which the error is returned as before. Any other error
++// (ECONNREFUSED included) is returned at once.
++#undef dserver_rpc_hooks_send_message
++__attribute__((unused)) static long int dserver_rpc_hooks_send_message(int socket, const dserver_rpc_hooks_msghdr_t* message) {
++	long int ret = dserver_rpc_hooks_send_message_once(socket, message);
++	int waited_ms = 0;
++	int step = 0;
++	while ((ret == -LINUX_ENOBUFS || ret == -LINUX_EAGAIN) && waited_ms < 2000) {
++		if (step < 4) {
++			LINUX_SYSCALL(__NR_sched_yield);
++		} else {
++			int ms = 1 << (step - 4);
++			if (ms > 10) ms = 10;
++			LINUX_SYSCALL(__NR_poll, 0, 0, ms);
++			waited_ms += ms;
++		}
++		step++;
++		ret = dserver_rpc_hooks_send_message_once(socket, message);
++	}
++	return ret;
++}

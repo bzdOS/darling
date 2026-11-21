@@ -18,6 +18,9 @@ KEEPONE_ROOT = "/opt/darling"
 DARLING_DISK_MAX = 85
 # sig-reentry probe timeout (s), preflight and manual runs (sig-reentry-probe-run.sh): live runs take up to ~120 s
 PROBE_TIMEOUT = 240
+# darlingserver socket receive buffer (bytes, SO_RCVBUF): bursts of calls from many guest threads overflow
+# the 16 KB default and the clients' sendmsg fails with ENOBUFS (-105)
+DSERVER_SOCKET_RCVBUF = 1048576
 
 [keepone]
 # top-level build/ file globs that are never candidates

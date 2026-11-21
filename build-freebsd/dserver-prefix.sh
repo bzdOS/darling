@@ -4,6 +4,10 @@
 #   dsp_new   creates DARLING_PREFIX=/tmp/darling-run.XXXXXX (exported; pass it on to launch-dynamic)
 #   dsp_reap  kills the darlingserver whose argv holds exactly that prefix, waits for it to die,
 #             then removes only that prefix (never while the server is alive). Also runs on EXIT/INT/TERM.
+# DSERVER_SOCKET_RCVBUF: from the env, else from darling.env ([env] in darling.toml); the run scripts pass it to the server.
+if [ -z "$DSERVER_SOCKET_RCVBUF" ] && [ -f "${DARLING_ENV_FILE:-$DARLING_BUILD_DIR/darling.env}" ]; then
+	DSERVER_SOCKET_RCVBUF=$(sed -n 's/^DSERVER_SOCKET_RCVBUF=//p' "${DARLING_ENV_FILE:-$DARLING_BUILD_DIR/darling.env}")
+fi
 dsp_reap() {
 	[ -n "$DARLING_PREFIX" ] || return 0
 	_p=$DARLING_PREFIX

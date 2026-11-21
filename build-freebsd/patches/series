@@ -42,3 +42,5 @@ compiler-rt compiler-rt-builtins-atomic.patch
 xnu xnu-xattr-enoattr-setxattr-vchroot.patch
 xnu xnu-posix-spawn-dup2-same-fd-cloexec.patch
 darlingserver darlingserver-lifetime-pipe.patch
+xnu xnu-dserver-rpc-send-retry-enobufs.patch
+darlingserver darlingserver-socket-rcvbuf.patch

@@ -1,0 +1,34 @@
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -20,6 +20,7 @@
+ #include <cstdint>
+ #include <darlingserver/server.hpp>
+ #include <sys/socket.h>
++#include <climits>
+ #include <stdexcept>
+ #include <errno.h>
+ #include <cstring>
+@@ -527,6 +528,23 @@
+ 	if (setsockopt(_listenerSocket, SOL_SOCKET, SO_PASSCRED, &passCred, sizeof(passCred)) < 0) {
+ #endif
+ 		throw std::system_error(errno, std::generic_category(), "Failed to set SO_PASSCRED on socket");
++	}
++
++	/*
++	 * Every client thread sends its calls to this one datagram socket. Under a burst of calls from many
++	 * threads the default receive buffer fills up and the clients' sendmsg fails with ENOBUFS.
++	 * DSERVER_SOCKET_RCVBUF (bytes; darling.toml [env]) enlarges it. Unset or invalid: system default.
++	 */
++	if (const char* rcvbufEnv = getenv("DSERVER_SOCKET_RCVBUF")) {
++		char* end = nullptr;
++		long rcvbuf = strtol(rcvbufEnv, &end, 10);
++		if (end != rcvbufEnv && *end == '\0' && rcvbuf > 0 && rcvbuf <= INT_MAX) {
++			int rcvbufInt = (int)rcvbuf;
++			if (setsockopt(_listenerSocket, SOL_SOCKET, SO_RCVBUF, &rcvbufInt, sizeof(rcvbufInt)) < 0) {
++				static const auto rcvLog = DarlingServer::Log("server");
++				rcvLog.warning() << "Failed to set SO_RCVBUF=" << rcvbufInt << " on socket: " << strerror(errno) << rcvLog.endLog;
++			}
++		}
+ 	}
+ 
+ 	struct sockaddr_un addr;
