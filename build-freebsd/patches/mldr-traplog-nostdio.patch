@@ -1,0 +1,107 @@
+diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
+--- a/src/startup/mldr/freebsd_syscall_trap.c
++++ b/src/startup/mldr/freebsd_syscall_trap.c
+@@ -564,6 +564,22 @@
+  * sideEffects: none.
+  */
+ 
++/* Lock-free trap-log lines. fprintf(stderr, ...) from the trap handlers takes the FILE lock of stderr; a thread suspended by the
++ * suspend signal while it holds that lock (the signal runs the guest handler nested inside the trap, which parks in thread_suspended)
++ * blocks every other thread that logs, among them the suspender that has to send thread_resume: a deadlock (host state of a hung run:
++ * suspender and watchdog in do_lock_umutex, worker in recvmsg). These lines are built with the converters of trap_log.h into a stack
++ * buffer and emitted with one write(2). */
++struct mldr_tlb { char b[320]; int n; };
++static void mldr_tlb_s(struct mldr_tlb *t, const char *s) { while (*s && t->n < 300) t->b[t->n++] = *s++; }
++static void mldr_tlb_d(struct mldr_tlb *t, long v) {
++    char tmp[24];
++    char *e = tmp + sizeof(tmp);
++    char *lo = mldr_fmt_dec(e, v);
++    while (lo < e && t->n < 300) t->b[t->n++] = *lo++;
++}
++static void mldr_tlb_mem(struct mldr_tlb *t, const char *m, int len) { for (int i = 0; i < len && t->n < 300; i++) t->b[t->n++] = m[i]; }
++static void mldr_tlb_emit(struct mldr_tlb *t) { t->b[t->n++] = '\n'; (void)!write(2, t->b, (size_t)t->n); }
++
+ /* sockaddr bridge for bind(2) and connect(2). The guest hands over a Linux
+  * layout address (2-byte family, then the payload); FreeBSD wants a 1-byte
+  * length, a 1-byte family and the same payload. Passed through unchanged,
+@@ -2350,18 +2366,29 @@
+             /* RPC diagnostic: the 16-byte header of a darlingserver call is
+              * {callnum, pid, tid, arch}; print which call this is. */
+             const int *hd = (const int *)mh->msg_iov[0].iov_base;
+-            fprintf(stderr, "[traplog] sendmsg fd=%ld callnum=%d pid=%d tid=%d len=%zu\n",
+-                    (long)a1, hd[0], hd[1], hd[2], (size_t)mh->msg_iov[0].iov_len);
++            {
++                struct mldr_tlb t; t.n = 0;
++                mldr_tlb_s(&t, "[traplog] sendmsg fd="); mldr_tlb_d(&t, (long)a1);
++                mldr_tlb_s(&t, " callnum="); mldr_tlb_d(&t, hd[0]);
++                mldr_tlb_s(&t, " pid="); mldr_tlb_d(&t, hd[1]);
++                mldr_tlb_s(&t, " tid="); mldr_tlb_d(&t, hd[2]);
++                mldr_tlb_s(&t, " len="); mldr_tlb_d(&t, (long)mh->msg_iov[0].iov_len);
++                mldr_tlb_emit(&t);
++            }
+             if (hd[0] == 4 && mh->msg_iov[0].iov_len >= 32) {
+                 /* kprintf: show the text (step 57) */
+                 const uint64_t *kb = (const uint64_t *)((const char *)mh->msg_iov[0].iov_base + 16);
+                 uint64_t kw = 0;
+                 if (mldr_dump_read_guarded((uintptr_t)kb[0], &kw)) {
+                     int kl = kb[1] > 100 ? 100 : (int)kb[1];
+-                    fprintf(stderr, "[traplog] kprintf-text tid=%d \"%.*s\"\n", hd[2], kl, (const char *)kb[0]);
++                    struct mldr_tlb t; t.n = 0;
++                    mldr_tlb_s(&t, "[traplog] kprintf-text tid="); mldr_tlb_d(&t, hd[2]);
++                    mldr_tlb_s(&t, " \"");
++                    mldr_tlb_mem(&t, (const char *)kb[0], kl);
++                    mldr_tlb_s(&t, "\"");
++                    mldr_tlb_emit(&t);
+                 }
+             }
+-            fflush(stderr);
+         }
+         mldr_cmsg_convert(mh->msg_control, (size_t)mh->msg_controllen, 1);
+         long r = freebsd_raw_syscall(SYS_sendmsg, a1, a2, a3, 0, 0, 0);
+@@ -2408,19 +2435,26 @@
+             mh->msg_controllen = sizeof(big_ctl);
+         }
+         if (mldr_trap_log_enabled) {
+-            fprintf(stderr, "[traplog] recvmsg-enter fd=%ld\n", (long)a1);
+-            fflush(stderr);
++            struct mldr_tlb t; t.n = 0;
++            mldr_tlb_s(&t, "[traplog] recvmsg-enter fd="); mldr_tlb_d(&t, (long)a1);
++            mldr_tlb_emit(&t);
+         }
+         long r = freebsd_raw_syscall(SYS_recvmsg, a1, a2, a3, 0, 0, 0);
+         if (mldr_trap_log_enabled) {
+             if (r >= 8 && mh->msg_iov != NULL && mh->msg_iovlen >= 1) {
+                 const int *hd = (const int *)mh->msg_iov[0].iov_base;
+-                fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld replynum=%d code=%d\n",
+-                        (long)a1, r, hd[0], hd[1]);
++                struct mldr_tlb t; t.n = 0;
++                mldr_tlb_s(&t, "[traplog] recvmsg-leave fd="); mldr_tlb_d(&t, (long)a1);
++                mldr_tlb_s(&t, " ret="); mldr_tlb_d(&t, r);
++                mldr_tlb_s(&t, " replynum="); mldr_tlb_d(&t, hd[0]);
++                mldr_tlb_s(&t, " code="); mldr_tlb_d(&t, hd[1]);
++                mldr_tlb_emit(&t);
+             } else {
+-                fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld\n", (long)a1, r);
++                struct mldr_tlb t; t.n = 0;
++                mldr_tlb_s(&t, "[traplog] recvmsg-leave fd="); mldr_tlb_d(&t, (long)a1);
++                mldr_tlb_s(&t, " ret="); mldr_tlb_d(&t, r);
++                mldr_tlb_emit(&t);
+             }
+-            fflush(stderr);
+         }
+ 
+         if (orig_ctl != NULL && orig_ctllen > 0) {
+@@ -3523,7 +3557,12 @@
+                             && nn != SIGILL && nn != SIGSYS) {
+                             sigaddset(&nset, nn);
+                             if (mldr_trap_log_enabled && nn >= 65)
+-                                fprintf(stderr, "[traplog] sigprocmask SETMASK keeps native %d blocked\n", nn);
++                                {
++                                    struct mldr_tlb t; t.n = 0;
++                                    mldr_tlb_s(&t, "[traplog] sigprocmask SETMASK keeps native "); mldr_tlb_d(&t, nn);
++                                    mldr_tlb_s(&t, " blocked");
++                                    mldr_tlb_emit(&t);
++                                }
+                         }
+                     }
+                 }

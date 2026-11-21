@@ -1,0 +1,22 @@
+diff -ru a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
+--- a/src/startup/mldr/mldr.c
++++ b/src/startup/mldr/mldr.c
+@@ -950,7 +950,6 @@
+ 
+ MLDR_GUEST_ENTRY void __mldr_close_rpc_socket(int socket) {
+ 	close(socket);
+-	socket_bitmap_put(&socket_bitmap, socket);
+ #ifdef DARLING_FREEBSD
+ 	// Clean up the filesystem socket created in __mldr_create_rpc_socket.
+ 	//
+@@ -973,6 +972,10 @@
+ 		unlink(path);
+ 	}
+ #endif
++	// Release the fd number only AFTER the name is unlinked: __mldr_create_rpc_socket derives the path from the fd, so once the number
++	// is back in the bitmap a new thread can take it, unlink and bind the same name, and a late unlink here would delete the new
++	// thread's socket name (its replies would then go nowhere).
++	socket_bitmap_put(&socket_bitmap, socket);
+ };
+ 
+ MLDR_GUEST_ENTRY int __mldr_create_process_lifetime_pipe(int* fds) {

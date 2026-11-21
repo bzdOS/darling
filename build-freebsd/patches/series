@@ -60,3 +60,7 @@ darlingserver darlingserver-dtape-clock-monotonic-freebsd.patch
 ../.. mldr-sig65-unblock-count.patch
 # xnu-sigexc-setup2-no-shift64.patch (verified: guest libsystem_kernel relinked with relink-libsystem-kernel-dirty.sh, sigexc_setup2 is empty in the binary, sig-reentry 3/3 and busy info 1 pass): sigexc_setup2 built its unblock mask with 1ull << 64 (undefined; SIGHUP on x86); signals 65/66 are not expressible in the guest 8-byte mask, mldr unblocks them natively. Not rebuilt into the guest libsystem_kernel in the probe runs (compile-only change).
 xnu xnu-sigexc-setup2-no-shift64.patch
+# mldr-traplog-nostdio.patch: PROBE_TRAP_LOG with blocking stdio output (fprintf(stderr) under the FILE lock) deadlocks with thread_suspend: the suspended thread keeps the stderr lock, the suspender blocks on it and never sends thread_resume (host state of the hung runs: suspender and watchdog in do_lock_umutex, worker in recvmsg). The hot-path trap-log lines (sendmsg/recvmsg/kprintf-text/sigprocmask) are now written lock-free with write(2). Other fprintf(stderr) under DARLING_TRAP_LOG remain: do not use a trap-log run as an acceptance run of the suspend fix unless the run was made with this patch; acceptance runs: debug without PROBE_TRAP_LOG.
+../.. mldr-traplog-nostdio.patch
+# mldr-rpc-socket-close-order.patch: __mldr_close_rpc_socket released the fd number (socket_bitmap_put) before unlinking /tmp/darling-mldr-<pid>-<fd>; a new thread could take the number, bind the same name and then lose it to the late unlink.
+../.. mldr-rpc-socket-close-order.patch
