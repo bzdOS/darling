@@ -44,6 +44,11 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	# exit code always in the run log and in the per-rc tally of the SUMMARY line (rc0/rc3/rc124/rc137/other)
 	echo "PROBE-RC rc=$rc" >> "$LOG"
 	grep -aq '^PROBE-WARN: worker progress' "$LOG" && wnp=$((wnp+1))
+	# WORKER-STUCK: WORKER-SNAP shows the same stage and stage counters for >= 20 s while suspend rounds still advance
+	# (a suspend round line or "suspender done" after the stuck span began)
+	if awk '/^WORKER-SNAP/ { k=$2" "$4; t=$NF; sub("t=","",t); if (k!=pk) { pk=k; t0=t } else if (t-t0>=20) { st=t0 } }
+	        /^suspend round|^suspender done/ { t=$NF; sub("t=","",t); if (t>ts) ts=t }
+	        END { exit !(st && ts>st) }' "$LOG"; then echo "WORKER-STUCK" >> "$LOG"; wst=$((wst+1)); fi
 	case "$rc" in 0) r0=$((r0+1));; 3) r3=$((r3+1));; 124) r124=$((r124+1));; 137) r137=$((r137+1));; *) rx=$((rx+1));; esac
 	# server log only for a failed run (rc != 0): a passing run's log is never written, so it costs no disk.
 	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost)
@@ -89,4 +94,4 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	fi
 	i=$((i+1))
 done
-echo "SUMMARY $P: N=$N valid=$valid ok=$ok bad=$bad timeout_hits=$th stall_progress0=$st unclassified=${uc:-0} rc0=${r0:-0} rc3=${r3:-0} rc124=${r124:-0} rc137=${r137:-0} rc_other=${rx:-0} WORKER-NOPROGRESS=${wnp:-0} (all runs, INVALID included)"
+echo "SUMMARY $P: N=$N valid=$valid ok=$ok bad=$bad timeout_hits=$th stall_progress0=$st unclassified=${uc:-0} rc0=${r0:-0} rc3=${r3:-0} rc124=${r124:-0} rc137=${r137:-0} rc_other=${rx:-0} WORKER-NOPROGRESS=${wnp:-0} WORKER-STUCK=${wst:-0} (all runs, INVALID included)"
