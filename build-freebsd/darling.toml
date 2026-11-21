@@ -3,6 +3,7 @@
 #   darling.env        KEY=VALUE lines of [env] (read as data by stage-gate.sh and chrome-series.sh, never sourced)
 #   keepone.env        KEEPONE_FILES / KEEPONE_BACKUPS (read by keep-one-check.sh; env KEEPONE_ALLOW_* still adds to them)
 #   run-<NAME>.env     one per [run.series.<NAME>] (read by chrome-series.sh --series NAME)
+# and into the tree: stub_data_names.py from [stubs] (stub_data_rules.DATA_NAMES), committed with this file
 # After any edit here: python3 gen-from-schema.py ; stage-gate.sh runs gen-from-schema.py --check (SCHEMA-DRIFT pass|FAIL).
 schema_version = 1
 
@@ -47,3 +48,19 @@ runs = 1
 timeout = 120
 chrome_extra_args = "--lang=en-US"
 trap_log = 0
+
+# names stub_data_rules.DATA_NAMES treats as data (generated into stub_data_names.py, in the tree)
+[stubs]
+# _k<PREFIX><Upper>...: framework constants
+k_prefixes = ["CG", "CM", "CA", "CV", "CI", "MT", "OD", "Sec", "CF", "UT", "AX", "NS", "IO", "LS", "AV", "UN"]
+# whole names (Mach-O spelling, leading underscore)
+exact = [
+  "_vm_page_size", "_vm_page_mask", "_vm_page_shift", "___DefaultRuneLocale", "__DefaultRuneLocale",
+  "_environ", "_NXArgc", "_NXArgv", "___stack_chk_guard", "_opterr", "_optind", "_optarg", "_optopt",
+  "_optreset", "_sys_errlist", "_sys_nerr", "_sys_siglist", "_tzname", "_daylight", "_timezone",
+  "_stdin", "_stdout", "_stderr", "___stdinp", "___stdoutp", "___stderrp",
+  "_mach_task_self_", "_bootstrap_port", "_mach_host_self_", "_signgam",
+  "_NSApp", "_NSFoundationVersionNumber",
+]
+# regular expressions matched at the start of the name
+patterns = ["_OBJC_", "_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$"]

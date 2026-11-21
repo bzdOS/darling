@@ -3,7 +3,7 @@
   "title": "darling.toml",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "env", "keepone"],
+  "required": ["schema_version", "env", "keepone", "stubs"],
   "properties": {
     "schema_version": {"type": "integer", "enum": [1]},
     "env": {
@@ -25,6 +25,16 @@
       "properties": {
         "files": {"$ref": "#/$defs/globs"},
         "backups": {"$ref": "#/$defs/globs"}
+      }
+    },
+    "stubs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["k_prefixes", "exact", "patterns"],
+      "properties": {
+        "k_prefixes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Za-z]{1,3}$"}},
+        "exact": {"type": "array", "items": {"type": "string", "pattern": "^_[A-Za-z0-9_]+$"}},
+        "patterns": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
     "run": {
