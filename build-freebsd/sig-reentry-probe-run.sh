@@ -43,6 +43,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	END=$(date +%s); LM=$(stat -f %m "$LOG" 2>/dev/null || echo "$END")
 	# exit code always in the run log and in the per-rc tally of the SUMMARY line (rc0/rc3/rc124/rc137/other)
 	echo "PROBE-RC rc=$rc" >> "$LOG"
+	grep -aq '^PROBE-WARN: worker progress' "$LOG" && wnp=$((wnp+1))
 	case "$rc" in 0) r0=$((r0+1));; 3) r3=$((r3+1));; 124) r124=$((r124+1));; 137) r137=$((r137+1));; *) rx=$((rx+1));; esac
 	# server log only for a failed run (rc != 0): a passing run's log is never written, so it costs no disk.
 	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost)
@@ -70,8 +71,12 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		echo "$P-$i rc=$rc ${d}s/${T}s INVALID (no GUEST-EXEC)"
 	else
 		valid=$((valid+1))
-		if grep -aq '^PROBE-OK' "$LOG"; then v=OK; ok=$((ok+1)); else v=BAD; bad=$((bad+1)); fi
 		sig=$(grep -aE 'PROBE-HANG|FATAL signal|genuine SIGILL|SIGILL RE-RAISE|SIGILL-FAULT info|unfair|BAD (SEND|RECEIVE)|abort_with_payload|interrupt_enter failed' "$LOG" | head -1 | cut -c1-170)
+		# rc != 0 with no classification (no PROBE-HANG naming a role, no crash signature): UNCLASSIFIED, counted
+		# apart and in neither OK nor BAD, so a blind classifier cannot move the frequencies
+		if grep -aq '^PROBE-OK' "$LOG"; then v=OK; ok=$((ok+1))
+		elif [ "$rc" != 0 ] && [ -z "$sig" ]; then v=UNCLASSIFIED; uc=$((uc+1))
+		else v=BAD; bad=$((bad+1)); fi
 		ev=
 		if [ $v = BAD ] && { [ $rc = 124 ] || [ $rc = 137 ]; }; then
 			if [ $((END - LM)) -ge "$STALL" ]; then ev=" stall_progress0 quiet=$((END - LM))s"; st=$((st+1))
@@ -84,4 +89,4 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	fi
 	i=$((i+1))
 done
-echo "SUMMARY $P: N=$N valid=$valid ok=$ok bad=$bad timeout_hits=$th stall_progress0=$st rc0=${r0:-0} rc3=${r3:-0} rc124=${r124:-0} rc137=${r137:-0} rc_other=${rx:-0} (all runs, INVALID included)"
+echo "SUMMARY $P: N=$N valid=$valid ok=$ok bad=$bad timeout_hits=$th stall_progress0=$st unclassified=${uc:-0} rc0=${r0:-0} rc3=${r3:-0} rc124=${r124:-0} rc137=${r137:-0} rc_other=${rx:-0} WORKER-NOPROGRESS=${wnp:-0} (all runs, INVALID included)"
