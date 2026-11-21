@@ -701,7 +701,8 @@ int main(void) {
          * the exact condition that produced the Onyx2D run, and whoever reads
          * the log should be able to see which mode produced it without reading
          * this file. */
-        const char *trees = getenv("DARLING_STAGING_TREES");
+fprintf(stderr, "[launch] STAGE-STEP pre-trees t=%lds\n", (long)(time(NULL) - launch_t0));
+                const char *trees = getenv("DARLING_STAGING_TREES");
         if (trees == NULL || trees[0] == '\0') {
             printf("staging trees: NOT derived -- using the built-in default; "
                    "run the probe's preflight to derive them from the closure\n");
@@ -802,7 +803,8 @@ int main(void) {
          * staged for the data, not for the loader, so it stays out of the
          * derived list and must not be lost when that list replaces the
          * hardcoded one. */
-        char etc_src[512];
+fprintf(stderr, "[launch] STAGE-STEP trees t=%lds\n", (long)(time(NULL) - launch_t0));
+                char etc_src[512];
         snprintf(etc_src, sizeof(etc_src), "%s/private/etc", od);
         struct stat etc_st;
         if (stat(etc_src, &etc_st) == 0) {
@@ -821,28 +823,40 @@ int main(void) {
          * (a struct state on the stack) on every thread that formats a time. Staged for the data like etc above:
          * the zoneinfo tree as it is (its symlinks stay symlinks), the /etc/localtime symlink, which the
          * regular-file copy of etc skips, and /usr/share/zoneinfo -> /var/db/timezone/zoneinfo (CoreFoundation's TZDIR). */
-        char tz_src[512];
+fprintf(stderr, "[launch] STAGE-STEP etc t=%lds\n", (long)(time(NULL) - launch_t0));
+                char tz_src[512];
         snprintf(tz_src, sizeof(tz_src), "%s/private/var/db/timezone", od);
         struct stat tz_st;
-        if (stat(tz_src, &tz_st) == 0) {
+        char tz_mark[600];
+        snprintf(tz_mark, sizeof(tz_mark), "%s/var/db/timezone/.stage-tree-done", LOCAL_OVERLAY);
+        /* Same reuse as stage_tree: under DARLING_KEEP_LOCAL a finished copy (marker) is kept. */
+        if (getenv("DARLING_KEEP_LOCAL") != NULL && getenv("DARLING_SMOKE_REFRESH") == NULL &&
+            stat(tz_mark, &tz_st) == 0) {
+            printf("time zone data kept locally: %s/var/db/timezone\n", LOCAL_OVERLAY);
+        } else if (stat(tz_src, &tz_st) == 0) {
             char tz_cmd[1536];
             snprintf(tz_cmd, sizeof(tz_cmd),
                      "mkdir -p '%s/var/db' && cd '%s/private/var/db' && pax -rw timezone '%s/var/db' && "
                      "mkdir -p '%s/etc' && cp -P '%s/private/etc/localtime' '%s/etc/localtime' && "
                      "mkdir -p '%s/usr/share' && ln -sfn /var/db/timezone/zoneinfo '%s/usr/share/zoneinfo'",
                      LOCAL_OVERLAY, od, LOCAL_OVERLAY, LOCAL_OVERLAY, od, LOCAL_OVERLAY, LOCAL_OVERLAY, LOCAL_OVERLAY);
-            if (system(tz_cmd) == 0)
+            if (system(tz_cmd) == 0) {
+                snprintf(tz_cmd, sizeof(tz_cmd), "touch %s", tz_mark);
+                (void)system(tz_cmd);
                 printf("time zone data cached locally: %s/var/db/timezone\n", LOCAL_OVERLAY);
+            }
         }
 
-        /* Copy the Mach-O test binary too — it's on the same 9p mount */
+fprintf(stderr, "[launch] STAGE-STEP tz t=%lds\n", (long)(time(NULL) - launch_t0));
+                /* Copy the Mach-O test binary too — it's on the same 9p mount */
         char local_binary[512];
         snprintf(local_binary, sizeof(local_binary), "%s/%s", LOCAL_OVERLAY, test_bin);
         if (copy_file(binary, local_binary) != 0) {
             fprintf(stderr, "Failed to copy %s\n", test_bin);
             return 1;
         }
-        /* Redirect binary to local copy */
+fprintf(stderr, "[launch] STAGE-STEP binary t=%lds\n", (long)(time(NULL) - launch_t0));
+                /* Redirect binary to local copy */
         snprintf(binary, sizeof(binary), "%s", local_binary);
         printf("binary cached locally: %s\n", binary);
 
@@ -1091,7 +1105,8 @@ int main(void) {
      * darlingserver writes "." when its child (the real server process) is
      * ready to accept connections.
      */
-    int pipefd[2];
+fprintf(stderr, "[launch] STAGE-STEP pre-dserver t=%lds\n", (long)(time(NULL) - launch_t0));
+            int pipefd[2];
     if (pipe(pipefd) < 0) { perror("pipe"); return 1; }
     /* Lifetime pipe: the server holds the read end, only this launcher the write
      * end (close-on-exec, so the guest never gets it). When the launcher closes it
