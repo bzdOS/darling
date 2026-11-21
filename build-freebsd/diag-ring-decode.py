@@ -31,6 +31,7 @@ saved, last, kc = {}, {}, {}
 ci = {}
 cyc = []
 lat = []
+ob = []
 for i in range(first, nxt):
     ns, tid, nk, ret, n = struct.unpack_from("<QiiQQ", data, 64 + (i % cap) * 32)
     kind = (nk >> 28) & 0xF
@@ -45,7 +46,10 @@ for i in range(first, nxt):
     if kind == 15:
         # checkin trace: n = sub << 56 | value, ret = hash of the destination socket path (sub 1 reply routed, 2 delivery errno, 3 next call index)
         sub, val = n >> 56, n & ((1 << 56) - 1)
-        ci.setdefault(ret, {})[sub] = (val, tid)
+        if sub in (4, 5):
+            ob.append((sub, val, ns))
+        else:
+            ci.setdefault(ret, {})[sub] = (val, tid)
     t = "%d.%09d" % (ns // 10**9, ns % 10**9)
     if kind in (3, 4, 5, 8) and tid >= 0:
         if kind == 4:
@@ -122,5 +126,15 @@ def cycle_summary():
             % (len(lat), len(resent), lost, len(plain) + len(resent) - lost, len(plain), pct(0.5), pct(0.99), pct(1.0)))
 if counts or hang:
     out.write(cycle_summary() + "\n")
+if counts or hang:
+    # outbox trace: sub 4 = a sendmmsg that did not send the whole batch (errno in the low 16 bits; 11 = EAGAIN), sub 5 value 1 = outbox
+    # full, waiting for EPOLLOUT, value 2 = EPOLLOUT seen. A reply queue stalled for good ends with sub 5/1 and no later sub 5/2.
+    part = [v for k, v, t in ob if k == 4]
+    eagain = sum(1 for v in part if (v & 0xFFFF) == 11)
+    waits = sum(1 for k, v, t in ob if k == 5 and v == 1)
+    wakes = sum(1 for k, v, t in ob if k == 5 and v == 2)
+    lastk = ob[-1][:2] if ob else None
+    out.write("OUTBOX partial_sends=%d eagain=%d waiting_for_epollout=%d epollout_seen=%d last=%s%s\n"
+              % (len(part), eagain, waits, wakes, lastk, " STALLED-ON-EPOLLOUT" if lastk == (5, 1) else ""))
 if counts:
     out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))))

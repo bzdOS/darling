@@ -184,7 +184,7 @@ diff -ru a/src/message.cpp b/src/message.cpp
  #include <unistd.h>
  #include <cstdlib>
  #include <stdexcept>
-@@ -643,6 +645,23 @@
+@@ -643,6 +645,28 @@
  		}
  
  		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT);
@@ -202,6 +202,11 @@ diff -ru a/src/message.cpp b/src/message.cpp
 +				if (d.size() >= sizeof(dserver_rpc_replyhdr_t) && reinterpret_cast<const dserver_rpc_replyhdr_t*>(d.data())->number == dserver_callnum_checkin) {
 +					dsdiagRingEventRet(15, -1, -1, dsdiagAddrHash(reinterpret_cast<const sockaddr_un*>(mmsgs[i].msg_hdr.msg_name)), (2ull << 56) | (uint64_t)sendErrno);
 +				}
++			}
++			// outbox trace (kind 15 sub 4), only when the batch was not sent whole: n = 4<<56 | queued<<32 | tried<<24 | sent<<16 | errno
++			// (sent 0xff = sendmmsg failed): a stalled reply queue shows here as repeated EAGAIN with no later success
++			if (ret < 0 || (size_t)ret != len) {
++				dsdiagRingEventRet(15, -1, -1, 0, (4ull << 56) | ((uint64_t)(_messages.size() & 0xffffff) << 32) | ((uint64_t)(len & 0xff) << 24) | ((uint64_t)(ret < 0 ? 0xff : (ret & 0xff)) << 16) | (uint64_t)(sendErrno & 0xffff));
 +			}
 +			errno = sendErrno;
 +		}
@@ -297,7 +302,25 @@ diff -ru a/src/server.cpp b/src/server.cpp
  		.thread_context_dispose = dtape_hook_thread_context_dispose,
  		.thread_eternal_id = dtape_hook_thread_eternal_id,
  
-@@ -917,5 +981,8 @@
+@@ -653,6 +717,9 @@
+ 
+ 		if (_canWrite) {
+ 			_canWrite = _outbox.sendMany(_listenerSocket);
++			if (!_canWrite) {
++				dsdiagRingEventRet(15, -1, -1, 0, (5ull << 56) | 1); // outbox full: waiting for EPOLLOUT
++			}
+ 		}
+ 
+ 		struct epoll_event settings;
+@@ -684,6 +751,7 @@
+ 
+ 				if (event->events & EPOLLOUT) {
+ 					_canWrite = true;
++					dsdiagRingEventRet(15, -1, -1, 0, (5ull << 56) | 2); // EPOLLOUT: outbox writable again
+ 				}
+ 			} else if (event->data.ptr == &_wakeupFD) {
+ 				// we allow the loop to go back to the top and try to send some messages
+@@ -917,5 +985,8 @@
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
