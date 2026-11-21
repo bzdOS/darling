@@ -41,6 +41,9 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	  $KT timeout -k 5 "$T" "$DARLING_BUILD_DIR/launch-dynamic" > "$LOG" 2>&1
 	rc=$?
 	END=$(date +%s); LM=$(stat -f %m "$LOG" 2>/dev/null || echo "$END")
+	# exit code always in the run log and in the per-rc tally of the SUMMARY line (rc0/rc3/rc124/rc137/other)
+	echo "PROBE-RC rc=$rc" >> "$LOG"
+	case "$rc" in 0) r0=$((r0+1));; 3) r3=$((r3+1));; 124) r124=$((r124+1));; 137) r137=$((r137+1));; *) rx=$((rx+1));; esac
 	# server log only for a failed run (rc != 0): a passing run's log is never written, so it costs no disk.
 	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost)
 	if [ -n "$SL" ] && [ "$rc" != 0 ]; then
@@ -81,4 +84,4 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	fi
 	i=$((i+1))
 done
-echo "SUMMARY $P: N=$N valid=$valid ok=$ok bad=$bad timeout_hits=$th stall_progress0=$st"
+echo "SUMMARY $P: N=$N valid=$valid ok=$ok bad=$bad timeout_hits=$th stall_progress0=$st rc0=${r0:-0} rc3=${r3:-0} rc124=${r124:-0} rc137=${r137:-0} rc_other=${rx:-0} (all runs, INVALID included)"
