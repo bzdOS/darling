@@ -1,0 +1,20 @@
+--- a/duct-tape/src/memory.c
++++ b/duct-tape/src/memory.c
+@@ -955,7 +955,7 @@
+ 			if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, addr_to_check, &region_info)) {
+ 				addr_to_check = dtape_hooks->task_get_next_region(map->dtape_task->context, addr_to_check);
+ 				if (addr_to_check == 0) {
+-					kr = KERN_NO_SPACE;
++					kr = KERN_INVALID_ADDRESS; // as xnu vm_map_region: no region at or above the address
+ 					goto region_info_out;
+ 				}
+ 				if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, addr_to_check, &region_info)) {
+@@ -1051,7 +1051,7 @@
+ 	if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, addr_to_check, &region_info)) {
+ 		addr_to_check = dtape_hooks->task_get_next_region(map->dtape_task->context, addr_to_check);
+ 		if (addr_to_check == 0) {
+-			kr = KERN_NO_SPACE;
++			kr = KERN_INVALID_ADDRESS; // as xnu vm_map_region_recurse_64
+ 			goto out;
+ 		}
+ 		if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, addr_to_check, &region_info)) {
