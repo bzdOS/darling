@@ -946,6 +946,46 @@ int main(void) {
     }
 
     /*
+     * DARLING_GUEST_DEV: colon-separated device names (null, zero, urandom). Only
+     * these appear in the guest /dev, never the whole host /dev. Each is a symlink
+     * <overlay>/dev/<name> -> /Volumes/SystemRoot/dev/<name>: vchroot resolves the
+     * absolute target inside the guest, and /Volumes/SystemRoot switches to the
+     * host root, so open() reaches the host device and realpath() ends at
+     * /Volumes/SystemRoot/dev/<name> instead of looping on /dev/<name>.
+     */
+    {
+        const char *dv = getenv("DARLING_GUEST_DEV");
+        if (dv && dv[0]) {
+            char list[512];
+            snprintf(list, sizeof(list), "%s", dv);
+            char ddir[1100];
+            snprintf(ddir, sizeof(ddir), "%s/dev", LOCAL_OVERLAY);
+            if (mkdir(ddir, 0755) < 0 && errno != EEXIST)
+                fprintf(stderr, "guest dev: mkdir %s: %s\n", ddir, strerror(errno));
+            /* realpath() lstat()s every component of the link target; /Volumes
+             * must exist in the guest for /Volumes/SystemRoot to be reached */
+            char vdir[1100];
+            snprintf(vdir, sizeof(vdir), "%s/Volumes", LOCAL_OVERLAY);
+            if (mkdir(vdir, 0755) < 0 && errno != EEXIST)
+                fprintf(stderr, "guest dev: mkdir %s: %s\n", vdir, strerror(errno));
+            char *sp = NULL;
+            for (char *n = strtok_r(list, ":", &sp); n != NULL; n = strtok_r(NULL, ":", &sp)) {
+                if (strcmp(n, "null") && strcmp(n, "zero") && strcmp(n, "urandom") && strcmp(n, "random")) {
+                    fprintf(stderr, "guest dev: %s not allowed, skipped\n", n);
+                    continue;
+                }
+                char link[1200], target[128];
+                snprintf(link, sizeof(link), "%s/%s", ddir, n);
+                snprintf(target, sizeof(target), "/Volumes/SystemRoot/dev/%s", n);
+                if (symlink(target, link) < 0 && errno != EEXIST)
+                    fprintf(stderr, "guest dev: symlink %s -> %s: %s\n", link, target, strerror(errno));
+                else
+                    printf("guest device: /dev/%s -> %s\n", n, target);
+            }
+        }
+    }
+
+    /*
      * DARLING_GUEST_MKDIR: colon-separated guest paths created as real
      * directories in the local overlay (a profile directory). DARLING_GUEST_COPY:
      * colon-separated host=guest pairs; the host file is copied to the guest
