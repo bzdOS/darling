@@ -22,6 +22,8 @@ if [ -z "$STAGE_GATE_INNER" ]; then
 	# Every line reaches the terminal as soon as its probe is done (tee); the copy in $_gt only feeds the skipped count.
 	_gt=$(mktemp "${TMPDIR:-/tmp}/stage-gate.XXXXXX") || { echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
 	_rcf=$(mktemp "${TMPDIR:-/tmp}/stage-gate-rc.XXXXXX") || { rm -f "$_gt"; echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
+	# run-start marker: on success the gate removes only the probe/preflight logs this run created (newer than the marker)
+	_mk=$(mktemp "${TMPDIR:-/tmp}/stage-gate-mk.XXXXXX") || _mk=
 	{ STAGE_GATE_INNER=1 sh "$0" 2>&1; echo $? >"$_rcf"; } | tee "$_gt"
 	_rc=$(cat "$_rcf"); [ -n "$_rc" ] || _rc=1
 	# START_GATE_SKIPCNT
@@ -30,7 +32,14 @@ if [ -z "$STAGE_GATE_INNER" ]; then
 	# leaves the skipped count empty with a note line, never a raw grep error.
 	if [ -f "$_gt" ]; then _sk=$(grep -c "skipped" "$_gt"); else _sk=""; echo "GATE note: own log copy vanished during the run (TMPDIR swept); skipped count unavailable"; fi
 	# END_GATE_SKIPCNT
-	rm -f "$_gt" "$_rcf"
+	# START_GATE_PROBELOGS
+	# rc=0 only: remove this run's own <name>-probe-<stamp>.log and preflight-<epoch>*.log, top level of the build directory,
+	# nothing outside it; a failed gate keeps every log. Unset build directory or marker: nothing is removed.
+	if [ "$_rc" = 0 ] && [ -n "$_mk" ] && [ -f "$_mk" ] && [ -n "$DARLING_BUILD_DIR" ] && [ -d "$DARLING_BUILD_DIR" ]; then
+		find "$DARLING_BUILD_DIR" -maxdepth 1 -type f \( -name '*-probe-*.log' -o -name 'preflight-*.log' \) -newer "$_mk" -exec rm -f {} +
+	fi
+	# END_GATE_PROBELOGS
+	rm -f "$_gt" "$_rcf" "$_mk"
 	_md=quick; [ "${STAGE_GATE_RUN_ALL:-0}" = 1 ] && _md=full
 	echo "GATE mode=$_md skipped=$_sk rc=$_rc"; exit "$_rc"
 fi
