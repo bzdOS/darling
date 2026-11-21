@@ -26,6 +26,14 @@ fi
 P=${1:?}; N=${2:?}; T=${3:-${PROBE_TIMEOUT:-240}}; SU=${4:-3000}; SP=${5:-300}; IW=${6:-0}
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
 PB=${PROBE_BINARY:-sig-reentry-probe-macho}; SL=${PROBE_SERVER_LOG:-$CHROME_SR_SERVER_LOG}
+# The diag ring is always on with at least 4M entries (a hang that lasts tens of seconds wraps a smaller ring and loses the
+# start of the stuck thread: kind D, planck-1517). An explicit DSERVER_DIAG_RING in PROBE_EXTRA_ENV below 4194304 is raised.
+case " $PROBE_EXTRA_ENV " in
+	*" DSERVER_DIAG_RING="*)
+		PROBE_EXTRA_ENV=$(printf '%s' "$PROBE_EXTRA_ENV" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^DSERVER_DIAG_RING=/) { v = substr($i, 19) + 0; if (v < 4194304) $i = "DSERVER_DIAG_RING=4194304" } print }')
+		;;
+	*) PROBE_EXTRA_ENV="$PROBE_EXTRA_ENV DSERVER_DIAG_RING=4194304" ;;
+esac
 PROBE_ENV=PROBE_RUN=1; [ -n "$PROBE_TRAP_LOG" ] && PROBE_ENV=DARLING_TRAP_LOG=1
 KT=; [ -n "$PROBE_KTRACE" ] && KT="ktrace -i -t cs -f $DARLING_BUILD_DIR/$P-ktr.out"
 . "$DARLING_SRC_DIR/build-freebsd/dserver-prefix.sh"
@@ -51,9 +59,12 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	        END { exit !(st && ts>st) }' "$LOG"; then echo "WORKER-STUCK" >> "$LOG"; wst=$((wst+1)); fi
 	case "$rc" in 0) r0=$((r0+1));; 3) r3=$((r3+1));; 124) r124=$((r124+1));; 137) r137=$((r137+1));; *) rx=$((rx+1));; esac
 	# server log only for a failed run (rc != 0): a passing run's log is never written, so it costs no disk.
-	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost)
+	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost); the whole log from the start is always saved as -dserver-full.txt (cap PROBE_SERVER_LOG_MAX)
 	if [ -n "$SL" ] && [ "$rc" != 0 ]; then
 		/usr/local/bin/sudo -n tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver.txt" 2>/dev/null
+		# the whole log from its start (up to PROBE_SERVER_LOG_MAX bytes, default 1000000000): the start of a stuck thread
+		# (its checkin) is not in the 100 MB tail
+		/usr/local/bin/sudo -n head -c "${PROBE_SERVER_LOG_MAX:-1000000000}" "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver-full.txt" 2>/dev/null
 		[ -n "$PROBE_SERVER_LOG_HEAD" ] && /usr/local/bin/sudo -n head -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver-head.txt" 2>/dev/null
 	fi
 	# PROBE-HANG or timeout: one HANG-CLASS line per thread from the diag ring (needs DSERVER_DIAG_RING in PROBE_EXTRA_ENV):
