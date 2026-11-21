@@ -4735,6 +4735,28 @@ setup_macos_syscall_trap(void)
     /* Alternate stack: prevents the handler from clobbering the Mach-O stack */
     mldr_setup_thread_signal_stack();
 
+    /* execve keeps the signal mask, and a posix_spawn child arrives with whatever mask the
+     * spawning guest set (often everything blocked). A blocked SIGILL/SIGSYS/SIGSEGV/SIGBUS
+     * turns our ud2/SIGSYS traps into an immediate kill, so unblock them ourselves instead
+     * of relying on what was inherited. */
+    {
+        sigset_t trapset, oldset;
+        sigemptyset(&trapset);
+        sigaddset(&trapset, SIGILL);
+        sigaddset(&trapset, SIGSYS);
+        sigaddset(&trapset, SIGSEGV);
+        sigaddset(&trapset, SIGBUS);
+        if (sigprocmask(SIG_UNBLOCK, &trapset, &oldset) == 0) {
+            int was = sigismember(&oldset, SIGILL) || sigismember(&oldset, SIGSYS)
+                || sigismember(&oldset, SIGSEGV) || sigismember(&oldset, SIGBUS);
+            if (was)
+                fprintf(stderr, "[darling-mldr] inherited mask blocked trap signals"
+                    " (ill=%d sys=%d segv=%d bus=%d); unblocked\n",
+                    sigismember(&oldset, SIGILL), sigismember(&oldset, SIGSYS),
+                    sigismember(&oldset, SIGSEGV), sigismember(&oldset, SIGBUS));
+        }
+    }
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = sigsys_handler;

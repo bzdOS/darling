@@ -2,6 +2,7 @@
 # run-fork-fail-probe.sh - run tests/fork-fail-probe-macho under launch-dynamic and print the verdict line
 #   FORK-VERDICT pass|FAIL n=.. bad=.. [..]
 # If the probe died inside a check, the verdict is composed from the log: FAIL with the check it died in.
+# usr/bin is staged so the posix_spawn check finds /usr/bin/true in the guest overlay.
 # Usage: sh build-freebsd/run-fork-fail-probe.sh [wait-secs]
 #   Env: DARLING_SRC_DIR, DARLING_OVERLAY, DARLING_BUILD_DIR. The server is stopped by pid (never pkill).
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"
@@ -14,7 +15,7 @@ before=$(pgrep -x darlingserver | tr "\n" " ")
 # PROBE_KTRACE=<points> (letters only, e.g. cnf): trace the launcher and every guest process inside sudo
 KT=; [ -n "${PROBE_KTRACE:-}" ] && KT="ktrace -i -t ${PROBE_KTRACE} -f ${LOG%.log}-ktrace.out"
 ( sudo timeout -k 5 $((WAIT+30)) env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \
-    "DARLING_TEST_BINARY=fork-fail-probe-macho" $([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) ${PROBE_ENV} \
+    "DARLING_TEST_BINARY=fork-fail-probe-macho" "DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:usr/bin" $([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) ${PROBE_ENV} \
     ${KT} "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
 i=0
 while [ "$i" -lt "$WAIT" ]; do

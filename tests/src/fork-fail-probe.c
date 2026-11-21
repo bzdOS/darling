@@ -1,6 +1,6 @@
 /* fork-fail-probe.c - fork() and posix_spawn() must return, never block.
  * A successful fork passes only if the child is reaped and exited cleanly (status 0); a failed fork
- * passes if it returns -1 with errno set (a failed fork used to leave the parent in
+ * passes if it returns -1 with errno set; posix_spawn(/usr/bin/true) passes only with rc 0 and the child reaped with status 0 (a failed fork used to leave the parent in
  * fork_wait_for_child forever: stale _mach_fork_parent).
  * Output: one line  FORK-VERDICT pass|FAIL n=<checks> bad=<failed> [<names>]  (details on FORK-T lines);
  * no verdict line means a call blocked (the runner reports that as FAIL ... hang). */
@@ -39,8 +39,11 @@ int main(void)
 	pid_t pid = 0;
 	char *argv[] = { "/usr/bin/true", NULL };
 	rc = posix_spawn(&pid, "/usr/bin/true", NULL, NULL, argv, environ);
-	if (rc == 0 && pid > 0) { waitpid(pid, &st, 0); }
-	result("posix_spawn", 1, rc, 0);   /* returned at all */
+	e = 0; st = -1;
+	if (rc == 0 && pid > 0) e = waitpid(pid, &st, 0) == pid ? 0 : errno;
+	printf("FORK-T posix_spawn-child pid=%d status=0x%x\n", (int)pid, st); fflush(stdout);
+	/* spawned and reaped: rc 0, waitpid returns the child, the child exited with status 0 */
+	result("posix_spawn", rc == 0 && pid > 0 && e == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, rc, e);
 
 	printf("FORK-T begin fork-again\n"); fflush(stdout);
 	errno = 0;
