@@ -1732,10 +1732,50 @@ static void runAllStaticTerminators(void* extra)
 	}
 }
 
+// START_DYLD_GUEST_VARS
+// On the FreeBSD port libSystem_initializer calls __malloc_init *before*
+// _libc_initializer (Control #27 step B), but _libc_initializer is what runs
+// _program_vars_init() and therefore what sets libsystem_c's local
+// _environ_pointer.  Any malloc reader that runs before that
+// (set_flags_from_environment, __malloc_initialize/nano_common_init) then
+// dereferences a NULL environ.  Fill the guest's program vars here, before
+// any initializer runs, so those readers see a valid environ.
+static void initializeGuestProgramVars()
+{
+	OSSpinLockLock(&sAllImagesLock);
+	std::vector<ImageLoader*> images = sAllImages;
+	OSSpinLockUnlock(&sAllImagesLock);
+	for (ImageLoader* image : images) {
+		const ImageLoader* foundIn = NULL;
+		const ImageLoader::Symbol* sym = image->findExportedSymbol("_NSGetEnviron", true, &foundIn);
+		if ( sym == NULL )
+			continue;
+		uintptr_t addr = image->getExportedSymbolAddress(sym, gLinkContext, NULL, false, NULL);
+		if ( addr == 0 )
+			continue;
+		const uint8_t* code = (const uint8_t*)addr;
+		// _NSGetEnviron is: movq _environ_pointer(%rip), %rax ; popq %rbp ; retq
+		if ( (code[0] == 0x48) && (code[1] == 0x8b) && (code[2] == 0x05) ) {
+			int32_t disp;
+			memcpy(&disp, code + 3, sizeof(disp));
+			void** environPointer = (void**)(code + 7 + disp);
+			*environPointer = (void*)gLinkContext.envp;
+			return;
+		}
+	}
+}
+// END_DYLD_GUEST_VARS
+
 void initializeMainExecutable()
 {
 	// record that we've reached this step
 	gLinkContext.startedInitializingMainExecutable = true;
+
+	// START_DYLD_GUEST_VARS_CALL
+	// make the guest program vars (at least environ) valid before the first
+	// initializer runs
+	initializeGuestProgramVars();
+	// END_DYLD_GUEST_VARS_CALL
 
 	// run initialzers for any inserted dylibs
 	ImageLoader::InitializerTimingList initializerTimes[allImagesCount()];
