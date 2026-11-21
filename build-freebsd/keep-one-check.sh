@@ -24,6 +24,9 @@
 #     defaults of the build-*.sh scripts, now required DARLING_BUILD_DIR) are candidates (type stray, counted in
 #     stray_builds, fail the verdict); the dir itself is kept. Skipped while anything inside changed in the last
 #     10 minutes (a build in progress) or when the dir is the real build dir.
+#  6. scratch files: top-level files in build/ matching KEEPONE_SCRATCH_BUILD (default "*.diagbak *.fixed *.condfix
+#     fix*.py": source backups and edit scripts of a diagnosis) and files matching KEEPONE_SCRATCH_TMP (default
+#     "/tmp/fixcond-*.py") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
 #  Refinements: files modified within KEEPONE_MIN_AGE_MIN minutes (default 120), files whose name contains
 #  KEEPONE_FOREIGN (default alt2-r, another owner's series) and files open in a live process (fstat) are never candidates.
 # Never flagged: build/dserver/*, last-two-series files, /tmp/rs-* (outside the scanned dirs), and the dir keep-list
@@ -231,6 +234,20 @@ for sd in $STRAY; do
 	done >>"$T"
 done
 
+# ---- 6. scratch files of a diagnosis ----
+SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py}"
+SCRT="${KEEPONE_SCRATCH_TMP-/tmp/fixcond-*.py}"
+for g in $SCRB; do
+	for f in "$B"/$g; do
+		[ -f "$f" ] || continue
+		printf '%s\tscratch\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
+	done
+done >>"$T"
+for f in $SCRT; do
+	[ -f "$f" ] || continue
+	printf '%s\ttmpscratch\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
+done >>"$T"
+
 # ---- 2. backup/: one entry per library, newest kept ----
 if [ -d "$BK" ]; then
 	for f in $(cd "$BK" && ls -t); do
@@ -251,6 +268,11 @@ if [ "$MODE" = apply ]; then
 	bad=0
 	while IFS="$(printf '\t')" read -r _sz _ty _path; do
 		_rp=$(realpath "$_path" 2>/dev/null)
+		if [ "$_ty" = tmpscratch ]; then
+			_ok=0; set -f; for g in $SCRT; do set +f; case "$_rp" in $g) _ok=1;; esac; set -f; done; set +f
+			[ $_ok = 1 ] && [ ! -L "$_path" ] && continue
+			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, not a scratch file" >&2; continue
+		fi
 		if [ "$_ty" = stray ]; then
 			_ok=0; for sd in $STRAY; do _rs=$(realpath "$sd" 2>/dev/null); case "$_rp" in "$_rs"/*) [ -n "$_rs" ] && _ok=1;; esac; done
 			[ $_ok = 1 ] && continue
@@ -277,9 +299,9 @@ fi
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
 over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
-np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T")
+np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c "scratch	" "$T")
 cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
-v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ $over = 1 ]; } && v=fail
-echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np stray_builds=$nsb"
+v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ "$nsc" -gt 0 ] || [ $over = 1 ]; } && v=fail
+echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np stray_builds=$nsb scratch_files=$nsc"
 [ $v = pass ]
