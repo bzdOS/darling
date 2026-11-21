@@ -1,0 +1,44 @@
+--- a/src/process.cpp
++++ b/src/process.cpp
+@@ -452,7 +452,7 @@
+ 	return _readOrWriteMemory(true, remoteAddress, const_cast<void*>(localBuffer), length, errorCode);
+ };
+ 
+-void DarlingServer::Process::notifyCheckin(Architecture architecture) {
++void DarlingServer::Process::notifyCheckin(Architecture architecture, std::shared_ptr<Thread> checkinThread) {
+ 	std::unique_lock lock(_rwlock);
+ 
+ 	bool didExec = _pendingReplacement;
+@@ -469,7 +469,9 @@
+ 			auto thread = it->second.lock();
+ 			lock.unlock();
+ 			if (thread) {
+-				if (thread->_nstid == _nspid) {
++				// on Linux the main thread TID equals the PID; on FreeBSD thread IDs never equal
++				// the PID, so the thread that performs the post-exec checkin is the main thread
++				if (checkinThread ? (thread == checkinThread) : (thread->_nstid == _nspid)) {
+ 					mainThread = thread;
+ 				} else {
+ 					thread->_process = nullptr;
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -360,7 +360,7 @@
+ 		if (auto process = thread->process()) {
+ 			// the process needs to know when the checkin occurs, in case it has a pending replacement
+ 			// and also to notify its parent about when the fork is complete
+-			process->notifyCheckin(static_cast<Process::Architecture>(_header.architecture));
++			process->notifyCheckin(static_cast<Process::Architecture>(_header.architecture), thread);
+ 		} else {
+ 			code = -ESRCH;
+ 		}
+--- a/internal-include/darlingserver/process.hpp
++++ b/internal-include/darlingserver/process.hpp
+@@ -173,7 +173,7 @@
+ 		bool readMemory(uintptr_t remoteAddress, void* localBuffer, size_t length, int* errorCode = nullptr) const;
+ 		bool writeMemory(uintptr_t remoteAddress, const void* localBuffer, size_t length, int* errorCode = nullptr) const;
+ 
+-		void notifyCheckin(Architecture architecture);
++		void notifyCheckin(Architecture architecture, std::shared_ptr<Thread> checkinThread = nullptr);
+ 		void setPendingReplacement();
+ 
+ 		void registerKqchan(std::shared_ptr<Kqchan> kqchan);

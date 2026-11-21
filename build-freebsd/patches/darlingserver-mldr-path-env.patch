@@ -1,0 +1,15 @@
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -635,7 +635,11 @@
+ 
+ 	if (auto thread = _thread.lock()) {
+ 		if (auto process = thread->process()) {
+-			auto tmpstr = std::string(Config::defaultMldrPath).substr(0, _body.buffer_size - 1);
++			// DARLING_MLDR_PATH (darling.toml [env], set by the launcher) names the mldr a guest execve runs;
++			// the compiled-in default stays the fallback when it is unset or empty
++			const char* envMldr = getenv("DARLING_MLDR_PATH");
++			std::string_view mldrPath = (envMldr != NULL && envMldr[0] != '\0') ? std::string_view(envMldr) : Config::defaultMldrPath;
++			auto tmpstr = std::string(mldrPath).substr(0, _body.buffer_size - 1);
+ 			auto len = std::min(tmpstr.length() + 1, _body.buffer_size);
+ 
+ 			fullLength = process->vchrootPath().length();

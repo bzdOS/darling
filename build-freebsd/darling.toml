@@ -11,6 +11,8 @@ schema_version = 1
 DARLING_SRC_DIR = "/opt/darling/src"
 DARLING_BUILD_DIR = "/opt/darling/build"
 DARLING_OVERLAY = "/opt/darling/overlay"
+# the mldr a guest execve/posix_spawn runs (darlingserver answers it to dserver_rpc_mldr_path; launch-dynamic sets it when unset)
+DARLING_MLDR_PATH = "/opt/darling/build/dserver/mldr-real/mldr"
 KEEPONE_ROOT = "/opt/darling"
 # the one disk threshold (% use of /): a series does not start, and the batch loop stops, at >= this value
 DARLING_DISK_MAX = 85

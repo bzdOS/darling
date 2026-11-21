@@ -1012,6 +1012,11 @@ int main(void) {
          * so /usr/lib/libSystem.B.dylib would never be found.
          */
         setenv("DARLING_VCHROOT_PATH", od, 1);
+        /* DARLING_MLDR_PATH (darling.toml [env]): the mldr a guest execve/posix_spawn runs. Without it
+         * darlingserver answers its compiled-in LIBEXEC path, an installed mldr that is not this build.
+         * A value already in the environment wins; otherwise the mldr this launcher itself runs. */
+        if (!getenv("DARLING_MLDR_PATH") || !getenv("DARLING_MLDR_PATH")[0])
+            setenv("DARLING_MLDR_PATH", mldr, 1);
 
         char pipestr[16], uidstr[16], gidstr[16];
         snprintf(pipestr, sizeof(pipestr), "%d", pipefd[1]);
