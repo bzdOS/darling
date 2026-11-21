@@ -72,6 +72,14 @@ int main(int argc, char **argv)
 	bad |= try("machport", &ch[0], 1);
 	bad |= try("pipewrite", &ch[1], 1);
 	bad |= try("both", ch, 2);
+	/* crashpad RunServer: the token is already written, the read end lives in the child */
+	char tok[16] = {0};
+	printf("WRITE n=%zd\n", write(p[1], tok, sizeof(tok)));
+	bad |= try("both-data", ch, 2);
+	int p0 = p[0];
+	close(p0);
+	bad |= try("both-noreader", ch, 2);
+	if (pipe(p) < 0) return 1;
 	fcntl(p[1], F_SETFD, FD_CLOEXEC);
 	bad |= spawn_mode("dup2", p[1]);
 	bad |= spawn_mode("inherit", p[1]);

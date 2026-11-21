@@ -382,6 +382,39 @@ mldr_cur_hdr(void)
     return h->magic == MLDR_SIGSTK_MAGIC ? h : NULL;
 }
 
+/* epoll registrations of a dead pipe write end (see LINUX_SYS_epoll_ctl):
+ * EVFILT_READ events on these (kqueue, fd) pairs are reported as
+ * EPOLLOUT|EPOLLERR. A stale pair only matters if the fd number is reused for
+ * an EPOLLIN registration on the same kqueue, which re-adding clears. */
+static struct { int kq, fd; } epoll_deadpipe[64];
+static int epoll_deadpipe_n;
+
+static int epoll_deadpipe_get(int kq, int fd)
+{
+    for (int i = 0; i < epoll_deadpipe_n; i++)
+        if (epoll_deadpipe[i].kq == kq && epoll_deadpipe[i].fd == fd)
+            return 1;
+    return 0;
+}
+
+static int epoll_deadpipe_set(int kq, int fd, int on)
+{
+    for (int i = 0; i < epoll_deadpipe_n; i++)
+        if (epoll_deadpipe[i].kq == kq && epoll_deadpipe[i].fd == fd) {
+            if (!on)
+                epoll_deadpipe[i] = epoll_deadpipe[--epoll_deadpipe_n];
+            return 0;
+        }
+    if (!on)
+        return 0;
+    if (epoll_deadpipe_n == 64)
+        return -1;
+    epoll_deadpipe[epoll_deadpipe_n].kq = kq;
+    epoll_deadpipe[epoll_deadpipe_n].fd = fd;
+    epoll_deadpipe_n++;
+    return 0;
+}
+
 /* Linux struct sigaltstack: {void *ss_sp; int ss_flags; size_t ss_size;} */
 struct mldr_linux_sigaltstack {
     void *ss_sp;
@@ -2538,9 +2571,24 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         if (n == 0)
             return 0;
 
+        if (op == LINUX_EPOLL_CTL_DEL)
+            epoll_deadpipe_set(epfd, fd, 0);
+
         long r = freebsd_raw_syscall(SYS_kevent, epfd, (long)kev, n, 0, 0, 0);
         if (r < 0 && op == LINUX_EPOLL_CTL_DEL)
             return 0; /* deleting a filter that was never added is a no-op */
+        if (r == -EPIPE && n == 1 && kev[0].filter == EVFILT_WRITE) {
+            /* Write end of a pipe whose reader is gone: FreeBSD refuses
+             * EVFILT_WRITE with EPIPE, Linux registers it and reports
+             * EPOLLOUT|EPOLLERR at once (crashpad's child_port_handshake
+             * watches the pipe this way; the refusal became a guest kevent
+             * EBADF). EVFILT_READ on that end fires at once with EV_EOF;
+             * epoll_wait reports it as EPOLLOUT|EPOLLERR. */
+            EV_SET(&kev[0], fd, EVFILT_READ, EV_ADD, 0, 0, (void *)(uintptr_t)ev->data);
+            r = freebsd_raw_syscall(SYS_kevent, epfd, (long)kev, 1, 0, 0, 0);
+            if (r >= 0 && epoll_deadpipe_set(epfd, fd, 1) < 0)
+                r = -ENOMEM;
+        }
         return (r < 0) ? r : 0;
     }
     case LINUX_SYS_epoll_wait: {
@@ -2627,7 +2675,9 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         for (long i = 0; i < n; i++) {
             uint32_t events = 0;
 
-            if (kev[i].filter == EVFILT_READ)
+            if (kev[i].filter == EVFILT_READ && epoll_deadpipe_get(epfd, (int)kev[i].ident))
+                events |= LINUX_EPOLLOUT | LINUX_EPOLLERR;
+            else if (kev[i].filter == EVFILT_READ)
                 events |= LINUX_EPOLLIN;
             else if (kev[i].filter == EVFILT_WRITE)
                 events |= LINUX_EPOLLOUT;
