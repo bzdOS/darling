@@ -39,6 +39,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -470,6 +472,44 @@ static const char *overlay_dir(void) {
 
 static const char *src_dir(void) {
     return getenv("DARLING_SRC_DIR");
+}
+
+/* Guest process group, for forwarding termination signals (timeout, ^C). */
+static volatile pid_t g_guest_pid = 0;
+
+static void forward_signal(int sig) {
+    if (g_guest_pid > 0)
+        kill(-g_guest_pid, sig);
+}
+
+/*
+ * purpose:  Stop this launcher's own darlingserver after the guest is gone.
+ * input:    dserver_pid — the server child forked by this launcher;
+ *           lifetime_fd — write end of the lifetime pipe (server exits on EOF)
+ * output:   none
+ * sideEffects: closes lifetime_fd, reaps the server; SIGTERM, then SIGKILL, to
+ *           dserver_pid only if it has not exited within 10 s / 5 s.
+ */
+static void stop_dserver(pid_t dserver_pid, int lifetime_fd) {
+    close(lifetime_fd);
+    int st, i;
+    for (i = 0; i < 100; i++) {
+        pid_t r = waitpid(dserver_pid, &st, WNOHANG);
+        if (r == dserver_pid || (r < 0 && errno == ECHILD)) {
+            fprintf(stderr, "[launch] DSERVER-EXIT pid=%d graceful\n", (int)dserver_pid);
+            return;
+        }
+        usleep(100000);
+    }
+    fprintf(stderr, "[launch] DSERVER-EXIT pid=%d no exit on pipe close, SIGTERM\n", (int)dserver_pid);
+    kill(dserver_pid, SIGTERM);
+    for (i = 0; i < 50; i++) {
+        if (waitpid(dserver_pid, &st, WNOHANG) != 0) return;
+        usleep(100000);
+    }
+    fprintf(stderr, "[launch] DSERVER-EXIT pid=%d SIGKILL\n", (int)dserver_pid);
+    kill(dserver_pid, SIGKILL);
+    waitpid(dserver_pid, &st, 0);
 }
 
 static void cleanup_prefix(void) {
@@ -1036,6 +1076,11 @@ int main(void) {
      */
     int pipefd[2];
     if (pipe(pipefd) < 0) { perror("pipe"); return 1; }
+    /* Lifetime pipe: the server holds the read end, only this launcher the write
+     * end (close-on-exec, so the guest never gets it). When the launcher closes it
+     * or dies, the server sees EOF and exits (darlingserver-lifetime-pipe.patch). */
+    int lifetime[2];
+    if (pipe2(lifetime, O_CLOEXEC) < 0) { perror("pipe2"); return 1; }
 
     pid_t dserver_pid = fork();
     if (dserver_pid < 0) { perror("fork"); return 1; }
@@ -1043,6 +1088,14 @@ int main(void) {
     if (dserver_pid == 0) {
         /* Child: exec darlingserver */
         close(pipefd[0]);
+        close(lifetime[1]);
+        {
+            int fl = fcntl(lifetime[0], F_GETFD);
+            if (fl >= 0) fcntl(lifetime[0], F_SETFD, fl & ~FD_CLOEXEC);
+            char lfstr[16];
+            snprintf(lfstr, sizeof(lfstr), "%d", lifetime[0]);
+            setenv("DSERVER_LIFETIME_FD", lfstr, 1);
+        }
 
         /*
          * darlingserver hands this path to dyld via the vchroot_path RPC; dyld
@@ -1074,6 +1127,7 @@ int main(void) {
     /* Parent: wait for darlingserver to signal ready */
     fprintf(stderr, "[launch] DSERVER pid=%d\n", (int)dserver_pid);
     close(pipefd[1]);
+    close(lifetime[0]);
     char buf[2];
     ssize_t n = read(pipefd[0], buf, 1);
     close(pipefd[0]);
@@ -1170,8 +1224,6 @@ int main(void) {
      * yields nonsense exit codes, making one deterministic failure look like a
      * flaky one.
      */
-    if (setpgid(0, 0) < 0)
-        perror("setpgid");
 
     /* DARLING_TEST_ARGS — space-separated argv[1..] for the TARGET binary
      * (not mldr itself). mldr forwards everything past its own argv[1]
@@ -1202,8 +1254,50 @@ int main(void) {
     fprintf(stderr, "[launch] STAGING end / GUEST-EXEC pid=%d t=%lds\n",
             (int)getpid(), (long)(time(NULL) - launch_t0));
     fflush(stderr);
-    execv(mldr, mldr_argv);
-    perror("execv mldr");
-    cleanup();
-    return 1;
+    fflush(stdout);
+
+    /* The guest runs as a child in its own process group (the setpgid reason
+     * above); the launcher waits for it and then stops its own darlingserver.
+     * Termination signals sent to the launcher go on to the guest group. */
+    pid_t guest = fork();
+    if (guest < 0) { perror("fork guest"); stop_dserver(dserver_pid, lifetime[1]); return 1; }
+    if (guest == 0) {
+        if (setpgid(0, 0) < 0)
+            perror("setpgid");
+        execv(mldr, mldr_argv);
+        perror("execv mldr");
+        _exit(127);
+    }
+    setpgid(guest, guest);
+    g_guest_pid = guest;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = forward_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+
+    int gst = 0;
+    while (waitpid(guest, &gst, 0) < 0 && errno == EINTR)
+        ;
+    fprintf(stderr, "[launch] GUEST-EXIT pid=%d status=0x%x t=%lds\n",
+            (int)guest, gst, (long)(time(NULL) - launch_t0));
+    stop_dserver(dserver_pid, lifetime[1]);
+
+    if (WIFSIGNALED(gst)) {
+        /* Same wait status for the caller as the exec'd guest gave before;
+         * no launcher core. */
+        int sig = WTERMSIG(gst);
+        struct rlimit rl = { 0, 0 };
+        setrlimit(RLIMIT_CORE, &rl);
+        signal(sig, SIG_DFL);
+        sigset_t m;
+        sigemptyset(&m);
+        sigaddset(&m, sig);
+        sigprocmask(SIG_UNBLOCK, &m, NULL);
+        kill(getpid(), sig);
+        _exit(128 + sig);
+    }
+    return WIFEXITED(gst) ? WEXITSTATUS(gst) : 1;
 }

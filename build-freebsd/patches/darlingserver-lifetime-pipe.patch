@@ -1,0 +1,57 @@
+--- a/src/darlingserver.cpp
++++ b/src/darlingserver.cpp
+@@ -38,6 +38,8 @@
+ #include <sys/syscall.h>
+ #include <sys/signal.h>
+ #include <filesystem>
++#include <thread>
++#include <sys/wait.h>
+ 
+ #include <darling-config.h>
+ 
+@@ -702,6 +704,14 @@ int main(int argc, char** argv) {
+ 	write(pipefd, ".", 1);
+ 	close(pipefd);
+ 
++	// Launcher lifetime: DSERVER_LIFETIME_FD is the read end of a pipe whose write end
++	// only the launcher holds. EOF means the launcher is done with this server.
++	int lifetimeFD = -1;
++	if (const char* lifetimeEnv = getenv("DSERVER_LIFETIME_FD")) {
++		lifetimeFD = atoi(lifetimeEnv);
++		unsetenv("DSERVER_LIFETIME_FD");
++	}
++
+ 	if (pipe(childWaitFDs) != 0) {
+ 		std::cerr << "Failed to create child waiting pipe: " << strerror(errno) << std::endl;
+ 		exit(1);
+@@ -724,6 +734,8 @@ int main(int argc, char** argv) {
+ 		char buf[1];
+ 
+ 		close(childWaitFDs[1]);
++		if (lifetimeFD >= 0)
++			close(lifetimeFD);
+ 
+ 		snprintf(putOld, sizeof(putOld), "%s/proc", prefix);
+ 
+@@ -782,6 +794,21 @@ int main(int argc, char** argv) {
+ 	write(childWaitFDs[1], ".", 1);
+ 	close(childWaitFDs[1]);
+ 
++	if (lifetimeFD >= 0) {
++		pid_t launchdPID = launchdGlobalPID;
++		std::thread([lifetimeFD, launchdPID]() {
++			char b;
++			ssize_t n;
++			do {
++				n = read(lifetimeFD, &b, 1);
++			} while (n > 0 || (n < 0 && errno == EINTR));
++			std::cerr << "darlingserver: launcher closed the lifetime pipe, exiting" << std::endl;
++			kill(launchdPID, SIGKILL);
++			waitpid(launchdPID, NULL, 0);
++			_exit(0);
++		}).detach();
++	}
++
+ 	// start the main loop
+ 	server->start();
+ 
