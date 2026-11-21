@@ -99,6 +99,7 @@
 
 #include "freebsd_syscall_trap.h"
 
+#include <sys/extattr.h>
 #include <sys/types.h>
 #include <stdbool.h>
 #include <signal.h>
@@ -285,6 +286,8 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_vfork         58
 #define LINUX_SYS_setsid       112
 #define LINUX_SYS_execve        59
+#define LINUX_SYS_setxattr      188
+#define LINUX_SYS_getxattr      191
 #define LINUX_SIGCHLD_NR        17
 #define LINUX_SYS_msync         26
 #define LINUX_SYS_sigaltstack  131
@@ -714,6 +717,48 @@ freebsd_raw_syscall(long nr, long a1, long a2, long a3,
     #error freebsd_syscall_trap.c: unsupported architecture
 #endif
     return ret;
+}
+
+/* ── xattr: Linux getxattr/setxattr -> FreeBSD extattr (user namespace) ───── */
+
+/* errors stay host (FreeBSD) errnos: dispatch_linux_syscall translates them once through
+ * bsdos_errno_table (ENOATTR -> ENODATA, EOPNOTSUPP -> 95) */
+#define xattr_errno_to_linux(r) (r)
+
+/*
+ * purpose:  Linux getxattr(path, name, value, size) on a host path (already
+ *           vchroot-expanded by the guest) via extattr_get_file in the user
+ *           namespace. size 0 returns the attribute size; a buffer smaller
+ *           than the attribute gives ERANGE like Linux (FreeBSD truncates).
+ */
+static long
+linux_getxattr(long path, long name, long value, long size)
+{
+    long need = freebsd_raw_syscall(SYS_extattr_get_file, path, EXTATTR_NAMESPACE_USER, name, 0, 0, 0);
+    if (need < 0 || size == 0)
+        return xattr_errno_to_linux(need);
+    if (need > size)
+        return -34;         /* ERANGE, same number on both sides */
+    return xattr_errno_to_linux(freebsd_raw_syscall(SYS_extattr_get_file, path, EXTATTR_NAMESPACE_USER, name, value, size, 0));
+}
+
+/*
+ * purpose:  Linux setxattr(path, name, value, size, flags) via extattr_set_file.
+ *           XATTR_CREATE (1) fails with EEXIST and XATTR_REPLACE (2) with
+ *           ENODATA as on Linux; returns 0 on success.
+ */
+static long
+linux_setxattr(long path, long name, long value, long size, long flags)
+{
+    if (flags & 3) {
+        long have = freebsd_raw_syscall(SYS_extattr_get_file, path, EXTATTR_NAMESPACE_USER, name, 0, 0, 0);
+        if ((flags & 1) && have >= 0)
+            return -17;     /* EEXIST */
+        if ((flags & 2) && have < 0)
+            return xattr_errno_to_linux(have);
+    }
+    long r = freebsd_raw_syscall(SYS_extattr_set_file, path, EXTATTR_NAMESPACE_USER, name, value, size, 0);
+    return r < 0 ? xattr_errno_to_linux(r) : 0;
 }
 
 /*
@@ -2208,6 +2253,10 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         return freebsd_raw_syscall(SYS_getpid, 0, 0, 0, 0, 0, 0);
     case LINUX_SYS_setsid: /* no arguments, same semantics and EPERM on both sides */
         return freebsd_raw_syscall(SYS_setsid, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_getxattr: /* path is a host path: vchroot-expanded by the guest */
+        return linux_getxattr(a1, a2, a3, a4);
+    case LINUX_SYS_setxattr:
+        return linux_setxattr(a1, a2, a3, a4, a5);
     case LINUX_SYS_execve: /* path (already a host path: vchroot-expanded by the guest, or mldr itself), argv, envp: same layout and errno values on both sides */
         return freebsd_raw_syscall(SYS_execve, a1, a2, a3, 0, 0, 0);
     case LINUX_SYS_sendmsg: {

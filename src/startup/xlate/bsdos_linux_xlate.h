@@ -42,6 +42,7 @@ static const struct bsdos_errno_pair bsdos_errno_table[] = {
 	{ EREMOTE, 66 }, { ENOLCK, 37 }, { ENOSYS, 38 }, { EIDRM, 43 }, { ENOMSG, 42 }, { EOVERFLOW, 75 },
 	{ ECANCELED, 125 }, { EILSEQ, 84 }, { EBADMSG, 74 }, { EMULTIHOP, 72 }, { ENOLINK, 67 },
 	{ EPROTO, 71 }, { ENOTRECOVERABLE, 131 }, { EOWNERDEAD, 130 },
+	{ ENOATTR, 61 }, /* Linux ENODATA: a missing xattr */
 };
 #define BSDOS_ERRNO_COUNT ((int)(sizeof(bsdos_errno_table) / sizeof(bsdos_errno_table[0])))
 
