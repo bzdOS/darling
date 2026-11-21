@@ -57,7 +57,7 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
  #include <memory>
  #include <sys/types.h>
  #include <mutex>
-@@ -107,6 +108,14 @@
+@@ -107,6 +108,15 @@
  		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
  		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
  		bool _deferReplyForS2C = false;
@@ -67,12 +67,13 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
 +		std::atomic<uint64_t> _suspendedCalls{0};
 +		// interrupt_enter calls received (a signal handler of this thread is running); the watchdog does not re-send then
 +		std::atomic<uint64_t> _interruptEnters{0};
++		std::atomic<uint64_t> _lastEnterNs{0}; // CLOCK_MONOTONIC ns of the last interrupt_enter (watchdog outcome timing)
 +		// calls received from this thread (checkin included); checkin trace: next expected call index = _callSeq + 1
 +		std::atomic<uint64_t> _callSeq{0};
  		std::optional<Message> _deferredReply = std::nullopt;
  
  		struct InterruptContext {
-@@ -302,5 +311,12 @@
+@@ -302,5 +312,12 @@
  		void logToStream(Log::Stream& stream) const;
  	};
  };
@@ -107,17 +108,19 @@ diff -ru a/src/call.cpp b/src/call.cpp
  		callLog.debug() << *thread << ": Saved client-pushed reply (" << ((thread->_pendingSavedReply) ? "pending" : "normal") << ")" << callLog.endLog;
  
  		// write a byte to the pipe so the caller can continue
-@@ -823,6 +828,9 @@
+@@ -823,6 +828,11 @@
  };
  
  void DarlingServer::Call::InterruptEnter::processCall() {
 +	if (auto t = _thread.lock()) {
++		struct timespec ets; clock_gettime(CLOCK_MONOTONIC, &ets);
++		t->_lastEnterNs.store((uint64_t)ets.tv_sec * 1000000000ull + ets.tv_nsec);
 +		++t->_interruptEnters;
 +	}
  	Thread::_handleInterruptEnterForCurrentThread();
  
  	_sendReply(0);
-@@ -831,6 +839,19 @@
+@@ -831,6 +841,19 @@
  void DarlingServer::Call::InterruptExit::processCall() {
  	auto thread = _thread.lock();
  
@@ -137,7 +140,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	dtape_thread_sigexc_exit(thread->_dtapeThread);
  
  	_sendReply(0);
-@@ -844,6 +865,7 @@
+@@ -844,6 +867,7 @@
  
  		if (tmp.savedReply) {
  			callLog.debug() << *thread << ": Going to send saved reply" << callLog.endLog;
@@ -145,7 +148,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  			Server::sharedInstance().sendMessage(std::move(*tmp.savedReply));
  			tmp.savedReply = std::nullopt;
  		}
-@@ -1048,6 +1070,11 @@
+@@ -1048,6 +1072,11 @@
  	int code = 0;
  
  	if (auto thread = _thread.lock()) {
@@ -196,7 +199,7 @@ diff -ru a/src/message.cpp b/src/message.cpp
 diff -ru a/src/server.cpp b/src/server.cpp
 --- a/src/server.cpp
 +++ b/src/server.cpp
-@@ -257,13 +257,51 @@
+@@ -257,13 +257,73 @@
  
  	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
  		try {
@@ -211,7 +214,21 @@ diff -ru a/src/server.cpp b/src/server.cpp
 +			std::weak_ptr<DarlingServer::Thread> weak = sigThread->weak_from_this();
 +			uint64_t base = sigThread->_suspendedCalls.load();
 +			uint64_t baseEnter = sigThread->_interruptEnters.load();
-+			std::thread([weak, base, baseEnter, signal]() {
++			struct timespec sts; clock_gettime(CLOCK_MONOTONIC, &sts);
++			uint64_t sentNs = (uint64_t)sts.tv_sec * 1000000000ull + sts.tv_nsec;
++			std::thread([weak, base, baseEnter, signal, sentNs]() {
++				// One outcome record (ring kind 14, sub 2) per cycle that reaches the first check, to tell a lost signal from a slow
++				// one: n = 2<<56 | outcome<<52 | resends<<44 | usSinceLastResend<<22 | usSinceSend (22 bits each, saturating, times at the
++				// handler's interrupt_enter). outcome 1 = handler seen, 2 = thread_suspended seen, 3 = parked/resumed, 4 = thread gone.
++				// Resends are sub 0 (n = attempt number).
++				uint64_t lastResendNs = 0;
++				unsigned resends = 0;
++				auto us22 = [](uint64_t ns) { uint64_t u = ns / 1000; return u > 0x3fffff ? (uint64_t)0x3fffff : u; };
++				auto record = [&](const std::shared_ptr<DarlingServer::Thread>& t, unsigned outcome, uint64_t enterNs) {
++					uint64_t sinceSend = enterNs > sentNs ? enterNs - sentNs : 0;
++					uint64_t sinceResend = (resends && enterNs >= lastResendNs) ? enterNs - lastResendNs : 0x3fffff000ull;
++					dsdiagRingEvent(14, t->_tid, t->_nstid, (2ull << 56) | ((uint64_t)outcome << 52) | ((uint64_t)(resends > 255 ? 255 : resends) << 44) | (us22(sinceResend) << 22) | us22(sinceSend));
++				};
 +				// backoff 25, 100, 400 ms (then 400): a slow handler (debug log, trace) must not get duplicate signals
 +				for (int i = 1; i <= 200; i++) {
 +					std::this_thread::sleep_for(std::chrono::milliseconds(i == 1 ? 25 : (i == 2 ? 100 : 400)));
@@ -219,14 +236,22 @@ diff -ru a/src/server.cpp b/src/server.cpp
 +					if (!t || t->isDead() || !t->_dtapeThread) {
 +						return;
 +					}
-+					if (t->_suspendedCalls.load() != base || !dtape_thread_suspend_unacked(t->_dtapeThread)) {
++					if (t->_suspendedCalls.load() != base) {
++						if (resends) record(t, 2, t->_lastEnterNs.load());
++						return;
++					}
++					if (!dtape_thread_suspend_unacked(t->_dtapeThread)) {
++						if (resends) record(t, 3, t->_lastEnterNs.load());
 +						return;
 +					}
 +					if (t->_interruptEnters.load() != baseEnter) {
-+						// a handler is running (interrupt_enter seen): the signal was delivered, only slow
-+						dsdiagRingEvent(14, t->_tid, t->_nstid, 0);
++						// a handler is running (interrupt_enter seen): the signal was delivered, only slow (or a resend was)
++						record(t, 1, t->_lastEnterNs.load());
 +						return;
 +					}
++					struct timespec rts; clock_gettime(CLOCK_MONOTONIC, &rts);
++					lastResendNs = (uint64_t)rts.tv_sec * 1000000000ull + rts.tv_nsec;
++					++resends;
 +					dsdiagRingEvent(14, t->_tid, t->_nstid, (uint64_t)i); // suspend signal re-sent
 +					try {
 +						t->sendSignal(signal);
@@ -249,7 +274,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  	static void dtape_hook_thread_context_dispose(void* thread_context) {
  		static_cast<DarlingServer::Thread*>(thread_context)->_dispose();
  	};
-@@ -460,6 +498,7 @@
+@@ -460,6 +520,7 @@
  		.thread_lookup_eternal = dtape_hook_thread_lookup_eternal,
  		.thread_get_state = dtape_hook_thread_get_state,
  		.thread_send_signal = dtape_hook_thread_send_signal,
@@ -257,7 +282,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  		.thread_context_dispose = dtape_hook_thread_context_dispose,
  		.thread_eternal_id = dtape_hook_thread_eternal_id,
  
-@@ -917,5 +956,8 @@
+@@ -917,5 +978,8 @@
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {

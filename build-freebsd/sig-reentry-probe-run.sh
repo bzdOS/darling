@@ -107,6 +107,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		echo "$P-$i rc=$rc ${d}s/${T}s $v [${sig:-none}]$ev"
 		grep -a "^RING-COUNTS" "$LOG" | head -1
 		grep -a "^SUSPEND-BALANCE" "$LOG" | head -1
+		grep -a "^SIG-CYCLES" "$LOG" | head -1
 		grep -a "^HANG-CLASS" "$LOG" | head -8
 	fi
 	i=$((i+1))
