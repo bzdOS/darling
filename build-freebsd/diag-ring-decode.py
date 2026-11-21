@@ -52,6 +52,8 @@ for i in range(first, nxt):
                   % (t, tid, nstid, struct.unpack("<q", struct.pack("<Q", n))[0], ret))
     elif kind == 0:
         out.write("%s DIAG resume tid=%d nstid=%d scheduled ret=0x%x n=%d\n" % (t, tid, nstid, ret, n))
+    elif kind == 15:
+        out.write("%s DIAG checkin-trace tid=%d sub=%d value=%d dest=0x%x\n" % (t, tid, n >> 56, n & ((1 << 56) - 1), ret))
     else:
         out.write("%s DIAG %s tid=%d nstid=%d n=%d\n" % (t, KINDS.get(kind, "kind%d" % kind), tid, nstid, n))
 toff, tslots, tdropped, tstride = struct.unpack_from("<QQQQ", data, 24)
