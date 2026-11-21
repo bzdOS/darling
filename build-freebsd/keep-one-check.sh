@@ -25,7 +25,7 @@
 #     stray_builds, fail the verdict); the dir itself is kept. Skipped while anything inside changed in the last
 #     10 minutes (a build in progress) or when the dir is the real build dir.
 #  6. scratch files: top-level files in build/ matching KEEPONE_SCRATCH_BUILD (default "*.diagbak *.fixed *.condfix
-#     fix*.py": source backups and edit scripts of a diagnosis) and files matching KEEPONE_SCRATCH_TMP (default
+#     fix*.py *-series-[0-9]*.out": source backups and edit scripts of a diagnosis, redirected probe-series output) and files matching KEEPONE_SCRATCH_TMP (default
 #     "/tmp/fixcond-*.py /tmp/claude-*.txt") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
 #     Also untracked or ignored *.orig files (patch leftovers) in the source tree <root>/src and its submodules, from
 #     git status --porcelain --ignored (type srcorig, counted in scratch_files); apply re-checks each is untracked.
@@ -243,7 +243,7 @@ for sd in $STRAY; do
 done
 
 # ---- 6. scratch files of a diagnosis ----
-SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py}"
+SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py *-series-[0-9]*.out}"
 SCRT="${KEEPONE_SCRATCH_TMP-/tmp/fixcond-*.py /tmp/claude-*.txt}"
 for g in $SCRB; do
 	for f in "$B"/$g; do
