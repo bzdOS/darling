@@ -1,0 +1,25 @@
+diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
+--- a/src/startup/mldr/freebsd_syscall_trap.c
++++ b/src/startup/mldr/freebsd_syscall_trap.c
+@@ -4247,6 +4247,21 @@
+     /* exit-caller logging slice: handler entry with the faulting pc */
+     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
+         mldr_tlogx("SIGILL ENTER", pc, (long)mc->mc_rax);
++    if (mldr_trap_log_enabled && mldr_trap_log_handlers) {
++        /* sig65 mask trace: is the host real-time signal 65 (thread_suspend) blocked in the mask this trap will restore
++         * (uc), blocked right now (cur), or pending? Printed only when any of them is set (a handler is active or
++         * a signal waits), so the default flow adds no lines. */
++        sigset_t cur65, pend65;
++        sigemptyset(&cur65); sigemptyset(&pend65);
++        freebsd_raw_syscall(SYS_sigprocmask, SIG_BLOCK, 0, (long)&cur65, 0, 0, 0);
++        freebsd_raw_syscall(SYS_sigpending, (long)&pend65, 0, 0, 0, 0, 0);
++        int u65 = sigismember(&uctx->uc_sigmask, 65), c65 = sigismember(&cur65, 65), p65 = sigismember(&pend65, 65);
++        if (u65 || c65 || p65) {
++            long ht65 = 0;
++            freebsd_raw_syscall(SYS_thr_self, (long)&ht65, 0, 0, 0, 0, 0);
++            fprintf(stderr, "[traplog] sig65 tid=%ld nr=%ld uc=%d cur=%d pend=%d\n", ht65, (long)mc->mc_rax, u65, c65, p65);
++        }
++    }
+     if (pc[0] == 0x0f && pc[1] == 0x0b)
+         mldr_path_log((unsigned int)mc->mc_rax, (long)mc->mc_rdi, (long)mc->mc_rsi);
+ 
