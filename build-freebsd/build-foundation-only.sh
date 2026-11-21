@@ -50,6 +50,10 @@ while IFS= read -r rel; do
 	clang ${FOUND_FLAGS} ${extra} -w -O0 -c "${FOUND}/${rel}" -o "${obj}"
 	found_objs="${found_objs} ${obj}"
 done < "${BUILD}/foundation_sources.txt"
+# URL loading class placeholders (NSURLRequest, NSURLSession, ...): macOS binaries bind them to Foundation
+obj="${BUILD}/found-build/freebsd-shims_foundation_url_stubs.o"
+clang ${FOUND_FLAGS} -w -O0 -c "${SRC}/src/freebsd-shims/foundation_url_stubs.m" -o "${obj}"
+found_objs="${found_objs} ${obj}"
 
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C"
 # Foundation reexports CoreFoundation (as src/external/foundation/CMakeLists.txt does): macOS binaries bind
