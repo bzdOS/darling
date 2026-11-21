@@ -1,0 +1,62 @@
+diff -ru a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
+--- a/src/startup/mldr/mldr.c
++++ b/src/startup/mldr/mldr.c
+@@ -862,6 +862,23 @@
+ }
+ #endif
+ 
++#ifdef DARLING_FREEBSD
++#include <sys/types.h>
++#include <sys/thr.h>
++/* MLDR_LOG_RPC_SOCKET=1: bind / unlink / close of the per-thread RPC socket paths with a CLOCK_MONOTONIC ns timestamp and the thread id,
++ * to see whether a path is unlinked by an old thread after a new thread bound the same name (planck-1517). */
++static void __mldr_rpc_socket_trace(const char* what, const char* path, int fd) {
++	static int on = -1;
++	if (on < 0) on = getenv("MLDR_LOG_RPC_SOCKET") != NULL;
++	if (!on) return;
++	long tid = 0;
++	thr_self(&tid);
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	fprintf(stderr, "[mldr-rpc-socket] %lld.%09ld %s tid=%ld fd=%d path=%s\n", (long long)ts.tv_sec, ts.tv_nsec, what, tid, fd, path);
++}
++#endif
++
+ MLDR_GUEST_ENTRY int __mldr_create_rpc_socket(void) {
+ 	int pre_fd = -1;
+ 	int fd = -1;
+@@ -920,10 +937,12 @@
+ 	sa_client.sun_family = AF_UNIX;
+ 	strlcpy(sa_client.sun_path, __mldr_rpc_sock_path, sizeof(sa_client.sun_path));
+ 	sa_client.sun_len = sizeof(sa_client);
++	__mldr_rpc_socket_trace("create-unlink", __mldr_rpc_sock_path, fd);
+ 	unlink(__mldr_rpc_sock_path); // remove stale socket if any
+ 	if (bind(fd, (const struct sockaddr*)&sa_client, sizeof(sa_client)) < 0) {
+ 		goto err_out;
+ 	}
++	__mldr_rpc_socket_trace("bound", __mldr_rpc_sock_path, fd);
+ 	__mldr_rpc_socket_remember(fd, getpid());
+ #else
+ 	sa_family_t family = AF_UNIX;
+@@ -949,6 +968,13 @@
+ };
+ 
+ MLDR_GUEST_ENTRY void __mldr_close_rpc_socket(int socket) {
++#ifdef DARLING_FREEBSD
++	{
++		char tpath[108];
++		snprintf(tpath, sizeof(tpath), "/tmp/darling-mldr-%d-%d", (int)__mldr_rpc_socket_pid(socket), socket);
++		__mldr_rpc_socket_trace("close-begin", tpath, socket);
++	}
++#endif
+ 	close(socket);
+ 	socket_bitmap_put(&socket_bitmap, socket);
+ #ifdef DARLING_FREEBSD
+@@ -970,6 +996,7 @@
+ 	if (bound_by == getpid()) {
+ 		char path[108];
+ 		snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d", (int)bound_by, socket);
++		__mldr_rpc_socket_trace("close-unlink", path, socket);
+ 		unlink(path);
+ 	}
+ #endif
