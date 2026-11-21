@@ -283,6 +283,7 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_clone         56
 #define LINUX_SYS_fork          57
 #define LINUX_SYS_vfork         58
+#define LINUX_SYS_setsid       112
 #define LINUX_SIGCHLD_NR        17
 #define LINUX_SYS_msync         26
 #define LINUX_SYS_sigaltstack  131
@@ -2204,6 +2205,8 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         return freebsd_raw_syscall(SYS_dup2, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_getpid:
         return freebsd_raw_syscall(SYS_getpid, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_setsid: /* no arguments, same semantics and EPERM on both sides */
+        return freebsd_raw_syscall(SYS_setsid, 0, 0, 0, 0, 0, 0);
     case LINUX_SYS_sendmsg: {
         /* struct msghdr's msg_name/msg_namelen sit at the same byte offsets
          * in both OSes' layouts (verified: msg_iov/msg_control do too, by
