@@ -65,7 +65,12 @@ LAUNCH=${CHROME_SR_LAUNCH:-$DARLING_BUILD_DIR/launch-dynamic}
 KT=""
 if [ -n "$DARLING_KTRACE" ]; then
 	case "$DARLING_KTRACE" in
-	"$DARLING_BUILD_DIR"/*) KT="ktrace -i -t n -f $DARLING_KTRACE";;
+	"$DARLING_BUILD_DIR"/*)
+		# DARLING_KTRACE_POINTS: ktrace -t trace points, letters and + only (default n: path lookups); cn adds syscalls with results
+		case "${DARLING_KTRACE_POINTS:-n}" in
+		*[!a-zA-Z+]*) echo "KTRACE FAIL points=$DARLING_KTRACE_POINTS (allowed: letters and +)"; exit 2;;
+		esac
+		KT="ktrace -i -t ${DARLING_KTRACE_POINTS:-n} -f $DARLING_KTRACE";;
 	*) echo "KTRACE FAIL path=$DARLING_KTRACE (not inside the build directory)"; exit 2;;
 	esac
 fi
