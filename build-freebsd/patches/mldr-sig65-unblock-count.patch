@@ -67,7 +67,7 @@ diff -ru a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_t
  {
 +    if (native_signo >= 65) {
 +        unsigned long c = __atomic_add_fetch(&mldr_sig65_tramp_count, 1, __ATOMIC_RELAXED);
-+        if (c % 25 == 0)
++        if (1)
 +            fprintf(stderr, "[sig65-count] tramp=%lu\n", c);   /* the process may leave without an exit hook we see */
 +    }
      int linux_signo = sat_freebsd_signo_to_linux(native_signo);
