@@ -11,7 +11,7 @@
 # Requires: pkg install cmake bison flex llvm
 #
 # Environment:
-#   DARLING_BUILD_DIR  — where build artefacts go (default: /tmp/darling-build)
+#   DARLING_BUILD_DIR  — where build artefacts go (required, no default: darling.toml [env])
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 set -e
 
@@ -19,13 +19,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src"
 DS=${ROOT}/external/darlingserver
 # darlingserver RPC wrappers: generated into the build directory, never into the source tree
-DRPC="${DARLING_BUILD_DIR:-/var/darling-build}/dserver/generated-rpc"
+DRPC="${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/dserver/generated-rpc"
 python3 "${DS}/scripts/generate-rpc-wrappers.py" "${DRPC}/include/darlingserver/rpc.h" \
   "${DRPC}/internal-include/darlingserver/rpc.internal.h" "${DRPC}/src/rpc.c" '"../include/darlingserver/rpc.h"' || exit 1
 DT=${DS}/duct-tape
 BOOT=${ROOT}/external/bootstrap_cmds
 COMPAT=${ROOT}/startup/compat-includes
-BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/dtape"
+BUILD="${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/dtape"
 
 mkdir -p "${BUILD}"
 

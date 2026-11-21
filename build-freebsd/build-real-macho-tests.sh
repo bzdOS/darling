@@ -35,14 +35,14 @@
 # the llvm* pkg already required for other builds in this repo).
 #
 # Environment:
-#   DARLING_BUILD_DIR — scratch build dir        (default: /tmp/darling-build)
+#   DARLING_BUILD_DIR — scratch build dir        (required, no default: darling.toml [env])
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 #   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
-BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/real-macho"
+BUILD="${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/real-macho"
 OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 SDK_FLAT="${BUILD}/sdk-flat"

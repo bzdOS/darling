@@ -12,7 +12,7 @@
 #   (raw linked image: .../dyld)
 # Reproduce:
 #   DARLING_SRC_DIR=... DARLING_BUILD_DIR=... sh build-freebsd/build-dyld-only.sh
-BD=${DARLING_BUILD_DIR:-/tmp/darling-build}
+BD=${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}
 SRC=${DARLING_SRC_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
 SALV="${SRC}/build-freebsd/dyld-salvage/src/external/dyld"
 DST="${SRC}/src/external/dyld"

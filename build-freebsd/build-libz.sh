@@ -46,14 +46,14 @@
 # overlay, it does not build one.
 #
 # Environment:
-#   DARLING_BUILD_DIR — scratch build dir        (default: /var/darling-build)
+#   DARLING_BUILD_DIR — scratch build dir        (required, no default: darling.toml [env])
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 #   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
-BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/libz"
+BUILD="${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/libz"
 OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 SDK_FLAT="${BUILD}/sdk-flat"

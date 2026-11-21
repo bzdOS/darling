@@ -110,14 +110,14 @@
 # staged in $DARLING_OVERLAY; same precondition build-gui.sh has).
 #
 # Environment:
-#   DARLING_BUILD_DIR — scratch build dir        (default: /var/darling-build)
+#   DARLING_BUILD_DIR — scratch build dir        (required, no default: darling.toml [env])
 #   DARLING_SRC_DIR    — root of this repository  (default: directory of this script/..)
 #   DARLING_OVERLAY    — darling overlay dir      (required)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}"
-BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/native-wrappers"
+BUILD="${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/native-wrappers"
 OVERLAY="${DARLING_OVERLAY:?set DARLING_OVERLAY to your overlay dir}"
 
 WRAPGEN_SRC="${SRC}/src/libelfloader/wrapgen/wrapgen.cpp"
@@ -222,8 +222,8 @@ soname_for() {
 # build-real-macho-tests.sh:75-76, the one guest build known to work.
 SDK_FLAT="${DARLING_SDK_FLAT:-}"
 if [ -z "${SDK_FLAT}" ]; then
-	for cand in "${DARLING_BUILD_DIR:-/var/darling-build}/gui/sdk-flat" \
-	            "${DARLING_BUILD_DIR:-/var/darling-build}/real-macho/sdk-flat"; do
+	for cand in "${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/gui/sdk-flat" \
+	            "${DARLING_BUILD_DIR:?set DARLING_BUILD_DIR (darling.toml [env])}/real-macho/sdk-flat"; do
 		[ -d "${cand}/usr/include" ] && { SDK_FLAT="${cand}"; break; }
 	done
 fi
