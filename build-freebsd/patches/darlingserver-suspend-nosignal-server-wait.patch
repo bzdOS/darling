@@ -141,7 +141,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
 diff -ru a/src/thread.cpp b/src/thread.cpp
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
-@@ -805,6 +805,39 @@
+@@ -805,6 +805,41 @@
  	}
  };
  
@@ -150,6 +150,8 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +	// server-side wait = the client is blocked on an active call and our microthread is parked inside it;
 +	// anything else (user code, signal handler, S2C in progress, dying) needs the signal
 +	if (_dead || _terminating || !_activeCall || !_suspended || _interruptedForSignal || _processingSignal || _deferReplyForS2C || _suspendedNoSignal) {
++		// 13 = suspend needs the signal; n = bit mask of the failed conditions (dead/terminating 1, no active call 2, not parked 4, interrupted 8, processing signal 16, s2c 32, already 64)
++		dsdiagRingEvent(13, _tid, _nstid, (uint64_t)((_dead || _terminating) ? 1 : 0) | (!_activeCall ? 2 : 0) | (!_suspended ? 4 : 0) | (_interruptedForSignal ? 8 : 0) | (_processingSignal ? 16 : 0) | (_deferReplyForS2C ? 32 : 0) | (_suspendedNoSignal ? 64 : 0));
 +		return false;
 +	}
 +	_suspendedNoSignal = true;
@@ -181,7 +183,7 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
  void DarlingServer::Thread::resume() {
  	++dsdiag_resume_calls;
  	{
-@@ -1610,7 +1643,11 @@
+@@ -1610,7 +1645,11 @@
  		_deactivateCallLocked(expectedCall);
  	}
  
@@ -194,7 +196,7 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
  		if (_interrupts.top().savedReply) {
  			throw std::runtime_error("New reply would overwrite existing saved reply");
  		}
-@@ -1841,7 +1878,8 @@
+@@ -1841,7 +1880,8 @@
  // Sigexc/RPC events for the diag ring (DSERVER_DIAG_RING); ret is 0 for these kinds.
  // 3 = saved reply re-sent at interrupt_exit, 4 = client-pushed reply saved (n 1 = pending, 0 = normal),
  // 5 = signal sent via duct-tape (n = signal), 8 = call received (n = call number),
@@ -204,7 +206,7 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
  // Per-thread last-event table, never overwritten by ring wrap-around: a page-aligned region after the ring in
  // the same file; header u64 [3] = its offset, u64 [4] = its slot count. Slot (64 bytes), keyed by tid (linear probe):
  // {i32 tid, i32 nstid, u64 last ns, u32 last kind, u32 pad, u64 last n, u64 last call number, u64 last call ns,
-@@ -1850,6 +1888,7 @@
+@@ -1850,6 +1890,7 @@
  	std::atomic<int32_t> tid; int32_t nstid; uint64_t ns; uint32_t kind; uint32_t pad; uint64_t n;
  	uint64_t callNum; uint64_t callNs; uint64_t sigNs; uint64_t events;
  	// 64..127: suspend handshake — signal held (6) / released (7) last time and count, last thread_suspended call (n 23)
@@ -212,7 +214,7 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
  	uint64_t heldNs; uint64_t heldCount; uint64_t releasedNs; uint64_t releasedCount; uint64_t suspendedNs; uint64_t suspendedCount; uint64_t sigCount; uint64_t pad2;
  };
  static_assert(sizeof(DsdiagLastSlot) == 128, "slot size");
-@@ -1892,6 +1931,9 @@
+@@ -1892,6 +1933,9 @@
  		if (kind == 5) { sl.sigNs = ns; sl.sigCount++; }
  		if (kind == 6) { sl.heldNs = ns; sl.heldCount++; }
  		if (kind == 7) { sl.releasedNs = ns; sl.releasedCount++; }
