@@ -57,7 +57,7 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
  #include <memory>
  #include <sys/types.h>
  #include <mutex>
-@@ -107,6 +108,12 @@
+@@ -107,6 +108,14 @@
  		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
  		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
  		bool _deferReplyForS2C = false;
@@ -67,30 +67,39 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
 +		std::atomic<uint64_t> _suspendedCalls{0};
 +		// interrupt_enter calls received (a signal handler of this thread is running); the watchdog does not re-send then
 +		std::atomic<uint64_t> _interruptEnters{0};
++		// calls received from this thread (checkin included); checkin trace: next expected call index = _callSeq + 1
++		std::atomic<uint64_t> _callSeq{0};
  		std::optional<Message> _deferredReply = std::nullopt;
  
  		struct InterruptContext {
-@@ -302,5 +309,8 @@
+@@ -302,5 +311,12 @@
  		void logToStream(Log::Stream& stream) const;
  	};
  };
 +
 +// Diag ring event (DSERVER_DIAG_RING), defined in thread.cpp; kinds listed there.
 +void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n);
++// Same with the ring entry's ret field set (kind 15 checkin trace: ret = hash of the destination socket path).
++void dsdiagRingEventRet(int kind, int tid, int nstid, uint64_t ret, uint64_t n);
++struct sockaddr_un;
++uint64_t dsdiagAddrHash(const struct sockaddr_un* addr);
  
  #endif // _DARLINGSERVER_THREAD_HPP_
 diff -ru a/src/call.cpp b/src/call.cpp
 --- a/src/call.cpp
 +++ b/src/call.cpp
-@@ -167,6 +167,7 @@
+@@ -167,6 +167,10 @@
  
  	auto pidString = (process) ? (std::to_string(process->id()) + " (" + std::to_string(process->nsid()) + ")") : (std::to_string(header->pid) + " (-1)");
  	auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
 +	dsdiagRingEvent(8, thread ? thread->_tid : -1, thread ? thread->_nstid : (int)header->tid, header->number);
++	if (thread) {
++		++thread->_callSeq;
++	}
  	callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
  
  	if (header->number == dserver_callnum_s2c) {
-@@ -238,6 +239,7 @@
+@@ -238,6 +242,7 @@
  			}
  		}
  
@@ -98,7 +107,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  		callLog.debug() << *thread << ": Saved client-pushed reply (" << ((thread->_pendingSavedReply) ? "pending" : "normal") << ")" << callLog.endLog;
  
  		// write a byte to the pipe so the caller can continue
-@@ -823,6 +825,9 @@
+@@ -823,6 +828,9 @@
  };
  
  void DarlingServer::Call::InterruptEnter::processCall() {
@@ -108,7 +117,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	Thread::_handleInterruptEnterForCurrentThread();
  
  	_sendReply(0);
-@@ -831,6 +836,19 @@
+@@ -831,6 +839,19 @@
  void DarlingServer::Call::InterruptExit::processCall() {
  	auto thread = _thread.lock();
  
@@ -128,7 +137,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	dtape_thread_sigexc_exit(thread->_dtapeThread);
  
  	_sendReply(0);
-@@ -844,6 +862,7 @@
+@@ -844,6 +865,7 @@
  
  		if (tmp.savedReply) {
  			callLog.debug() << *thread << ": Going to send saved reply" << callLog.endLog;
@@ -136,7 +145,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  			Server::sharedInstance().sendMessage(std::move(*tmp.savedReply));
  			tmp.savedReply = std::nullopt;
  		}
-@@ -1048,6 +1067,11 @@
+@@ -1048,6 +1070,11 @@
  	int code = 0;
  
  	if (auto thread = _thread.lock()) {
@@ -148,6 +157,42 @@ diff -ru a/src/call.cpp b/src/call.cpp
  		thread->waitWhileUserSuspended(_body.thread_state, _body.float_state);
  	} else {
  		code = -ESRCH;
+diff -ru a/src/message.cpp b/src/message.cpp
+--- a/src/message.cpp
++++ b/src/message.cpp
+@@ -18,6 +18,8 @@
+  */
+ 
+ #include <darlingserver/message.hpp>
++#include <darlingserver/thread.hpp>
++#include <darlingserver/rpc.h>
+ #include <unistd.h>
+ #include <cstdlib>
+ #include <stdexcept>
+@@ -643,6 +645,23 @@
+ 		}
+ 
+ 		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT);
++		{
++			// checkin trace (planck-1517), sub 2: delivery attempt of a checkin reply and its errno (0 = sent)
++			int sendErrno = (ret < 0) ? errno : 0;
++			for (size_t i = 0; i < len; ++i) {
++				if (ret >= 0 && i >= (size_t)ret) {
++					break;
++				}
++				if (ret < 0 && i > 0) {
++					break;
++				}
++				const auto& d = _messages[i].data();
++				if (d.size() >= sizeof(dserver_rpc_replyhdr_t) && reinterpret_cast<const dserver_rpc_replyhdr_t*>(d.data())->number == dserver_callnum_checkin) {
++					dsdiagRingEventRet(15, -1, -1, dsdiagAddrHash(reinterpret_cast<const sockaddr_un*>(mmsgs[i].msg_hdr.msg_name)), (2ull << 56) | (uint64_t)sendErrno);
++				}
++			}
++			errno = sendErrno;
++		}
+ 		if (dserverRpcLogOn()) {
+ 			fprintf(stderr, "[dserver-rpc] %lu sendmmsg tried=%zu queued=%zu ret=%d errno=%d\n", dserverRpcMs(), len, _messages.size(), ret, ret < 0 ? errno : 0);
+ 			for (int k = 0; k < ret && k < (int)len; ++k) {
 diff -ru a/src/server.cpp b/src/server.cpp
 --- a/src/server.cpp
 +++ b/src/server.cpp
@@ -224,7 +269,28 @@ diff -ru a/src/server.cpp b/src/server.cpp
 diff -ru a/src/thread.cpp b/src/thread.cpp
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
-@@ -1837,3 +1837,69 @@
+@@ -1610,6 +1610,20 @@
+ 		_deactivateCallLocked(expectedCall);
+ 	}
+ 
++	// checkin trace (planck-1517): the checkin reply of a new thread, where it goes and what the server expects next.
++	// kind 15, n = sub << 56 | value: sub 1 = reply routed (0 outbox, 1 saved for interrupt_exit, 2 deferred for S2C,
++	// 3 dropped, thread dead), sub 3 = next expected call index (calls received so far + 1); ret = hash of the socket path.
++	// sub 2 (delivery attempt and its errno) is written by MessageQueue::sendMany.
++	uint64_t ciHash = 0;
++	bool isCheckin = false;
++	if (reply.data().size() >= sizeof(dserver_rpc_replyhdr_t) && reinterpret_cast<dserver_rpc_replyhdr_t*>(reply.data().data())->number == dserver_callnum_checkin) {
++		isCheckin = true;
++		ciHash = dsdiagAddrHash(reinterpret_cast<const sockaddr_un*>(reply.rawHeader().msg_name));
++		uint64_t route = _interruptedForSignal ? 1 : (_deferReplyForS2C ? 2 : (_dead ? 3 : 0));
++		dsdiagRingEventRet(15, _tid, _nstid, ciHash, (1ull << 56) | route);
++		dsdiagRingEventRet(15, _tid, _nstid, ciHash, (3ull << 56) | (_callSeq.load() + 1));
++	}
++	(void)isCheckin;
+ 	if (_interruptedForSignal) {
+ 		if (_interrupts.top().savedReply) {
+ 			throw std::runtime_error("New reply would overwrite existing saved reply");
+@@ -1837,3 +1851,83 @@
  
  	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
  };
@@ -289,6 +355,20 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +	// table full: never overwrite another thread's slot; count the dropped event in header u64[5]
 +	__atomic_fetch_add((uint64_t*)((char*)dsdiagRing - 64) + 5, 1, __ATOMIC_RELAXED);
 +}
++
++uint64_t dsdiagAddrHash(const struct sockaddr_un* addr) {
++	uint64_t h = 1469598103934665603ull;
++	if (addr) {
++		for (size_t i = 0; i < sizeof(addr->sun_path) && addr->sun_path[i]; ++i) {
++			h = (h ^ (unsigned char)addr->sun_path[i]) * 1099511628211ull;
++		}
++	}
++	return h;
++};
++
++void dsdiagRingEventRet(int kind, int tid, int nstid, uint64_t ret, uint64_t n) {
++	dsdiagRingRecord(kind, tid, nstid, reinterpret_cast<const void*>(ret), n);
++};
 +
 +void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n) {
 +	dsdiagRingRecord(kind, tid, nstid, nullptr, n);

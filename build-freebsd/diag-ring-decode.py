@@ -12,7 +12,7 @@ import sys
 
 KINDS = {0: "resume-scheduled", 1: "resume-EARLY", 3: "saved-reply-resent", 4: "reply-saved",
          5: "signal", 8: "call", 9: "reply-outbox",
-         10: "suspend-nosignal", 11: "reply-held", 12: "held-released", 13: "nosig-refused", 14: "signal-resent"}
+         10: "suspend-nosignal", 11: "reply-held", 12: "held-released", 13: "nosig-refused", 14: "signal-resent", 15: "checkin-trace"}
 
 counts = sys.argv[1] == "--counts"
 hang = sys.argv[1] == "--hang-class"
@@ -28,11 +28,16 @@ out = sys.stdout
 if not hang and not counts:
     out.write("# ring capacity=%d recorded=%d shown=%d\n" % (cap, nxt, count))
 saved, last, kc = {}, {}, {}
+ci = {}
 for i in range(first, nxt):
     ns, tid, nk, ret, n = struct.unpack_from("<QiiQQ", data, 64 + (i % cap) * 32)
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
     kc[kind] = kc.get(kind, 0) + 1
+    if kind == 15:
+        # checkin trace: n = sub << 56 | value, ret = hash of the destination socket path (sub 1 reply routed, 2 delivery errno, 3 next call index)
+        sub, val = n >> 56, n & ((1 << 56) - 1)
+        ci.setdefault(ret, {})[sub] = (val, tid)
     t = "%d.%09d" % (ns // 10**9, ns % 10**9)
     if kind in (3, 4, 5, 8) and tid >= 0:
         if kind == 4:
@@ -87,5 +92,11 @@ elif hang:
         out.write("HANG-CLASS none (ring has no sigexc/RPC events, recorded=%d)\n" % nxt)
     for tid in sorted(last):
         out.write("HANG-CLASS tid=%d saved_reply=%s last=%s\n" % (tid, saved.get(tid, "no"), last[tid]))
+if hang:
+    # checkin replies that were not delivered cleanly: no delivery record (sub 2) or a non-zero errno
+    for dest, d in sorted(ci.items()):
+        if 2 not in d or d[2][0] != 0:
+            out.write("CHECKIN-TRACE dest=0x%x tid=%s route=%s delivery_errno=%s next_call_index=%s\n"
+                      % (dest, d.get(1, d.get(3, (0, "?")))[1], d.get(1, ("?",))[0], d[2][0] if 2 in d else "none", d.get(3, ("?",))[0]))
 if counts:
-    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))))
+    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))))
