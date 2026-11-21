@@ -16,7 +16,7 @@
         "DARLING_OVERLAY": {"$ref": "#/$defs/abspath"},
         "DARLING_MLDR_PATH": {"$ref": "#/$defs/abspath"},
         "KEEPONE_ROOT": {"$ref": "#/$defs/abspath"},
-        "DARLING_DISK_MAX": {"type": "integer", "minimum": 50, "maximum": 99}, "PROBE_TIMEOUT": {"type": "integer", "minimum": 60, "maximum": 1800}, "DSERVER_SOCKET_RCVBUF": {"type": "integer", "minimum": 16384, "maximum": 2097152}, "PREFLIGHT_DISK_DEV": {"type": "string", "pattern": "^[a-z]+[0-9]+$"}, "PREFLIGHT_DISK_MSW_START": {"type": "integer", "minimum": 1, "maximum": 10000}, "PREFLIGHT_DISK_QLEN_MAX": {"type": "integer", "minimum": 0, "maximum": 256}, "PREFLIGHT_DISK_MSW_STOP": {"type": "integer", "minimum": 1, "maximum": 100000}
+        "DARLING_DISK_MAX": {"type": "integer", "minimum": 50, "maximum": 99}, "PROBE_TIMEOUT": {"type": "integer", "minimum": 60, "maximum": 1800}, "DSERVER_SOCKET_RCVBUF": {"type": "integer", "minimum": 16384, "maximum": 2097152}, "PREFLIGHT_DISK_DEV": {"type": "string", "pattern": "^[a-z]+[0-9]+$"}, "PREFLIGHT_DISK_MSW_START": {"type": "integer", "minimum": 1, "maximum": 10000}, "PREFLIGHT_DISK_QLEN_MAX": {"type": "integer", "minimum": 0, "maximum": 256}, "PREFLIGHT_DISK_MSW_STOP": {"type": "integer", "minimum": 1, "maximum": 100000}, "DSERVER_DIAG_RING": {"type": "integer", "minimum": 0, "maximum": 4000000}
       }
     },
     "keepone": {

@@ -104,6 +104,7 @@ TL=""; _tl="${DARLING_TRAP_LOG-1}"
   DARLING_GUEST_MKDIR="$DARLING_GUEST_MKDIR" DARLING_GUEST_COPY="$DARLING_GUEST_COPY" \
   ${CHROME_SR_SERVER_LOG:+DSERVER_LOG_LEVEL=$CHROME_SR_SERVER_LOG} \
   ${DSERVER_SOCKET_RCVBUF:+DSERVER_SOCKET_RCVBUF=$DSERVER_SOCKET_RCVBUF} \
+  ${DSERVER_DIAG_RING:+DSERVER_DIAG_RING=$DSERVER_DIAG_RING} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
   $KT timeout -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
@@ -146,6 +147,11 @@ kill $RDP 2>/dev/null; wait $RDP 2>/dev/null; rm -f "$FIFO"
 # server log (only with CHROME_SR_SERVER_LOG), copied before the prefix is removed; capped at 100 MB (tail)
 if [ -n "$CHROME_SR_SERVER_LOG" ]; then
 	$SUDO tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$BASE-dserver.txt" 2>/dev/null
+fi
+# full-rate DIAG resume ring (DSERVER_DIAG_RING), decoded oldest first
+RING="$DARLING_PREFIX/private/var/log/dserver-diag-ring.bin"
+if [ -n "$DSERVER_DIAG_RING" ] && $SUDO test -f "$RING"; then
+	$SUDO cat "$RING" | python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" /dev/stdin > "$BASE-diag-ring.log" 2>&1
 fi
 dsp_reap
 echo "WRAPPER_RC=$RC" >> "$LOG"

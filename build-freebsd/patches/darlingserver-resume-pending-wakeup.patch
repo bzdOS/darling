@@ -25,6 +25,12 @@ path) with one global lock. The kernelAsync semaphore path never takes it, and t
 (run old1) showed the same hang, so it was not the cause. For the user-suspension path the flag would also
 cover the window, so the lock is now redundant there only; dropping it is untested and was not done.
 
+DIAG resume logging (fix53): the scheduled line is rate limited per tid (first 32, then every 65536th with n=).
+One tid resumed ~11000/s and filled the whole 100 MB debug tail (fix52: 751879 of 751880 lines); with the limit the
+full server log fits from the start (fix53: 1525 DIAG lines of 350004). The full rate goes to a ring instead:
+DSERVER_DIAG_RING=<entries> maps <prefix>/private/var/log/dserver-diag-ring.bin MAP_SHARED (survives any exit,
+no flush), decoded by build-freebsd/diag-ring-decode.py.
+
 diff --git a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
 --- a/internal-include/darlingserver/thread.hpp
 +++ b/internal-include/darlingserver/thread.hpp
@@ -64,16 +70,20 @@ diff --git a/src/server.cpp b/src/server.cpp
 diff --git a/src/thread.cpp b/src/thread.cpp
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
-@@ -31,6 +31,8 @@
+@@ -31,6 +31,12 @@
  
  #include <darlingserver/duct-tape.h>
  #include <atomic>
 +#include <mutex>
++#include <unordered_map>
++#include <fcntl.h>
++#include <time.h>
++#include <cstring>
 +#include <set>
  
  #include <sys/syscall.h>
  
-@@ -363,6 +365,17 @@
+@@ -363,6 +369,56 @@ bool DarlingServer::Thread::waitingForReply() const {
  
  static const auto microthreadLog = DarlingServer::Log("microthread");
  
@@ -88,10 +98,49 @@ diff --git a/src/thread.cpp b/src/thread.cpp
 +static std::mutex dsdiagMutex;
 +static std::set<const void*> dsdiagEarly;
 +
++// Full-rate DIAG resume ring. DSERVER_DIAG_RING=<entries> (darling.toml [env]; unset or 0: off) maps
++// <prefix>/private/var/log/dserver-diag-ring.bin MAP_SHARED, so the entries reach the file on any exit
++// (signal, _exit on lifetime-pipe EOF, SIGKILL) with no flush step. Layout: 64-byte header
++// {magic "DSDRING1", u64 capacity, u64 next index}, then capacity entries of 32 bytes
++// {u64 CLOCK_MONOTONIC ns, i32 tid, i32 nstid | kind<<28, u64 return address, u64 per-tid n or caller tid}.
++// kind 0 = scheduled, 1 = EARLY-not-suspended. build-freebsd/diag-ring-decode.py writes <run>-diag-ring.log.
++struct DsdiagRingEntry { uint64_t ns; int32_t tid; int32_t nstidKind; uint64_t ret; uint64_t n; };
++static DsdiagRingEntry* dsdiagRing = nullptr;
++static std::atomic<uint64_t>* dsdiagRingNext = nullptr;
++static uint64_t dsdiagRingCap = 0;
++static void dsdiagRingRecord(int kind, int tid, int nstid, const void* ret, uint64_t n) {
++	static std::once_flag once;
++	std::call_once(once, []() {
++		const char* e = getenv("DSERVER_DIAG_RING");
++		uint64_t cap = e ? strtoull(e, nullptr, 10) : 0;
++		if (cap == 0) return;
++		std::string path = DarlingServer::Server::sharedInstance().prefix() + "/private/var/log/dserver-diag-ring.bin";
++		int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++		if (fd < 0) return;
++		size_t len = 64 + cap * sizeof(DsdiagRingEntry);
++		if (ftruncate(fd, len) != 0) { close(fd); return; }
++		void* m = mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++		close(fd);
++		if (m == MAP_FAILED) return;
++		memcpy(m, "DSDRING1", 8);
++		((uint64_t*)m)[1] = cap;
++		dsdiagRingNext = new (((uint64_t*)m) + 2) std::atomic<uint64_t>(0);
++		dsdiagRing = (DsdiagRingEntry*)((char*)m + 64);
++		dsdiagRingCap = cap;
++	});
++	if (!dsdiagRing) return;
++	uint64_t i = dsdiagRingNext->fetch_add(1, std::memory_order_relaxed);
++	struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++	DsdiagRingEntry& r = dsdiagRing[i % dsdiagRingCap];
++	r.ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
++	r.tid = tid; r.nstidKind = (nstid & 0x0fffffff) | (kind << 28);
++	r.ret = (uint64_t)(uintptr_t)ret; r.n = n;
++}
++
  // this runs in the context of the microthread (i.e. with the microthread's stack active)
  void DarlingServer::Thread::microthreadWorker() {
  #if DSERVER_ASAN
-@@ -427,8 +440,10 @@
+@@ -427,8 +483,10 @@ void DarlingServer::Thread::doWork() {
  	//       but we know what reasonable compilers (i.e. GCC and Clang) do with it and we're specifically targeting Clang, so it's okay for us.
  
  	_rwlock.lock();
@@ -102,7 +151,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  		microthreadLog.debug() << _tid << "(" << _nstid << "): execution was deferred" << microthreadLog.endLog;
  		_deferralState = DeferralState::DeferredPending;
  		_rwlock.unlock();
-@@ -436,6 +451,15 @@
+@@ -436,6 +494,15 @@ void DarlingServer::Thread::doWork() {
  	}
  
  	if (_running) {
@@ -118,7 +167,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  		// this is probably an error
  		microthreadLog.warning() << _tid << "(" << _nstid << "): attempt to re-run already running microthread on another thread" << microthreadLog.endLog;
  		_rwlock.unlock();
-@@ -443,12 +460,16 @@
+@@ -443,12 +510,16 @@ void DarlingServer::Thread::doWork() {
  	}
  
  	if (_terminating) {
@@ -135,7 +184,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  		goto doneWorking;
  	}
  
-@@ -473,6 +494,7 @@
+@@ -473,6 +544,7 @@ void DarlingServer::Thread::doWork() {
  #endif
  
  		_rwlock.lock();
@@ -143,7 +192,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  
  		if (!_suspended || _continuationCallback) {
  			// we discard the old stack when either:
-@@ -508,6 +530,8 @@
+@@ -508,6 +580,8 @@ void DarlingServer::Thread::doWork() {
  				microthreadLog.info() << _tid << "(" << _nstid << "): thread was suspended with a pending call override and is now resuming with a pending call" << microthreadLog.endLog;
  			}
  			// we were in the middle of processing a call and we need to resume now
@@ -152,7 +201,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  			_suspended = false;
  			_resumeContext.uc_link = &backToThreadTopContext;
  			_rwlock.unlock();
-@@ -536,8 +560,11 @@
+@@ -536,8 +610,11 @@ void DarlingServer::Thread::doWork() {
  		} else {
  			if (!_pendingCall) {
  				// if we don't actually have a pending call, we have nothing to do
@@ -164,7 +213,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  			_suspended = false;
  			_rwlock.unlock();
  
-@@ -590,6 +617,15 @@
+@@ -590,6 +667,15 @@ doneWorking:
  		_rwlock.unlock();
  		notifyDead();
  	} else {
@@ -180,7 +229,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  		// if we have any pending interrupts, schedule them to be processed now
  		// (we've just finished or suspended a call, so now's the time to handle interrupts)
  		if (!_terminating && !_dead && !_pendingInterrupts.empty()) {
-@@ -625,9 +661,37 @@
+@@ -625,9 +711,37 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  		throw std::runtime_error("Attempt to suspend thread while interrupts disabled");
  	}
  
@@ -218,7 +267,7 @@ diff --git a/src/thread.cpp b/src/thread.cpp
  
  	unlockMeWhenSuspending = unlockMe;
  
-@@ -668,13 +732,35 @@
+@@ -668,13 +782,43 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  };
  
  void DarlingServer::Thread::resume() {
@@ -243,25 +292,31 @@ diff --git a/src/thread.cpp b/src/thread.cpp
 +				dsdiagEarly.insert(this);
 +			}
 +			auto cur = currentThreadVar;
++			dsdiagRingRecord(1, _tid, _nstid, __builtin_return_address(0), (uint64_t)(int64_t)(cur ? cur->_tid : -1));
 +			microthreadLog.debug() << "DIAG resume tid=" << _tid << " nstid=" << _nstid << " EARLY-not-suspended running=" << _running << " caller-tid=" << (cur ? cur->_tid : -1) << " ret=" << __builtin_return_address(0) << microthreadLog.endLog;
  			return;
  		}
  	}
 +	++dsdiag_resume_scheduled;
++	// Rate limit: the first 32 per tid, then one line per 65536 with the running count. One tid resumed ~11000/s
++	// filled the whole 100 MB debug tail (751879 of 751880 lines) and pushed out the window of the -111 it followed.
++	uint64_t dsdiag_resume_n;
 +	{
 +		std::lock_guard<std::mutex> dl(dsdiagMutex);
 +		dsdiagEarly.erase(this);
++		static std::unordered_map<int, uint64_t> dsdiag_resume_per_tid;
++		dsdiag_resume_n = ++dsdiag_resume_per_tid[_tid];
 +	}
-+	microthreadLog.debug() << "DIAG resume tid=" << _tid << " nstid=" << _nstid << " scheduled ret=" << __builtin_return_address(0) << microthreadLog.endLog;
++	dsdiagRingRecord(0, _tid, _nstid, __builtin_return_address(0), dsdiag_resume_n);
++	if (dsdiag_resume_n <= 32 || (dsdiag_resume_n & 0xffff) == 0)
++		microthreadLog.debug() << "DIAG resume tid=" << _tid << " nstid=" << _nstid << " scheduled ret=" << __builtin_return_address(0) << " n=" << dsdiag_resume_n << microthreadLog.endLog;
  
  	Server::sharedInstance().scheduleThread(shared_from_this());
  };
-@@ -898,6 +984,29 @@
- 
- 	// increment the semaphore to let workers know there's work available.
+@@ -900,6 +1044,29 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
  	dtape_semaphore_up(kernelAsyncRunnerQueueSempahore);
-+};
-+
+ };
+ 
 +void DarlingServer::Thread::resumeSelfTest() {
 +	// Bursts of kernelAsync() lambdas: every enqueue wakes a runner through Thread::resume(), many while that
 +	// runner is still running. A lost wakeup leaves lambdas unexecuted, which shows up as a timeout here.
@@ -283,6 +338,8 @@ diff --git a/src/thread.cpp b/src/thread.cpp
 +	}
 +	fprintf(stderr, "RESUME-SELFTEST PASS: %d rounds x %d lambdas, early=%lu absorbed=%lu\n", rounds, perRound, dsdiag_resume_early_not_suspended.load(), dsdiag_suspend_absorbed_wakeup.load());
 +	_exit(0);
- };
- 
++};
++
  void DarlingServer::Thread::kernelSync(std::function<void()> fn) {
+ 	std::mutex mutex;
+ 	std::condition_variable condvar;

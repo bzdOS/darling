@@ -28,6 +28,9 @@ PREFLIGHT_DISK_DEV = "vtbd0"
 PREFLIGHT_DISK_MSW_START = 50
 PREFLIGHT_DISK_QLEN_MAX = 4
 PREFLIGHT_DISK_MSW_STOP = 200
+# full-rate DIAG resume ring in darlingserver (entries of 32 bytes; 0 = off). 200000 = 6.4 MB, about 18 s of the
+# ~11000/s single-tid resume storm seen in fix52. Saved per run as <run>-diag-ring.log.
+DSERVER_DIAG_RING = 200000
 
 [keepone]
 # top-level build/ file globs that are never candidates
