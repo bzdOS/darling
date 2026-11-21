@@ -30,11 +30,15 @@ if not hang and not counts:
 saved, last, kc = {}, {}, {}
 ci = {}
 cyc = []
+lat = []
 for i in range(first, nxt):
     ns, tid, nk, ret, n = struct.unpack_from("<QiiQQ", data, 64 + (i % cap) * 32)
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
     kc[kind] = kc.get(kind, 0) + 1
+    if kind == 14 and (n >> 56) == 3:
+        # signal latency: first interrupt_enter after a suspend signal: resent<<55 | usSinceResend<<22 | usSinceSend
+        lat.append(((n >> 55) & 1, (n >> 22) & 0x3FFFFF, n & 0x3FFFFF))
     if kind == 14 and (n >> 56) == 2:
         # watchdog cycle outcome: outcome<<52 | resends<<44 | usSinceLastResend<<22 | usSinceSend
         cyc.append(((n >> 52) & 0xF, (n >> 44) & 0xFF, (n >> 22) & 0x3FFFFF, n & 0x3FFFFF))
@@ -105,19 +109,17 @@ if hang:
             out.write("CHECKIN-TRACE dest=0x%x tid=%s route=%s delivery_errno=%s next_call_index=%s\n"
                       % (dest, d.get(1, d.get(3, (0, "?")))[1], d.get(1, ("?",))[0], d[2][0] if 2 in d else "none", d.get(3, ("?",))[0]))
 def cycle_summary():
-    # Suspend-signal cycles that reached the watchdog's first check (25 ms without thread_suspended).
-    # LOST-ORIGINAL: a re-send was needed and the handler started within 2 ms after the last re-send (the re-send was the signal
-    # that got through; the original was lost, or it was merged with it). ORIGINAL-LATE: the handler started with no re-send, or
-    # more than 2 ms after one (the original signal arrived, only slowly). Heuristic: the kernel's pending state is not readable.
-    lost = sum(1 for o, r, sr, ss in cyc if o == 1 and r >= 1 and sr < 2000)
-    late0 = [ss for o, r, sr, ss in cyc if o == 1 and r == 0]
-    late1 = sum(1 for o, r, sr, ss in cyc if o == 1 and r >= 1 and sr >= 2000)
-    other = sum(1 for o, r, sr, ss in cyc if o != 1)
-    late0.sort()
-    med = late0[len(late0) // 2] // 1000 if late0 else 0
-    mx = late0[-1] // 1000 if late0 else 0
-    return ("SIG-CYCLES total=%d LOST-ORIGINAL=%d ORIGINAL-LATE=%d (no re-send %d, median %d ms, max %d ms; after re-send %d) other=%d"
-            % (len(cyc), lost, len(late0) + late1, len(late0), med, mx, late1, other))
+    # One record per suspend signal, at the handler's first interrupt_enter (ring kind 14 sub 3).
+    # LOST-ORIGINAL: the watchdog re-sent and the handler started within 2 ms after the re-send (the re-send got through, the original
+    # did not, or was merged with it). ORIGINAL-LATE: the handler started with no re-send, or later than 2 ms after one. Heuristic:
+    # the kernel's pending state is not readable. Latencies are send -> interrupt_enter of the cycles with no re-send.
+    resent = [r for r in lat if r[0]]
+    lost = sum(1 for r in resent if r[1] < 2000)
+    plain = sorted(r[2] for r in lat if not r[0])
+    def pct(q):
+        return plain[min(len(plain) - 1, int(len(plain) * q))] // 1000 if plain else 0
+    return ("SIG-CYCLES signals=%d resent=%d LOST-ORIGINAL=%d ORIGINAL-LATE=%d (no re-send: %d, latency ms median %d p99 %d max %d)"
+            % (len(lat), len(resent), lost, len(plain) + len(resent) - lost, len(plain), pct(0.5), pct(0.99), pct(1.0)))
 if counts or hang:
     out.write(cycle_summary() + "\n")
 if counts:

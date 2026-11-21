@@ -57,7 +57,7 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
  #include <memory>
  #include <sys/types.h>
  #include <mutex>
-@@ -107,6 +108,15 @@
+@@ -107,6 +108,18 @@
  		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
  		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
  		bool _deferReplyForS2C = false;
@@ -68,12 +68,15 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
 +		// interrupt_enter calls received (a signal handler of this thread is running); the watchdog does not re-send then
 +		std::atomic<uint64_t> _interruptEnters{0};
 +		std::atomic<uint64_t> _lastEnterNs{0}; // CLOCK_MONOTONIC ns of the last interrupt_enter (watchdog outcome timing)
++		// first suspend signal sent and not yet answered by an interrupt_enter: send time, last watchdog re-send time (CLOCK_MONOTONIC ns)
++		std::atomic<uint64_t> _sigSentNs{0};
++		std::atomic<uint64_t> _sigResendNs{0};
 +		// calls received from this thread (checkin included); checkin trace: next expected call index = _callSeq + 1
 +		std::atomic<uint64_t> _callSeq{0};
  		std::optional<Message> _deferredReply = std::nullopt;
  
  		struct InterruptContext {
-@@ -302,5 +312,12 @@
+@@ -302,5 +315,12 @@
  		void logToStream(Log::Stream& stream) const;
  	};
  };
@@ -108,19 +111,28 @@ diff -ru a/src/call.cpp b/src/call.cpp
  		callLog.debug() << *thread << ": Saved client-pushed reply (" << ((thread->_pendingSavedReply) ? "pending" : "normal") << ")" << callLog.endLog;
  
  		// write a byte to the pipe so the caller can continue
-@@ -823,6 +828,11 @@
+@@ -823,6 +828,20 @@
  };
  
  void DarlingServer::Call::InterruptEnter::processCall() {
 +	if (auto t = _thread.lock()) {
 +		struct timespec ets; clock_gettime(CLOCK_MONOTONIC, &ets);
-+		t->_lastEnterNs.store((uint64_t)ets.tv_sec * 1000000000ull + ets.tv_nsec);
++		uint64_t nowNs = (uint64_t)ets.tv_sec * 1000000000ull + ets.tv_nsec;
++		t->_lastEnterNs.store(nowNs);
++		// signal latency record (ring kind 14, sub 3): n = 3<<56 | resent<<55 | usSinceResend<<22 (22 bits) | usSinceSend (22 bits)
++		uint64_t sent = t->_sigSentNs.exchange(0);
++		if (sent) {
++			uint64_t rs = t->_sigResendNs.exchange(0);
++			uint64_t us = (nowNs - sent) / 1000; if (us > 0x3fffff) us = 0x3fffff;
++			uint64_t ur = rs ? (nowNs - rs) / 1000 : 0x3fffff; if (ur > 0x3fffff) ur = 0x3fffff;
++			dsdiagRingEvent(14, t->_tid, t->_nstid, (3ull << 56) | ((rs ? 1ull : 0ull) << 55) | (ur << 22) | us);
++		}
 +		++t->_interruptEnters;
 +	}
  	Thread::_handleInterruptEnterForCurrentThread();
  
  	_sendReply(0);
-@@ -831,6 +841,19 @@
+@@ -831,6 +850,19 @@
  void DarlingServer::Call::InterruptExit::processCall() {
  	auto thread = _thread.lock();
  
@@ -140,7 +152,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	dtape_thread_sigexc_exit(thread->_dtapeThread);
  
  	_sendReply(0);
-@@ -844,6 +867,7 @@
+@@ -844,6 +876,7 @@
  
  		if (tmp.savedReply) {
  			callLog.debug() << *thread << ": Going to send saved reply" << callLog.endLog;
@@ -148,7 +160,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  			Server::sharedInstance().sendMessage(std::move(*tmp.savedReply));
  			tmp.savedReply = std::nullopt;
  		}
-@@ -1048,6 +1072,11 @@
+@@ -1048,6 +1081,11 @@
  	int code = 0;
  
  	if (auto thread = _thread.lock()) {
@@ -199,13 +211,17 @@ diff -ru a/src/message.cpp b/src/message.cpp
 diff -ru a/src/server.cpp b/src/server.cpp
 --- a/src/server.cpp
 +++ b/src/server.cpp
-@@ -257,13 +257,73 @@
+@@ -257,13 +257,76 @@
  
  	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
  		try {
 -			static_cast<DarlingServer::Thread*>(thread_context)->sendSignal(signal);
 +			auto sigThread = static_cast<DarlingServer::Thread*>(thread_context);
 +			dsdiagRingEvent(5, sigThread->_tid, sigThread->_nstid, (uint64_t)signal);
++			struct timespec sts; clock_gettime(CLOCK_MONOTONIC, &sts);
++			uint64_t sentNs = (uint64_t)sts.tv_sec * 1000000000ull + sts.tv_nsec;
++			sigThread->_sigResendNs.store(0);
++			sigThread->_sigSentNs.store(sentNs);
 +			sigThread->sendSignal(signal);
 +			// Watchdog: the host kernel sometimes drops the signal when it lands while the thread leaves the previous
 +			// handler (seen: the 7th of 7 signals never reached the guest trampoline, the suspender waited forever).
@@ -214,8 +230,6 @@ diff -ru a/src/server.cpp b/src/server.cpp
 +			std::weak_ptr<DarlingServer::Thread> weak = sigThread->weak_from_this();
 +			uint64_t base = sigThread->_suspendedCalls.load();
 +			uint64_t baseEnter = sigThread->_interruptEnters.load();
-+			struct timespec sts; clock_gettime(CLOCK_MONOTONIC, &sts);
-+			uint64_t sentNs = (uint64_t)sts.tv_sec * 1000000000ull + sts.tv_nsec;
 +			std::thread([weak, base, baseEnter, signal, sentNs]() {
 +				// One outcome record (ring kind 14, sub 2) per cycle that reaches the first check, to tell a lost signal from a slow
 +				// one: n = 2<<56 | outcome<<52 | resends<<44 | usSinceLastResend<<22 | usSinceSend (22 bits each, saturating, times at the
@@ -252,6 +266,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
 +					struct timespec rts; clock_gettime(CLOCK_MONOTONIC, &rts);
 +					lastResendNs = (uint64_t)rts.tv_sec * 1000000000ull + rts.tv_nsec;
 +					++resends;
++					t->_sigResendNs.store(lastResendNs);
 +					dsdiagRingEvent(14, t->_tid, t->_nstid, (uint64_t)i); // suspend signal re-sent
 +					try {
 +						t->sendSignal(signal);
@@ -274,7 +289,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  	static void dtape_hook_thread_context_dispose(void* thread_context) {
  		static_cast<DarlingServer::Thread*>(thread_context)->_dispose();
  	};
-@@ -460,6 +520,7 @@
+@@ -460,6 +523,7 @@
  		.thread_lookup_eternal = dtape_hook_thread_lookup_eternal,
  		.thread_get_state = dtape_hook_thread_get_state,
  		.thread_send_signal = dtape_hook_thread_send_signal,
@@ -282,7 +297,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  		.thread_context_dispose = dtape_hook_thread_context_dispose,
  		.thread_eternal_id = dtape_hook_thread_eternal_id,
  
-@@ -917,5 +978,8 @@
+@@ -917,5 +981,8 @@
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
