@@ -211,6 +211,7 @@ AK_NEW="${BUILD}/AppKit.new"
 # shellcheck disable=SC2086
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/AppKit.framework/Versions/C/AppKit \
+	-compatibility_version 45.0.0 -current_version 1499.11.0 \
 	-o "${AK_NEW}" \
 	${ak_objs} \
 	"${OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
