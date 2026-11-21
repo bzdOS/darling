@@ -1,5 +1,5 @@
 #!/bin/sh
-# keep-one-check.sh - "one tree, one final build, nothing grows" check. READ-ONLY: never deletes anything.
+# keep-one-check.sh - "one tree, one final build, nothing grows" check. Read-only by default; only --clean-sockets (stale mldr sockets) and --apply (exactly the --list paths) delete.
 # usage: keep-one-check.sh           prints exactly one line: KEEP-ONE verdict=pass|fail <details>; exit 1 on fail
 #        keep-one-check.sh --clean-sockets  removes only stale /tmp/darling-mldr-<pid>-<fd> sockets (dead pid, >5 min); prints KEEP-ONE sockets removed=N kept_live=M
 #        keep-one-check.sh --list    prints the candidate paths (one per line); still deletes nothing
@@ -123,7 +123,7 @@ is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\
 
 # ---- 1. stale top-level logs/png/cores ----
 if [ -d "$B" ]; then
-	for f in $(cd "$B" && ls -p | grep -v / | grep -E '\.(log|png|core)$|^core\.|^chrome-sr-|^series-.*\.out$|-series\.out$'); do
+	for f in $(cd "$B" && ls -p | grep -v / | grep -E '\.(log|png|core)$|^core\.|^chrome-sr-|^series-.*\.out$|-series\.out$|-series-out\.txt$'); do
 		case "$f" in
 		series-*.out) o=${f#series-}; o=${o%.out};;
 		*-series.out) o=${f%-series.out};;
