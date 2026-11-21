@@ -1,0 +1,15 @@
+diff --git a/lib/builtins/CMakeLists.txt b/lib/builtins/CMakeLists.txt
+index 0154dd65..a8d2d0bb 100644
+--- a/lib/builtins/CMakeLists.txt
++++ b/lib/builtins/CMakeLists.txt
+@@ -29,8 +29,8 @@ set(GENERIC_SOURCES
+   ashlti3.c
+   ashrdi3.c
+   ashrti3.c
+-  # FIXME: atomic.c may only be compiled if host compiler understands _Atomic
+-  # atomic.c
++  # Darling: atomic.c provides the generic __atomic_* libcalls (clang supports _Atomic).
++  atomic.c
+   clear_cache.c
+   clzdi2.c
+   clzsi2.c

@@ -38,3 +38,4 @@ xnu xnu-mac-syscall-enopolicy.patch
 darlingserver darlingserver-mldr-path-env.patch
 darlingserver darlingserver-exec-checkin-main-thread.patch
 xnu xnu-posix-spawn-cloexec-no-proc.patch
+compiler-rt compiler-rt-builtins-atomic.patch
