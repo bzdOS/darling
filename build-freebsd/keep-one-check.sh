@@ -27,6 +27,8 @@
 #  6. scratch files: top-level files in build/ matching KEEPONE_SCRATCH_BUILD (default "*.diagbak *.fixed *.condfix
 #     fix*.py": source backups and edit scripts of a diagnosis) and files matching KEEPONE_SCRATCH_TMP (default
 #     "/tmp/fixcond-*.py") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
+#     Also untracked or ignored *.orig files (patch leftovers) in the source tree <root>/src and its submodules, from
+#     git status --porcelain --ignored (type srcorig, counted in scratch_files); apply re-checks each is untracked.
 #  Refinements: files modified within KEEPONE_MIN_AGE_MIN minutes (default 120), files whose name contains
 #  KEEPONE_FOREIGN (default alt2-r, another owner's series) and files open in a live process (fstat) are never candidates.
 # Never flagged: build/dserver/*, last-two-series files, /tmp/rs-* (outside the scanned dirs), and the dir keep-list
@@ -248,6 +250,17 @@ for f in $SCRT; do
 	printf '%s\ttmpscratch\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
 done >>"$T"
 
+SRCT="$ROOT/src"
+if [ -d "$SRCT/.git" ] || [ -f "$SRCT/.git" ]; then
+	{
+		git -C "$SRCT" status --porcelain --ignored -uall 2>/dev/null | sed -n "s|^[?!][?!] \\(.*\\.orig\\)\$|$SRCT/\\1|p"
+		git -C "$SRCT" submodule foreach --quiet --recursive 'git status --porcelain --ignored -uall 2>/dev/null | sed -n "s|^[?!][?!] \(.*\.orig\)\$|$PWD/\1|p"' 2>/dev/null
+	} | while IFS= read -r f; do
+		[ -f "$f" ] || continue
+		printf '%s\tsrcorig\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
+	done >>"$T"
+fi
+
 # ---- 2. backup/: one entry per library, newest kept ----
 if [ -d "$BK" ]; then
 	for f in $(cd "$BK" && ls -t); do
@@ -272,6 +285,11 @@ if [ "$MODE" = apply ]; then
 			_ok=0; set -f; for g in $SCRT; do set +f; case "$_rp" in $g) _ok=1;; esac; set -f; done; set +f
 			[ $_ok = 1 ] && [ ! -L "$_path" ] && continue
 			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, not a scratch file" >&2; continue
+		fi
+		if [ "$_ty" = srcorig ]; then
+			_rs=$(realpath "$SRCT" 2>/dev/null)
+			case "$_rp" in "$_rs"/*.orig) if [ -n "$_rs" ] && [ ! -L "$_path" ] && ! git -C "$(dirname "$_rp")" ls-files --error-unmatch "$(basename "$_rp")" >/dev/null 2>&1; then continue; fi;; esac
+			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked .orig under $SRCT" >&2; continue
 		fi
 		if [ "$_ty" = stray ]; then
 			_ok=0; for sd in $STRAY; do _rs=$(realpath "$sd" 2>/dev/null); case "$_rp" in "$_rs"/*) [ -n "$_rs" ] && _ok=1;; esac; done
@@ -299,7 +317,7 @@ fi
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
 over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
-np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c "scratch	" "$T")
+np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c -e "scratch	" -e "	srcorig	" "$T")
 cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
 v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ "$nsc" -gt 0 ] || [ $over = 1 ]; } && v=fail
