@@ -58,5 +58,5 @@ darlingserver darlingserver-dtape-clock-monotonic-freebsd.patch
 ../.. startup-timerfd-condvar-monotonic.patch
 # mldr-sig65-unblock-count.patch: unblock the native real-time signals 65/66 at trap setup (the guest sigexc_setup2 cannot name them in its 8-byte mask) and count trampoline entries for 65/66 (printed as [sig65-count] only when DARLING_SIG65_COUNT is set in the guest environment), to compare with ring kind 5 (signals sent) and kind 14 (watchdog re-sends).
 ../.. mldr-sig65-unblock-count.patch
-# UNVERIFIED: guest libsystem_kernel not rebuilt. xnu-sigexc-setup2-no-shift64.patch: sigexc_setup2 built its unblock mask with 1ull << 64 (undefined; SIGHUP on x86); signals 65/66 are not expressible in the guest 8-byte mask, mldr unblocks them natively. Not rebuilt into the guest libsystem_kernel in the probe runs (compile-only change).
+# xnu-sigexc-setup2-no-shift64.patch (verified: guest libsystem_kernel relinked with relink-libsystem-kernel-dirty.sh, sigexc_setup2 is empty in the binary, sig-reentry 3/3 and busy info 1 pass): sigexc_setup2 built its unblock mask with 1ull << 64 (undefined; SIGHUP on x86); signals 65/66 are not expressible in the guest 8-byte mask, mldr unblocks them natively. Not rebuilt into the guest libsystem_kernel in the probe runs (compile-only change).
 xnu xnu-sigexc-setup2-no-shift64.patch
