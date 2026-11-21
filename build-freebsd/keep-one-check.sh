@@ -70,11 +70,18 @@ KEEP_INFRA="CMakeFiles Developer -I i386 x86_64 x86_64-apple-darwin20 dtape cg-s
 # work dirs of the current probes and of everything the gate (stage-gate.sh, probes/*.sh) rebuilds or uses
 KEEP_PROBE="imageio imageio-probe suspend-rwlock-probe suspend-mutex-probe suspend-cv-probe suspend-wake-probe* window-draw* netsegv nullsrc unwind-resume v5store catx-kvc-probe eintr-prepost-probe psynch-ring-probe ptattach-probe semtw-probe port-construct-probe font-families-probe font-resolve-probe syscall482-probe throw-trace-selftest"
 KEEP_DIRS="$KEEP_SRC $KEEP_OUT $KEEP_INFRA $KEEP_PROBE $KEEPONE_ALLOW"
-# top-level build/ files that are never candidates: gate/probe output and the series fix20a, fix20, fix21, fix22
+# top-level build/ files (KEEP_FILES) and backup/ entries (KEEP_BACKUPS) that are never candidates: the [keepone] lists of
+# darling.toml, read as data from the generated $B/keepone.env, or straight from the toml (gen-from-schema.py --emit keepone)
+# when it is not generated; neither readable: fail, never an empty keep list. KEEPONE_ALLOW_FILES/_BACKUPS add to them.
 # (suspend-(rwlock|mutex|cv)-* pairs are limited to the newest KEEPONE_SUSPEND_KEEP per kind, see section 1b)
-KEEP_FILES="darling.env window-draw* imageio-probe.log series-fix20*.out series-fix21*.out series-fix22*.out chrome-sr-fix20* chrome-sr-fix21* chrome-sr-fix22* $KEEPONE_ALLOW_FILES"
-# backup/ entries that are rollback points (named so in the handoff notes) or not yet understood; never candidates
-KEEP_BACKUPS="ImageIO ImageIO.pre-r5 ImageIO.real-r5.* stub-data-ImageIO.pre-r5 AppKitExtras.dylib.pre-b4-fontfamilies AppKitExtras.pre-resize darlingserver.pre-q1.* darlingserver.pre-b6.* darlingserver.pre-d2.* darlingserver.pre-d5.* darlingserver.pre-f1.* darlingserver.pre-rebuild libdtape.a.pre-q1 libdtape.a.pre-b6 libdtape.a.pre-d5 stubdata-pre-b5 darling-extras.dylib.pre-ctresolve libsystem_kernel.pre-statfs-deploy.* $KEEPONE_ALLOW_BACKUPS"
+_HERE=$(dirname "$0")
+if [ -f "$B/keepone.env" ]; then _kol=$(cat "$B/keepone.env")
+else _kol=$(python3 "$_HERE/gen-from-schema.py" --emit keepone 2>/dev/null); fi
+_kf=$(printf '%s\n' "$_kol" | sed -n "s/^KEEPONE_FILES='\(.*\)'$/\1/p")
+_kb=$(printf '%s\n' "$_kol" | sed -n "s/^KEEPONE_BACKUPS='\(.*\)'$/\1/p")
+{ [ -n "$_kf" ] && [ -n "$_kb" ]; } || { echo "KEEP-ONE verdict=fail no-keepone-list"; exit 2; }
+KEEP_FILES="$_kf $KEEPONE_ALLOW_FILES"
+KEEP_BACKUPS="$_kb $KEEPONE_ALLOW_BACKUPS"
 
 T=$(mktemp -t keepone.XXXXXX) || exit 2
 trap 'rm -f "$T"' EXIT INT TERM
