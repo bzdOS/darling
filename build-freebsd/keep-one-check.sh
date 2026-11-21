@@ -136,8 +136,8 @@ owner() {
 # inodes open in a live process on the build filesystem
 OPEN=" $(timeout 60 fstat -f "$B" 2>/dev/null | awk 'NR>1 && $6 ~ /^[0-9]+$/ {print $6}' | sort -u | tr '\n' ' ')"
 
-# probe runner logs and traces (run-*-probe.sh): <kind>-MMDD-HHMMSS.log and <kind>-MMDD-HHMMSS-ktrace.out; handled in 1d only
-is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out)$'; }
+# probe runner logs and traces (run-*-probe.sh): <kind>-MMDD-HHMMSS.log, -ktrace.out and -ring.bin (diag ring); handled in 1d only
+is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out|-ring\.bin)$'; }
 # Old sig-reentry-probe-run.sh naming (before <kind>-MMDD-HHMMSS): <prefix><run>-<i>.log and
 # <prefix><run>-<i>-dserver[-head].txt, for the runner prefixes used on this tree. All of them are probe candidates.
 PROBE_OLD_PREFIXES="cancelrpc abold abnew cnt sigre"

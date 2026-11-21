@@ -6,14 +6,16 @@
 #        diag-ring-decode.py --hang-class <ring.bin>   one HANG-CLASS line per thread (livelock kind A/B):
 #   saved_reply=yes when the thread's last client-pushed reply save (kind 4) has no later re-send (kind 3),
 #   last= the thread's last ring event. Kind A = hang with saved_reply=yes, kind B = saved_reply=no.
+#        diag-ring-decode.py --counts <ring.bin>   one RING-COUNTS line (entries per kind; k8/k9 > 0 proves the ring is written)
 import struct
 import sys
 
 KINDS = {0: "resume-scheduled", 1: "resume-EARLY", 3: "saved-reply-resent", 4: "reply-saved",
          5: "signal", 8: "call", 9: "reply-outbox"}
 
+counts = sys.argv[1] == "--counts"
 hang = sys.argv[1] == "--hang-class"
-path = sys.argv[2] if hang else sys.argv[1]
+path = sys.argv[2] if (hang or counts) else sys.argv[1]
 with open(path, "rb") as f:
     data = f.read()
 if len(data) < 64 or data[:8] != b"DSDRING1":
@@ -22,13 +24,14 @@ cap, nxt = struct.unpack_from("<QQ", data, 8)
 count = min(nxt, cap)
 first = nxt - count
 out = sys.stdout
-if not hang:
+if not hang and not counts:
     out.write("# ring capacity=%d recorded=%d shown=%d\n" % (cap, nxt, count))
-saved, last = {}, {}
+saved, last, kc = {}, {}, {}
 for i in range(first, nxt):
     ns, tid, nk, ret, n = struct.unpack_from("<QiiQQ", data, 64 + (i % cap) * 32)
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
+    kc[kind] = kc.get(kind, 0) + 1
     t = "%d.%09d" % (ns // 10**9, ns % 10**9)
     if kind in (3, 4, 5, 8) and tid >= 0:
         if kind == 4:
@@ -36,7 +39,7 @@ for i in range(first, nxt):
         elif kind == 3:
             saved[tid] = "no"
         last[tid] = "%s=%d@%s" % (KINDS[kind], n, t)
-    if hang:
+    if hang or counts:
         continue
     if kind == 1:
         out.write("%s DIAG resume tid=%d nstid=%d EARLY-not-suspended caller-tid=%d ret=0x%x\n"
@@ -50,3 +53,5 @@ if hang:
         out.write("HANG-CLASS none (ring has no sigexc/RPC events, recorded=%d)\n" % nxt)
     for tid in sorted(last):
         out.write("HANG-CLASS tid=%d saved_reply=%s last=%s\n" % (tid, saved.get(tid, "no"), last[tid]))
+if counts:
+    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 8, 9))))

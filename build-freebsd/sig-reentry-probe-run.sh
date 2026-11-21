@@ -50,6 +50,11 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	# PROBE-HANG: one HANG-CLASS line per thread from the diag ring (needs DSERVER_DIAG_RING in PROBE_EXTRA_ENV):
 	# saved_reply=yes is livelock kind A, saved_reply=no kind B. Appended to the run log, before the prefix is reaped.
 	RING="$DARLING_PREFIX/private/var/log/dserver-diag-ring.bin"
+	# Every run with a ring: keep it as PREFIX-<stamp>-ring.bin and append a RING-COUNTS line (k8/k9 > 0: the ring is written).
+	if /usr/local/bin/sudo -n test -f "$RING"; then
+		/usr/local/bin/sudo -n cat "$RING" > "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" 2>/dev/null
+		python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" --counts "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" >> "$LOG" 2>&1
+	fi
 	if grep -aq PROBE-HANG "$LOG"; then
 		if /usr/local/bin/sudo -n test -f "$RING"; then
 			/usr/local/bin/sudo -n cat "$RING" | python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" --hang-class /dev/stdin >> "$LOG" 2>&1
@@ -70,6 +75,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 			ev="$ev last=[$(grep -a 'suspend round' "$LOG" | tail -1)]"
 		fi
 		echo "$P-$i rc=$rc ${d}s/${T}s $v [${sig:-none}]$ev"
+		grep -a "^RING-COUNTS" "$LOG" | head -1
 		grep -a "^HANG-CLASS" "$LOG" | head -8
 	fi
 	i=$((i+1))
