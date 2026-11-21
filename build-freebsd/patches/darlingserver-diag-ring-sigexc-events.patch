@@ -1,0 +1,76 @@
+diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
+--- a/internal-include/darlingserver/thread.hpp	2026-11-21 23:32:47.156407525 +0300
++++ b/internal-include/darlingserver/thread.hpp	2026-11-21 23:33:00.662143254 +0300
+@@ -303,4 +303,7 @@
+ 	};
+ };
+ 
++// Diag ring event (DSERVER_DIAG_RING), defined in thread.cpp; kinds listed there.
++void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n);
++
+ #endif // _DARLINGSERVER_THREAD_HPP_
+diff -ru a/src/call.cpp b/src/call.cpp
+--- a/src/call.cpp	2026-11-21 23:32:03.493722819 +0300
++++ b/src/call.cpp	2026-11-21 23:33:00.662004258 +0300
+@@ -167,6 +167,7 @@
+ 
+ 	auto pidString = (process) ? (std::to_string(process->id()) + " (" + std::to_string(process->nsid()) + ")") : (std::to_string(header->pid) + " (-1)");
+ 	auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
++	dsdiagRingEvent(8, thread ? thread->_tid : -1, thread ? thread->_nstid : (int)header->tid, header->number);
+ 	callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
+ 
+ 	if (header->number == dserver_callnum_s2c) {
+@@ -238,6 +239,7 @@
+ 			}
+ 		}
+ 
++		dsdiagRingEvent(4, thread->_tid, thread->_nstid, thread->_pendingSavedReply ? 1 : 0);
+ 		callLog.debug() << *thread << ": Saved client-pushed reply (" << ((thread->_pendingSavedReply) ? "pending" : "normal") << ")" << callLog.endLog;
+ 
+ 		// write a byte to the pipe so the caller can continue
+@@ -844,6 +846,7 @@
+ 
+ 		if (tmp.savedReply) {
+ 			callLog.debug() << *thread << ": Going to send saved reply" << callLog.endLog;
++			dsdiagRingEvent(3, thread->_tid, thread->_nstid, 0);
+ 			Server::sharedInstance().sendMessage(std::move(*tmp.savedReply));
+ 			tmp.savedReply = std::nullopt;
+ 		}
+diff -ru a/src/server.cpp b/src/server.cpp
+--- a/src/server.cpp	2026-11-21 23:32:03.664725502 +0300
++++ b/src/server.cpp	2026-11-21 23:33:00.661737755 +0300
+@@ -257,7 +257,9 @@
+ 
+ 	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
+ 		try {
+-			static_cast<DarlingServer::Thread*>(thread_context)->sendSignal(signal);
++			auto sigThread = static_cast<DarlingServer::Thread*>(thread_context);
++			dsdiagRingEvent(5, sigThread->_tid, sigThread->_nstid, (uint64_t)signal);
++			sigThread->sendSignal(signal);
+ 			return 0;
+ 		} catch (std::system_error e) {
+ 			return -e.code().value();
+@@ -917,5 +919,8 @@
+ };
+ 
+ void DarlingServer::Server::sendMessage(Message&& message) {
++	if (message.data().size() >= sizeof(dserver_rpc_replyhdr_t)) {
++		dsdiagRingEvent(9, -1, -1, reinterpret_cast<dserver_rpc_replyhdr_t*>(message.data().data())->number);
++	}
+ 	_outbox.push(std::move(message));
+ };
+diff -ru a/src/thread.cpp b/src/thread.cpp
+--- a/src/thread.cpp	2026-11-21 23:32:03.305719870 +0300
++++ b/src/thread.cpp	2026-11-21 23:32:20.218917773 +0300
+@@ -1837,3 +1837,11 @@
+ 
+ 	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
+ };
++
++// Sigexc/RPC events for the diag ring (DSERVER_DIAG_RING); ret is 0 for these kinds.
++// 3 = saved reply re-sent at interrupt_exit, 4 = client-pushed reply saved (n 1 = pending, 0 = normal),
++// 5 = signal sent via duct-tape (n = signal), 8 = call received (n = call number),
++// 9 = reply put in the outbox (tid -1, n = reply number).
++void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n) {
++	dsdiagRingRecord(kind, tid, nstid, nullptr, n);
++}

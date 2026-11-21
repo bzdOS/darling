@@ -48,3 +48,5 @@ xnu xnu-dserver-rpc-send-retry-enobufs.patch
 darlingserver darlingserver-socket-rcvbuf.patch
 darlingserver darlingserver-abandon-stray-wait.patch
 darlingserver darlingserver-launchd-mldr-path-env.patch
+# darlingserver-diag-ring-sigexc-events.patch: diag ring kinds 3/4/5/8/9 (saved reply re-sent, reply saved, signal, call, reply outbox); last so earlier patches still reverse-check.
+darlingserver darlingserver-diag-ring-sigexc-events.patch
