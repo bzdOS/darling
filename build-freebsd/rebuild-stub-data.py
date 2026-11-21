@@ -208,6 +208,11 @@ def main():
             funcs = [n for n in funcs if n not in defined]
             datas = [n for n in datas if n not in defined]
         classes = R.class_names(ex)
+        # a class with an EXTRAS entry gets its ivars from the .m (classes_m): its _OBJC_IVAR_$_<class>.* names
+        # are emitted there, so they are not data objects of the .s as well (duplicate symbol at link)
+        in_m = tuple("_OBJC_IVAR_$_%s." % c for c in classes if c in R.EXTRAS)
+        if in_m:
+            datas = [n for n in datas if not n.startswith(in_m)]
         fix = [n for n in ex if n in drop or (ex[n] == ("__TEXT", "__text") and
                (R.is_known_data(n) or n in datalist))]
         # a string constant exported as a zero filled object is rebuilt as a pointer to a CFString
