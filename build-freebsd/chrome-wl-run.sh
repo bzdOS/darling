@@ -59,6 +59,16 @@ PROV_LIBEXEC=${DARLING_INSTALLED_LIBEXEC:-/usr/local/libexec/darling/usr/libexec
 } > "$LOG"
 SUDO=${CHROME_SR_SUDO:-/usr/local/bin/sudo -n}
 LAUNCH=${CHROME_SR_LAUNCH:-$DARLING_BUILD_DIR/launch-dynamic}
+# DARLING_KTRACE=<file>: the launcher is run under `ktrace -i -t n -f <file>` INSIDE the sudo command below (the trace follows
+# the exec of mldr and every guest process; a ktrace started outside sudo loses them at the privilege change). The file must
+# lie inside DARLING_BUILD_DIR; anything else stops the run with a KTRACE FAIL line. Unset: nothing changes.
+KT=""
+if [ -n "$DARLING_KTRACE" ]; then
+	case "$DARLING_KTRACE" in
+	"$DARLING_BUILD_DIR"/*) KT="ktrace -i -t n -f $DARLING_KTRACE";;
+	*) echo "KTRACE FAIL path=$DARLING_KTRACE (not inside the build directory)"; exit 2;;
+	esac
+fi
 BASE=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S
 RCF=$BASE.rc.$$
 rm -f "$RCF"
@@ -85,7 +95,7 @@ RDP=$!
   ${CHROME_SR_SERVER_LOG:+DSERVER_LOG_LEVEL=$CHROME_SR_SERVER_LOG} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
-  timeout --foreground -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
+  $KT timeout --foreground -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
 BGP=$!
 # Hang dump: CHROME_SR_DUMP_LEAD seconds (default 40) before the timeout, if the run is still alive, run
 # ds-microthreads-dump.sh on the server pid and guest-threads-snapshot.sh on the guest pid. Both pids come from the
