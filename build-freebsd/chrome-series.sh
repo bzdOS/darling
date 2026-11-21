@@ -78,10 +78,7 @@ mkdir -p "$DARLING_PREFIX/private/var/log"
 echo "level=$DSERVER_LOG_LEVEL" > "$DARLING_PREFIX/private/var/log/dserver.log"
 echo "[launch] DSERVER pid=$SP" >&2
 echo "[launch] STAGING end / GUEST-EXEC pid=$$ t=0s" >&2
-# orphan: a grandchild that ignores TERM and is not killed by the trap above
-# (like a guest helper whose parent dies); timeout must still reap it
-( trap "" TERM; exec sleep 600 ) &
-echo "$SP $$ $!" > "$FAKE_PIDS"
+echo "$SP $$" > "$FAKE_PIDS"
 while :; do sleep 1; done
 FAKE
 	printf '#!/bin/sh\necho "ds called pid=$1 n=$#" >> "%s"; echo "FAKE-DSDUMP $1"\n' "$TD/calls" > "$TD/dsdump"
@@ -95,8 +92,6 @@ FAKE
 	SP=$(cut -d' ' -f1 "$TD/pids"); GP=$(cut -d' ' -f2 "$TD/pids")
 	L=$TD/chrome-sr-st1.log; ok=1; why=""
 	chk() { eval "$1" || { ok=0; why="$why [$2]"; }; }
-	OP=$(cut -d' ' -f3 "$TD/pids")
-	chk '[ -n "$OP" ] && ! ps -p "$OP" >/dev/null 2>&1' orphan-reaped
 	chk 'grep -aq "^WRAPPER_RC=124" "$L"' rc124
 	chk '[ -n "$SP" ] && [ -n "$GP" ] && [ "$SP" != "$GP" ]' pids
 	chk '[ "$(grep -c "^ds called" "$TD/calls")" = 1 ] && grep -q "^ds called pid=$SP n=1$" "$TD/calls"' ds-called-with-server-pid

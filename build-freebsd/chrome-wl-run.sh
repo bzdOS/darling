@@ -78,8 +78,6 @@ BASE=$DARLING_BUILD_DIR/${CHROME_LOG_PREFIX:-chrome-wl}-$S
 RCF=$BASE.rc.$$
 rm -f "$RCF"
 # Run in the background (own subshell, so kill -0 works on it) so that a hang can be dumped BEFORE timeout kills it.
-# timeout without --foreground is the reaper (procctl) of the whole tree: on expiry every descendant gets TERM/KILL,
-# so guest helpers whose parent died do not survive the run with ppid 1.
 # CHROME_SR_SERVER_LOG=<level> starts the server with DSERVER_LOG_LEVEL=<level>.
 # Log cap: the run writes into a FIFO read by one awk (RDP) that drops the traplog/prctl lines (and the lone quote lines their multi-line records leave behind) and stops appending to the
 # log after CHROME_SR_LOG_CAP bytes (default 200 MB; it keeps reading, so the run is never blocked or killed by the cap).
@@ -105,7 +103,7 @@ TL=""; _tl="${DARLING_TRAP_LOG-1}"
   ${CHROME_SR_SERVER_LOG:+DSERVER_LOG_LEVEL=$CHROME_SR_SERVER_LOG} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
-  $KT timeout -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
+  $KT timeout --foreground -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
 BGP=$!
 # Hang dump: CHROME_SR_DUMP_LEAD seconds (default 40) before the timeout, if the run is still alive, run
 # ds-microthreads-dump.sh on the server pid and guest-threads-snapshot.sh on the guest pid. Both pids come from the
