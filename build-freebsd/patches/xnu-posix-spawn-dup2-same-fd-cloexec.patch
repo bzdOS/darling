@@ -1,0 +1,19 @@
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
+@@ -272,6 +272,16 @@
+ 						ret = sys_dup2(act->psfaa_filedes, act->psfaa_dup2args.psfad_newfiledes);
+ 						if (ret < 0)
+ 							goto fail;
++						// XNU: dup2 onto the same descriptor clears FD_CLOEXEC (that is how
++						// crashpad passes --handshake-fd); Linux dup2(fd, fd) is a no-op.
++						if (act->psfaa_filedes == act->psfaa_dup2args.psfad_newfiledes) {
++							ret = sys_fcntl(act->psfaa_filedes, F_GETFD, 0);
++							if (ret < 0)
++								goto fail;
++							ret = sys_fcntl(act->psfaa_filedes, F_SETFD, ret & ~FD_CLOEXEC);
++							if (ret < 0)
++								goto fail;
++						}
+ 						break;
+ 
+ 					case XNU_PSFA_OPEN:

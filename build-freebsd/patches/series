@@ -40,3 +40,4 @@ darlingserver darlingserver-exec-checkin-main-thread.patch
 xnu xnu-posix-spawn-cloexec-no-proc.patch
 compiler-rt compiler-rt-builtins-atomic.patch
 xnu xnu-xattr-enoattr-setxattr-vchroot.patch
+xnu xnu-posix-spawn-dup2-same-fd-cloexec.patch
