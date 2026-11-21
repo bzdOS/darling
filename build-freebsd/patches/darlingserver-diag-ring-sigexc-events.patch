@@ -61,8 +61,8 @@ diff -ru a/src/server.cpp b/src/server.cpp
  };
 diff -ru a/src/thread.cpp b/src/thread.cpp
 --- a/src/thread.cpp	2026-11-21 23:32:03.305719870 +0300
-+++ b/src/thread.cpp	2026-11-22 00:02:22.348690878 +0300
-@@ -1837,3 +1837,61 @@
++++ b/src/thread.cpp	2026-11-22 00:04:12.464978576 +0300
+@@ -1837,3 +1837,63 @@
  
  	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
  };
@@ -118,6 +118,8 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +		if (kind == 5) sl.sigNs = ns;
 +		return;
 +	}
++	// table full: never overwrite another thread's slot; count the dropped event in header u64[5]
++	__atomic_fetch_add((uint64_t*)((char*)dsdiagRing - 64) + 5, 1, __ATOMIC_RELAXED);
 +}
 +
 +void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n) {

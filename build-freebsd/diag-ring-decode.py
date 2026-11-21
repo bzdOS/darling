@@ -48,13 +48,16 @@ for i in range(first, nxt):
         out.write("%s DIAG resume tid=%d nstid=%d scheduled ret=0x%x n=%d\n" % (t, tid, nstid, ret, n))
     else:
         out.write("%s DIAG %s tid=%d nstid=%d n=%d\n" % (t, KINDS.get(kind, "kind%d" % kind), tid, nstid, n))
-toff, tslots = struct.unpack_from("<QQ", data, 24)
+toff, tslots, tdropped = struct.unpack_from("<QQQ", data, 24)
 table = []
 if hang and toff and tslots and len(data) >= toff + tslots * 64:
     for j in range(tslots):
         tid, nst, lns, lk, _p, ln, cn, cns, sns, ev = struct.unpack_from("<iiQIIQQQQQ", data, toff + j * 64)
         if tid:
             table.append((tid, nst, lns, lk, ln, cn, cns, sns, ev))
+if hang and toff:
+    out.write("HANG-CLASS table threads=%d slots=%d dropped_events=%d%s\n"
+              % (len(table), tslots, tdropped, " TABLE-OVERFLOW" if tdropped else ""))
 if table:
     # per-thread table (never wrapped): every thread that ever made a call or got a signal
     now = max(r[2] for r in table)
