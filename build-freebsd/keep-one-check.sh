@@ -118,6 +118,9 @@ owner() {
 # inodes open in a live process on the build filesystem
 OPEN=" $(timeout 60 fstat -f "$B" 2>/dev/null | awk 'NR>1 && $6 ~ /^[0-9]+$/ {print $6}' | sort -u | tr '\n' ' ')"
 
+# probe runner logs and traces (run-*-probe.sh): <kind>-MMDD-HHMMSS.log and <kind>-MMDD-HHMMSS-ktrace.out; handled in 1d only
+is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out)$'; }
+
 # ---- 1. stale top-level logs/png/cores ----
 if [ -d "$B" ]; then
 	for f in $(cd "$B" && ls -p | grep -v / | grep -E '\.(log|png|core)$|^core\.|^chrome-sr-|^series-.*\.out$|-series\.out$'); do
@@ -128,6 +131,7 @@ if [ -d "$B" ]; then
 		*) o="";;
 		esac
 		case "$f" in suspend-*) continue;; esac	# suspend-(rwlock|mutex|cv) handled in 1b, other suspend-* (wake probe) protected
+		is_probe "$f" && continue	# probe runner logs: section 1d
 		[ -n "$FOREIGN" ] && case "$f" in *"$FOREIGN"*) continue;; esac
 		_k=0; set -f; for g in $KEEP_FILES; do case "$f" in $g) _k=1; break;; esac; done; set +f; [ $_k = 1 ] && continue
 		[ -n "$(find "$B/$f" -mmin -"$AGE" 2>/dev/null)" ] && continue
@@ -160,10 +164,25 @@ fi
 if [ -d "$B" ]; then
 	_n=0
 	for f in $(cd "$B" && ls -t -p | grep -v / | grep -E -- '-ktrace\.out$'); do
+		is_probe "$f" && continue	# probe traces: section 1d, they never push a series trace out
 		_n=$((_n+1)); [ $_n -le 1 ] && continue
 		[ -n "$(find "$B/$f" -mmin -"$AGE" 2>/dev/null)" ] && continue
 		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
 		printf '%s\tlog\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
+	done >>"$T"
+fi
+
+# ---- 1d. probe runner logs/traces: the newest one of each kind (<kind>.log, <kind>-ktrace.out) is kept; older ones are
+# type probe: shown by --list, removed by --apply, counted as probe_logs, never fail the verdict (the gate's own probes write them) ----
+if [ -d "$B" ]; then
+	_seen=""
+	for f in $(cd "$B" && ls -t -p | grep -v /); do
+		is_probe "$f" || continue
+		case "$f" in *-ktrace.out) _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-ktrace.out}.ktrace;;
+		*) _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log}.log;; esac
+		case " $_seen " in *" $_kd "*) ;; *) _seen="$_seen $_kd"; continue;; esac
+		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
+		printf '%s\tprobe\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
 	done >>"$T"
 fi
 
@@ -220,8 +239,9 @@ fi
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
 over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
-cb=$(awk -F'\t' '{s+=$1} END{print s+0}' "$T")
+np=$(grep -c "	probe	" "$T")
+cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
 v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ $over = 1 ]; } && v=fail
-echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G"
+echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np"
 [ $v = pass ]
