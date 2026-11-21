@@ -4,8 +4,8 @@
 # Env: DARLING_SRC_DIR DARLING_OVERLAY DARLING_BUILD_DIR; PROBE_TRAP_LOG=1 turns the guest trap log on.
 # PROBE_EXTRA_ENV="A=1 B=2" adds env to the guest run. PROBE_BINARY=<tests/ name> runs another probe binary.
 # PROBE_SERVER_LOG=<level> (or CHROME_SR_SERVER_LOG) starts darlingserver with DSERVER_LOG_LEVEL=<level> and saves
-# its log as PREFIX-<i>-dserver.txt (last 100 MB) for a failed run only, to catch the server dropping its socket (-111).
-# Logs: $DARLING_BUILD_DIR/PREFIX-<i>.log, never overwritten. A run without GUEST-EXEC (never reached the
+# its log as PREFIX-<MMDD-HHMMSS>-dserver.txt (last 100 MB) for a failed run only, to catch the server dropping its socket (-111).
+# Logs: $DARLING_BUILD_DIR/PREFIX-<MMDD-HHMMSS>.log (the <kind>-MMDD-HHMMSS form keep-one-check.sh counts as probe logs), never overwritten. A run without GUEST-EXEC (never reached the
 # guest, e.g. slow staging) is INVALID and not counted. One line per run, then a SUMMARY line.
 # A timed-out run (rc 124/137) is counted as one of two different events (the "progress=" value is not a
 # liveness signal; it stays 0 in passing runs): stall_progress0 when the guest wrote nothing (no new
@@ -31,7 +31,7 @@ KT=; [ -n "$PROBE_KTRACE" ] && KT="ktrace -i -t cs -f $DARLING_BUILD_DIR/$P-ktr.
 . "$DARLING_SRC_DIR/build-freebsd/dserver-prefix.sh"
 ok=0; bad=0; valid=0; i=1; th=0; st=0; STALL=${PROBE_STALL_S:-60}
 while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
-	LOG=$DARLING_BUILD_DIR/$P-$i.log
+	STAMP=$(date +%m%d-%H%M%S); LOG=$DARLING_BUILD_DIR/$P-$STAMP.log
 	[ -e "$LOG" ] && { echo "exists $LOG"; exit 1; }
 	dsp_new || exit 1
 	START=$(date +%s)
@@ -44,8 +44,8 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	# server log only for a failed run (rc != 0): a passing run's log is never written, so it costs no disk.
 	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost)
 	if [ -n "$SL" ] && [ "$rc" != 0 ]; then
-		/usr/local/bin/sudo -n tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$i-dserver.txt" 2>/dev/null
-		[ -n "$PROBE_SERVER_LOG_HEAD" ] && /usr/local/bin/sudo -n head -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$i-dserver-head.txt" 2>/dev/null
+		/usr/local/bin/sudo -n tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver.txt" 2>/dev/null
+		[ -n "$PROBE_SERVER_LOG_HEAD" ] && /usr/local/bin/sudo -n head -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver-head.txt" 2>/dev/null
 	fi
 	dsp_reap
 	d=$(( $(date +%s) - START ))
