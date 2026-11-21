@@ -47,7 +47,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		/usr/local/bin/sudo -n tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver.txt" 2>/dev/null
 		[ -n "$PROBE_SERVER_LOG_HEAD" ] && /usr/local/bin/sudo -n head -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$DARLING_BUILD_DIR/$P-$STAMP-dserver-head.txt" 2>/dev/null
 	fi
-	# PROBE-HANG: one HANG-CLASS line per thread from the diag ring (needs DSERVER_DIAG_RING in PROBE_EXTRA_ENV):
+	# PROBE-HANG or timeout: one HANG-CLASS line per thread from the diag ring (needs DSERVER_DIAG_RING in PROBE_EXTRA_ENV):
 	# saved_reply=yes is livelock kind A, saved_reply=no kind B. Appended to the run log, before the prefix is reaped.
 	RING="$DARLING_PREFIX/private/var/log/dserver-diag-ring.bin"
 	# Every run with a ring: keep it as PREFIX-<stamp>-ring.bin and append a RING-COUNTS line (k8/k9 > 0: the ring is written).
@@ -55,7 +55,8 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		/usr/local/bin/sudo -n cat "$RING" > "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" 2>/dev/null
 		python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" --counts "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" >> "$LOG" 2>&1
 	fi
-	if grep -aq PROBE-HANG "$LOG"; then
+	# also on a timeout kill (rc 124/137): a hang the watchdog misses (worker progressing, suspender stuck) is classified too
+	if grep -aq PROBE-HANG "$LOG" || [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
 		if /usr/local/bin/sudo -n test -f "$RING"; then
 			/usr/local/bin/sudo -n cat "$RING" | python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" --hang-class /dev/stdin >> "$LOG" 2>&1
 		else echo "HANG-CLASS none (no diag ring; set DSERVER_DIAG_RING)" >> "$LOG"; fi

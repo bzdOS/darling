@@ -195,7 +195,8 @@ if [ -d "$B" ]; then
 	done >>"$T"
 fi
 
-# ---- 1d. probe runner logs/traces: the newest one of each kind (<kind>.log, <kind>-ktrace.out) is kept; older ones are
+# ---- 1d. probe runner logs/traces: the newest one of each kind (<kind>.log, <kind>-ktrace.out, <kind>-ring.bin) is kept,
+# and every file of a failed run (<stem>-dserver.txt present); older ones are
 # type probe: shown by --list, removed by --apply, counted as probe_logs, never fail the verdict (the gate's own probes write them) ----
 if [ -d "$B" ]; then
 	_seen=""
@@ -206,8 +207,11 @@ if [ -d "$B" ]; then
 			continue
 		fi
 		is_probe "$f" || continue
-		case "$f" in *-ktrace.out) _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-ktrace.out}.ktrace;;
-		*) _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log}.log;; esac
+		case "$f" in *-ktrace.out) _st=${f%-ktrace.out}; _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-ktrace.out}.ktrace;;
+		*-ring.bin) _st=${f%-ring.bin}; _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-ring.bin}.ring;;
+		*) _st=${f%.log}; _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log}.log;; esac
+		# a failed run (its <stem>-dserver.txt exists) keeps its log, trace and ring: the evidence of a hang
+		[ -f "$B/$_st-dserver.txt" ] && continue
 		case " $_seen " in *" $_kd "*) ;; *) _seen="$_seen $_kd"; continue;; esac
 		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
 		printf '%s\tprobe\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
