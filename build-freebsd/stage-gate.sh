@@ -335,6 +335,8 @@ for f in "$HERE"/build-*.sh; do
 	[ "$c" -gt 0 ] && { sd=$((sd+c)); sdf="$sdf $(basename "$f")"; }
 done
 if [ "$sd" = 0 ]; then echo "STAGED-DRIFT pass files=0"; else echo "STAGED-DRIFT fail files=$sd in:$sdf"; echo "STAGECHK FAIL staged-drift=FAIL"; stage_fail; fi
+# darling.toml vs its generated files (gen-from-schema.py --check): one line SCHEMA-DRIFT pass|FAIL; FAIL fails the gate.
+python3 "$HERE/gen-from-schema.py" --check --out "$DARLING_BUILD_DIR" || { echo "STAGECHK FAIL schema-drift=FAIL"; stage_fail; }
 # One tree, one final build, nothing grows: keep-one-check.sh is read-only (never deletes). Reported as keepone=<verdict>;
 # it fails the gate only with STAGE_GATE_KEEPONE=1 (default 1 in the full gate, STAGE_GATE_FULL=1; set STAGE_GATE_KEEPONE=0 to opt out; line: KEEP-ONE verdict=pass|fail ...; --list names the candidates).
 ko=skip
