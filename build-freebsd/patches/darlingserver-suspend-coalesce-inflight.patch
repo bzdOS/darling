@@ -20,13 +20,15 @@ diff -ru a/duct-tape/include/darlingserver/duct-tape/hooks.h b/duct-tape/include
 diff -ru a/duct-tape/include/darlingserver/duct-tape.h b/duct-tape/include/darlingserver/duct-tape.h
 --- a/duct-tape/include/darlingserver/duct-tape.h
 +++ b/duct-tape/include/darlingserver/duct-tape.h
-@@ -74,6 +74,9 @@
+@@ -74,6 +74,11 @@
  int dtape_thread_save_state_to_user(dtape_thread_t* thread, uintptr_t thread_state_address, uintptr_t float_state_address);
  void dtape_thread_process_signal(dtape_thread_t* thread, int bsd_signal_number, int linux_signal_number, int code, uintptr_t signal_address);
  void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread);
 +// Same, for interrupt_exit of a suspend handler: also ends the suspend signal's in-flight state under the suspend lock.
 +// Returns true if the thread had to park.
 +bool dtape_thread_wait_while_user_suspended_exit(dtape_thread_t* thread);
++// true while a suspend is requested and the thread has not parked yet (its suspend signal may have been lost)
++bool dtape_thread_suspend_unacked(dtape_thread_t* thread);
  void dtape_thread_retain(dtape_thread_t* thread);
  void dtape_thread_release(dtape_thread_t* thread);
  void dtape_thread_sigexc_enter(dtape_thread_t* thread);
@@ -81,7 +83,7 @@ diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
  
  		dtape_log_debug("sigexc: going to sleep");
  
-@@ -444,9 +450,27 @@
+@@ -444,9 +450,31 @@
  		dtape_condvar_signal(&thread->suspension_condvar, SIZE_MAX);
  
  		if (thread->xnu_thread.wait_result == THREAD_INTERRUPTED) {
@@ -104,12 +106,16 @@ diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
 +	dtape_wait_while_user_suspended_impl(thread, false);
 +};
 +
++bool dtape_thread_suspend_unacked(dtape_thread_t* thread) {
++	return thread->xnu_thread.suspend_count > 0 && !thread->waiting_suspended;
++};
++
 +bool dtape_thread_wait_while_user_suspended_exit(dtape_thread_t* thread) {
 +	return dtape_wait_while_user_suspended_impl(thread, true);
  };
  
  void dtape_thread_retain(dtape_thread_t* thread) {
-@@ -1428,7 +1452,28 @@
+@@ -1428,7 +1456,28 @@
  	if (xthread->suspend_count++ == 0) {
  		// This signal leads to sigexc.c which will end up calling darlingserver;
  		// darlingserver will hold the caller so long as the suspend_count > 0.
@@ -142,12 +148,22 @@ diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
 diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
 --- a/internal-include/darlingserver/thread.hpp
 +++ b/internal-include/darlingserver/thread.hpp
-@@ -107,6 +107,8 @@
+@@ -20,6 +20,7 @@
+ #ifndef _DARLINGSERVER_THREAD_HPP_
+ #define _DARLINGSERVER_THREAD_HPP_
+ 
++#include <atomic>
+ #include <memory>
+ #include <sys/types.h>
+ #include <mutex>
+@@ -107,6 +108,10 @@
  		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
  		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
  		bool _deferReplyForS2C = false;
 +		// thread_suspended was called by the current signal handler: its interrupt_exit re-checks the suspend count
 +		bool _suspendHandlerSeen = false;
++		// thread_suspended calls received (a suspend signal's handler reached the server); the signal watchdog compares it
++		std::atomic<uint64_t> _suspendedCalls{0};
  		std::optional<Message> _deferredReply = std::nullopt;
  
  		struct InterruptContext {
@@ -174,13 +190,14 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	dtape_thread_sigexc_exit(thread->_dtapeThread);
  
  	_sendReply(0);
-@@ -1051,6 +1064,10 @@
+@@ -1051,6 +1064,11 @@
  	int code = 0;
  
  	if (auto thread = _thread.lock()) {
 +		{
 +			std::unique_lock lock(thread->_rwlock);
 +			thread->_suspendHandlerSeen = true;
++			++thread->_suspendedCalls;
 +		}
  		thread->waitWhileUserSuspended(_body.thread_state, _body.float_state);
  	} else {
@@ -188,7 +205,45 @@ diff -ru a/src/call.cpp b/src/call.cpp
 diff -ru a/src/server.cpp b/src/server.cpp
 --- a/src/server.cpp
 +++ b/src/server.cpp
-@@ -266,6 +266,11 @@
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include <cstdint>
++#include <chrono>
+ #include <darlingserver/server.hpp>
+ #include <sys/socket.h>
+ #include <climits>
+@@ -260,12 +261,41 @@
+ 			auto sigThread = static_cast<DarlingServer::Thread*>(thread_context);
+ 			dsdiagRingEvent(5, sigThread->_tid, sigThread->_nstid, (uint64_t)signal);
+ 			sigThread->sendSignal(signal);
++			// Watchdog: the host kernel sometimes drops the signal when it lands while the thread leaves the previous
++			// handler (seen: the 7th of 7 signals never reached the guest trampoline, the suspender waited forever).
++			// Re-send every 25 ms until the handler reaches the server (thread_suspended), the thread parked, or the
++			// suspend was undone. A duplicate is harmless: its handler re-checks the suspend count.
++			std::weak_ptr<DarlingServer::Thread> weak = sigThread->weak_from_this();
++			uint64_t base = sigThread->_suspendedCalls.load();
++			std::thread([weak, base, signal]() {
++				for (int i = 1; i <= 400; i++) {
++					std::this_thread::sleep_for(std::chrono::milliseconds(25));
++					auto t = weak.lock();
++					if (!t || t->isDead() || !t->_dtapeThread) {
++						return;
++					}
++					if (t->_suspendedCalls.load() != base || !dtape_thread_suspend_unacked(t->_dtapeThread)) {
++						return;
++					}
++					dsdiagRingEvent(14, t->_tid, t->_nstid, (uint64_t)i); // suspend signal re-sent
++					try {
++						t->sendSignal(signal);
++					} catch (...) {
++						return;
++					}
++				}
++			}).detach();
+ 			return 0;
+ 		} catch (std::system_error e) {
+ 			return -e.code().value();
  		}
  	};
  
@@ -200,7 +255,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  	static void dtape_hook_thread_context_dispose(void* thread_context) {
  		static_cast<DarlingServer::Thread*>(thread_context)->_dispose();
  	};
-@@ -462,6 +467,7 @@
+@@ -462,6 +492,7 @@
  		.thread_lookup_eternal = dtape_hook_thread_lookup_eternal,
  		.thread_get_state = dtape_hook_thread_get_state,
  		.thread_send_signal = dtape_hook_thread_send_signal,

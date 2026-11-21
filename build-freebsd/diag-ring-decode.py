@@ -12,7 +12,7 @@ import sys
 
 KINDS = {0: "resume-scheduled", 1: "resume-EARLY", 3: "saved-reply-resent", 4: "reply-saved",
          5: "signal", 8: "call", 9: "reply-outbox",
-         10: "suspend-nosignal", 11: "reply-held", 12: "held-released", 13: "nosig-refused"}
+         10: "suspend-nosignal", 11: "reply-held", 12: "held-released", 13: "nosig-refused", 14: "signal-resent"}
 
 counts = sys.argv[1] == "--counts"
 hang = sys.argv[1] == "--hang-class"
@@ -88,4 +88,4 @@ elif hang:
     for tid in sorted(last):
         out.write("HANG-CLASS tid=%d saved_reply=%s last=%s\n" % (tid, saved.get(tid, "no"), last[tid]))
 if counts:
-    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))))
+    out.write("RING-COUNTS recorded=%d shown=%d %s\n" % (nxt, count, " ".join("k%d=%d" % (k, kc.get(k, 0)) for k in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))))
