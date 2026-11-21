@@ -28,13 +28,17 @@ extern SEL sel_registerName(const char *name);
 extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 extern id objc_msgSend(id, SEL, ...);
 extern void objc_setAssociatedObject(id object, const void *key, id value, unsigned long policy);
+extern id objc_getAssociatedObject(id object, const void *key);
 struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 
 #define MSG(ret, ...) ((ret (*)(__VA_ARGS__))objc_msgSend)
 #define ASSOC_RETAIN 01401
+#define ASSOC_ASSIGN 0
 
 static char key_ax, key_ay, key_mask, key_flip, key_layer, key_sub;
+static char key_sublayers, key_superlayer, key_bounds, key_position, key_bgcolor;
+struct qc_rect { double x, y, w, h; };
 
 static void keep_double(id self, const void *key, double v)
 {
@@ -82,6 +86,56 @@ static void context_set_subwindow(id self, SEL cmd, id sub)
     objc_setAssociatedObject(self, &key_sub, sub, ASSOC_RETAIN);
 }
 
+/* Layer tree and geometry the Chrome framework sets (also reached through NSViewBackingLayer, which inherits CALayer).
+ * The sublayer array is kept on the receiver (RETAIN, the array retains the children); the child's superlayer is an ASSIGN
+ * association (no retain cycle; it reads back as the parent while the parent lives, as in cocotron CALayer.m -addSublayer:).
+ * The background colour is a CGColorRef that this image cannot CFRetain (CoreGraphics is not linked), so only the pointer is kept,
+ * boxed with NSValue; the caller keeps the colour alive. */
+static void layer_add_sublayer(id self, SEL cmd, id child)
+{
+    id arr, old;
+    (void)cmd;
+    if (!child)
+        return;
+    old = objc_getAssociatedObject(child, &key_superlayer);
+    if (old && old != self) {
+        id oarr = objc_getAssociatedObject(old, &key_sublayers);
+        if (oarr)
+            MSG(void, id, SEL, id)(oarr, sel_registerName("removeObject:"), child);
+    }
+    arr = objc_getAssociatedObject(self, &key_sublayers);
+    if (!arr) {
+        arr = MSG(id, id, SEL)(objc_getClass("NSMutableArray"), sel_registerName("array"));
+        objc_setAssociatedObject(self, &key_sublayers, arr, ASSOC_RETAIN);
+    }
+    if (old != self)
+        MSG(void, id, SEL, id)(arr, sel_registerName("addObject:"), child);
+    objc_setAssociatedObject(child, &key_superlayer, self, ASSOC_ASSIGN);
+}
+static id layer_superlayer(id self, SEL cmd)
+{
+    (void)cmd;
+    return objc_getAssociatedObject(self, &key_superlayer);
+}
+static void layer_set_bounds(id self, SEL cmd, struct qc_rect r)
+{
+    id v = MSG(id, id, SEL, const void *, const char *)(objc_getClass("NSValue"), sel_registerName("valueWithBytes:objCType:"), &r, "{CGRect={CGPoint=dd}{CGSize=dd}}");
+    (void)cmd;
+    objc_setAssociatedObject(self, &key_bounds, v, ASSOC_RETAIN);
+}
+static void layer_set_position(id self, SEL cmd, struct qc_point p)
+{
+    id v = MSG(id, id, SEL, const void *, const char *)(objc_getClass("NSValue"), sel_registerName("valueWithBytes:objCType:"), &p, "{CGPoint=dd}");
+    (void)cmd;
+    objc_setAssociatedObject(self, &key_position, v, ASSOC_RETAIN);
+}
+static void layer_set_bgcolor(id self, SEL cmd, void *color)
+{
+    id v = MSG(id, id, SEL, void *)(objc_getClass("NSValue"), sel_registerName("valueWithPointer:"), color);
+    (void)cmd;
+    objc_setAssociatedObject(self, &key_bgcolor, v, ASSOC_RETAIN);
+}
+
 static int done;
 
 static void try_add(void)
@@ -99,6 +153,11 @@ static void try_add(void)
     class_addMethod(layer, sel_registerName("setGeometryFlipped:"), (IMP)layer_set_flipped, "v20@0:8c16");
     class_addMethod(context, sel_registerName("setLayer:"), (IMP)context_set_layer, "v24@0:8@16");
     class_addMethod(context, sel_registerName("setSubwindow:"), (IMP)context_set_subwindow, "v24@0:8@16");
+    class_addMethod(layer, sel_registerName("addSublayer:"), (IMP)layer_add_sublayer, "v24@0:8@16");
+    class_addMethod(layer, sel_registerName("superlayer"), (IMP)layer_superlayer, "@16@0:8");
+    class_addMethod(layer, sel_registerName("setBounds:"), (IMP)layer_set_bounds, "v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16");
+    class_addMethod(layer, sel_registerName("setPosition:"), (IMP)layer_set_position, "v32@0:8{CGPoint=dd}16");
+    class_addMethod(layer, sel_registerName("setBackgroundColor:"), (IMP)layer_set_bgcolor, "v24@0:8^{CGColor=}16");
     done = 1;
 }
 
