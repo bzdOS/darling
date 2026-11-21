@@ -1,20 +1,44 @@
 diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
 --- a/src/startup/mldr/freebsd_syscall_trap.c
 +++ b/src/startup/mldr/freebsd_syscall_trap.c
-@@ -3542,6 +3542,12 @@
+@@ -537,6 +537,16 @@
+     fn(arg);
+ }
+ 
++extern volatile unsigned long mldr_sig65_tramp_count;
++/* Entries of the guest handler trampoline for signals 65/66, printed when the process exits (compare with ring kind 5). */
++static void
++mldr_sig65_report(void)
++{
++    unsigned long n65 = __atomic_load_n(&mldr_sig65_tramp_count, __ATOMIC_RELAXED);
++    if (n65)
++        fprintf(stderr, "[sig65-count] tramp=%lu\n", n65);
++}
++
+ /* ── open(2) flag translation ──────────────────────────────────────────────── */
+ 
+ /*
+@@ -925,6 +935,7 @@
+ 
+     /* ── process lifecycle ──────────────────────────────────────────── */
+     case MACOS_SYS_exit:
++        mldr_sig65_report();
+         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
+         __builtin_unreachable();
+ 
+@@ -3539,9 +3550,11 @@
+     }
+ 
+     case LINUX_SYS_exit:
++        mldr_sig65_report();
          freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
          __builtin_unreachable();
      case LINUX_SYS_exit_group:
-+        {
-+            extern volatile unsigned long mldr_sig65_tramp_count;
-+            unsigned long n65 = __atomic_load_n(&mldr_sig65_tramp_count, __ATOMIC_RELAXED);
-+            if (n65)
-+                fprintf(stderr, "[sig65-count] tramp=%lu\n", n65);
-+        }
++        mldr_sig65_report();
          /* FreeBSD has no process-group exit_group; _exit(2) is the closest
           * single-thread-process equivalent dyld's bootstrap needs. */
          freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
-@@ -4868,6 +4874,11 @@
+@@ -4868,6 +4881,11 @@
          sigaddset(&trapset, SIGSYS);
          sigaddset(&trapset, SIGSEGV);
          sigaddset(&trapset, SIGBUS);
