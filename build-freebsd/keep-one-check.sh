@@ -39,13 +39,17 @@ if [ $MODE = apply ] && [ -z "$KEEPONE_LOCKED" ]; then
 	case $_rc in 73|75) echo "KEEP-ONE apply skipped: $B/.darling-run.lock is held (a series is running)"; exit 3;; esac
 	exit $_rc
 fi
-# stale mldr RPC sockets: /tmp/darling-mldr-<pid>-<fd>, a socket, pid dead, older than 30 min (every condition re-checked per entry)
+# stale mldr RPC sockets: /tmp/darling-mldr-<pid>-<fd>, a socket, pid dead, nobody holds it (fstat on the path lists no process),
+# older than 5 min (every condition re-checked per entry)
 stale_sock() { # $1 = path
 	[ -S "$1" ] || return 1
 	_b=${1##*/}; _x=${_b#darling-mldr-}; _pid=${_x%%-*}
 	case "$_pid" in ''|*[!0-9]*) return 1;; esac
 	kill -0 "$_pid" 2>/dev/null && return 1
-	[ -n "$(find "$1" -mmin +30 2>/dev/null)" ]
+	[ -n "$(find "$1" -mmin +5 2>/dev/null)" ] || return 1
+	# held by a live process (a running darlingserver, a guest of another pid): not stale; fstat failing counts as held
+	_h=$(sudo -n fstat "$1" 2>/dev/null) || return 1
+	[ -z "$(printf '%s\n' "$_h" | sed 1d)" ]
 }
 if [ $MODE = clean ]; then
 	rm_n=0; live=0
