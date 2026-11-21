@@ -1,0 +1,50 @@
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
+@@ -118,8 +118,36 @@
+ 				//__simple_kprintf("asked for cloexec default\n");
+ 
+ 				if (dir < 0) {
+-					ret = dir;
+-					goto fail;
++					// No /proc/self/fd (FreeBSD host): walk the descriptor range instead.
++					// Same rules as the listing below: skip the commpage fd and the
++					// descriptors the file actions create; closed descriptors are skipped.
++					for (int fd = 0; fd < 4096; fd++) {
++						int skip = (fd == 1023);
++						if (!skip && desc && desc->factp) {
++							for (size_t j = 0; j < desc->factp->psfa_act_count; j++) {
++								const struct xnu__psfa_action* act = &desc->factp->psfa_act_acts[j];
++								int maybe_fd = act->psfaa_filedes;
++								if (act->psfaa_type == XNU_PSFA_DUP2 || act->psfaa_type == XNU_PSFA_FILEPORT_DUP2)
++									maybe_fd = act->psfaa_dup2args.psfad_newfiledes;
++								else if (act->psfaa_type != XNU_PSFA_OPEN && act->psfaa_type != XNU_PSFA_INHERIT)
++									continue;
++								if (fd == maybe_fd) {
++									skip = 1;
++									break;
++								}
++							}
++						}
++						if (skip)
++							continue;
++						ret = sys_fcntl(fd, F_GETFD, 0);
++						if (ret < 0)
++							continue;
++						ret = sys_fcntl(fd, F_SETFD, ret | FD_CLOEXEC);
++						if (ret < 0)
++							goto fail;
++					}
++					ret = 0;
++					goto cloexec_done;
+ 				}
+ 
+ 				while ((len = LINUX_SYSCALL(__NR_getdents64, dir, buf, sizeof(buf))) > 0) {
+@@ -198,6 +226,8 @@
+ 					ret = len;
+ 					goto fail;
+ 				}
++cloexec_done:
++				;
+ 			}
+ 
+ 			// TODO: other attributes

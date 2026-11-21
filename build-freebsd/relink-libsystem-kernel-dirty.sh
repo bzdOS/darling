@@ -21,8 +21,11 @@ mkdir -p "$OUT"
 while read -r f; do
 	case "$f" in *.c|*.S) ;; *) continue;; esac
 	b=$(basename "$f")
-	# the build command whose source file has this name and path ending (any dir under libsystem_kernel)
-	o=$(grep -o -- "-o [^ ]*\.o -c [^ ]*/${b}\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1)
+	# the build command whose source path ends with this file's path; the basename alone is ambiguous
+	# (emulation/.../process/posix_spawn.c and libsyscall/wrappers/spawn/posix_spawn.c), so match the
+	# full in-tree path first and fall back to the basename for generated sources
+	o=$(grep -o -- "-o [^ ]*\.o -c [^ ]*/${f}\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1)
+	[ -n "$o" ] || o=$(grep -o -- "-o [^ ]*\.o -c [^ ]*/${b}\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1)
 	if [ -n "$o" ]; then echo "$o"; else
 		# a source added by a patch has no build command: clone one from a sibling .c in the same directory
 		case "$f" in *.c) d=$(dirname "$f"); sib=$(grep -o -- "-o [^ ]*\.o -c [^ ]*/${d#darling/src/libsystem_kernel/}/[^/ ]*\.c\$" "$OUT/all-commands.txt" | sed -n 's/^-o \([^ ]*\) .*/\1/p' | head -1)
