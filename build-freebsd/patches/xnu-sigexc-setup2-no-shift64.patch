@@ -8,6 +8,9 @@ diff -ru a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/
 -	linux_sigset_t set;
 -	set = (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
 -	set |= (1ull << (SIGNAL_S2C-1));
+-
+-	LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
+-		&set, NULL, sizeof(linux_sigset_t));
 +	linux_sigset_t set = 0;
 +	// The 8-byte guest mask names signals 1..64 only. SIGNAL_SIGEXC_SUSPEND / SIGNAL_S2C are 65 / 66 on this host, and
 +	// `1ull << 64` is undefined (on x86 it is bit 0 = SIGHUP, so SIGHUP was unblocked and 65/66 never were).
@@ -16,12 +19,35 @@ diff -ru a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/
 +		set |= (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
 +	if (SIGNAL_S2C >= 1 && SIGNAL_S2C <= 64)
 +		set |= (1ull << (SIGNAL_S2C-1));
- 
--	LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
--		&set, NULL, sizeof(linux_sigset_t));
++
 +	if (set != 0)
 +		LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
 +			&set, NULL, sizeof(linux_sigset_t));
  }
  
  static void dump_gregs(const struct linux_gregset* regs)
+@@ -106,7 +112,13 @@
+ 	struct linux_sigaction sa;
+ 
+ 	sa.sa_sigaction = (linux_sig_handler*)sigrt_handler;
+-	sa.sa_mask = (1ull << (SIGNAL_SIGEXC_SUSPEND-1)) | (1ull << (signum-1));
++	// signals 65/66 do not fit the 8-byte mask (a shift by 64/65 is undefined: it set bits 0/1 = SIGHUP/SIGINT);
++	// the host blocks the signal being handled by itself and mldr adds 65/66 natively (sigaction_translate.c, step 57)
++	sa.sa_mask = 0;
++	if (SIGNAL_SIGEXC_SUSPEND >= 1 && SIGNAL_SIGEXC_SUSPEND <= 64)
++		sa.sa_mask |= (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
++	if (signum >= 1 && signum <= 64)
++		sa.sa_mask |= (1ull << (signum-1));
+ 	sa.sa_flags = LINUX_SA_RESTORER | LINUX_SA_SIGINFO | LINUX_SA_RESTART | LINUX_SA_ONSTACK;
+ 	sa.sa_restorer = sig_restorer;
+ 
+@@ -221,7 +233,8 @@
+ 		struct linux_sigaction sa;
+ 		sa.sa_sigaction = (linux_sig_handler*) sigexc_handler;
+ 		sa.sa_mask = 0x7fffffff; // all other standard Unix signals should be blocked while the handler is run
+-		sa.sa_mask |= (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
++		if (SIGNAL_SIGEXC_SUSPEND >= 1 && SIGNAL_SIGEXC_SUSPEND <= 64)
++			sa.sa_mask |= (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
+ 		sa.sa_flags = LINUX_SA_RESTORER | LINUX_SA_SIGINFO | LINUX_SA_RESTART | LINUX_SA_ONSTACK;
+ 		sa.sa_restorer = sig_restorer;
+ 
