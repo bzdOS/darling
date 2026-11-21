@@ -144,6 +144,18 @@ if [ -d "$B" ]; then
 	done >>"$T"
 fi
 
+# ---- 1c. ktrace traces (DARLING_KTRACE runs): <name>-ktrace.out, only the newest one is kept; older ones are stale logs
+# (counted in stale_logs and shown by --list; KEEPONE_ALLOW_FILES does not protect them) ----
+if [ -d "$B" ]; then
+	_n=0
+	for f in $(cd "$B" && ls -t -p | grep -v / | grep -E -- '-ktrace\.out$'); do
+		_n=$((_n+1)); [ $_n -le 1 ] && continue
+		[ -n "$(find "$B/$f" -mmin -"$AGE" 2>/dev/null)" ] && continue
+		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
+		printf '%s\tlog\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
+	done >>"$T"
+fi
+
 # ---- 3. experiment dirs ----
 if [ -d "$B" ]; then
 	for d in $(cd "$B" && ls -p -A | grep / | tr -d /); do
