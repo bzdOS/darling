@@ -23,3 +23,30 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
      if (pc[0] == 0x0f && pc[1] == 0x0b)
          mldr_path_log((unsigned int)mc->mc_rax, (long)mc->mc_rdi, (long)mc->mc_rsi);
  
+diff -ru a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_translate.c
+--- a/src/startup/mldr/sigaction_translate.c
++++ b/src/startup/mldr/sigaction_translate.c
+@@ -13,6 +13,8 @@
+ 
+ #ifdef DARLING_FREEBSD
+ 
++#include <sys/types.h>
++#include <sys/thr.h>
+ #include "sigaction_translate.h"
+ #include "freebsd_syscall_trap.h"
+ #include "linux_siginfo.h"
+@@ -360,6 +362,14 @@
+ {
+     int linux_signo = sat_freebsd_signo_to_linux(native_signo);
+     int slot = sat_slot(linux_signo);
++    static int sat_tlog = -1;
++    if (sat_tlog < 0)
++        sat_tlog = getenv("DARLING_TRAP_LOG") != NULL;
++    if (sat_tlog && native_signo >= 65) {
++        long ttid = 0;
++        thr_self(&ttid);
++        fprintf(stderr, "[traplog] sig65-tramp tid=%ld native=%d linux=%d slot=%d\n", ttid, native_signo, linux_signo, slot);
++    }
+     if (slot < 0)
+         return;
+ 
