@@ -8,15 +8,8 @@ import re
 
 OBJC = re.compile(r"^_OBJC_(CLASS|METACLASS|IVAR|EHTYPE)_\$_")
 BLOCKS = re.compile(r"^_?_NSConcrete")
-DATA_NAMES = re.compile(
-    r"^(_k(CG|CM|CA|CV|CI|MT|OD|Sec|CF|UT|AX|NS|IO|LS|AV|UN)[A-Z]"
-    r"|_vm_page_(size|mask|shift)$|___DefaultRuneLocale$|__DefaultRuneLocale$"
-    r"|_environ$|_NXArg[cv]$|___stack_chk_guard$|_opterr$|_optind$|_optarg$|_optopt$"
-    r"|_optreset$|_sys_errlist$|_sys_nerr$|_sys_siglist$|_tzname$|_daylight$|_timezone$"
-    r"|_stdin$|_stdout$|_stderr$|___stdinp$|___stdoutp$|___stderrp$"
-    r"|_mach_task_self_$|_bootstrap_port$|_mach_host_self_$|_signgam$"
-    r"|_OBJC_|_NSApp$|_NSFoundationVersionNumber$"
-    r"|_NS[A-Z][A-Za-z]*(Notification|PboardType|Key|Attribute[A-Za-z]*|Option)$)")
+# DATA_NAMES (k-prefixes, whole names, patterns) is generated from [stubs] of darling.toml by gen-from-schema.py
+from stub_data_names import DATA_NAMES  # noqa: E402,F401
 
 # Size of a zero-filled data object a stub emits for a name whose real size is
 # unknown. The largest constants the consumers read are structs (CMTime is 24
