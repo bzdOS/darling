@@ -11,7 +11,7 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +mldr_sig65_report(void)
 +{
 +    unsigned long n65 = __atomic_load_n(&mldr_sig65_tramp_count, __ATOMIC_RELAXED);
-+    if (n65)
++    if (n65 && getenv("DARLING_SIG65_COUNT"))
 +        fprintf(stderr, "[sig65-count] tramp=%lu\n", n65);
 +}
 +
@@ -53,7 +53,7 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 diff -ru a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_translate.c
 --- a/src/startup/mldr/sigaction_translate.c
 +++ b/src/startup/mldr/sigaction_translate.c
-@@ -354,10 +354,19 @@
+@@ -354,10 +354,22 @@
      c->handler(c->signo, c->info, c->uctx);
  }
  
@@ -67,8 +67,11 @@ diff -ru a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_t
  {
 +    if (native_signo >= 65) {
 +        unsigned long c = __atomic_add_fetch(&mldr_sig65_tramp_count, 1, __ATOMIC_RELAXED);
-+        if (1)
-+            fprintf(stderr, "[sig65-count] tramp=%lu\n", c);   /* the process may leave without an exit hook we see */
++        static int sig65_print = -1;   /* DARLING_SIG65_COUNT=1 prints every entry (the process may leave without an exit hook we see) */
++        if (sig65_print < 0)
++            sig65_print = getenv("DARLING_SIG65_COUNT") != NULL;
++        if (sig65_print)
++            fprintf(stderr, "[sig65-count] tramp=%lu\n", c);
 +    }
      int linux_signo = sat_freebsd_signo_to_linux(native_signo);
      int slot = sat_slot(linux_signo);
