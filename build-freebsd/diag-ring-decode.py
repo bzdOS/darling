@@ -48,23 +48,31 @@ for i in range(first, nxt):
         out.write("%s DIAG resume tid=%d nstid=%d scheduled ret=0x%x n=%d\n" % (t, tid, nstid, ret, n))
     else:
         out.write("%s DIAG %s tid=%d nstid=%d n=%d\n" % (t, KINDS.get(kind, "kind%d" % kind), tid, nstid, n))
-toff, tslots, tdropped = struct.unpack_from("<QQQ", data, 24)
+toff, tslots, tdropped, tstride = struct.unpack_from("<QQQQ", data, 24)
+tstride = tstride or 64  # old rings: 64-byte slots, no stride field
 table = []
-if hang and toff and tslots and len(data) >= toff + tslots * 64:
+if hang and toff and tslots and len(data) >= toff + tslots * tstride:
     for j in range(tslots):
-        tid, nst, lns, lk, _p, ln, cn, cns, sns, ev = struct.unpack_from("<iiQIIQQQQQ", data, toff + j * 64)
+        tid, nst, lns, lk, _p, ln, cn, cns, sns, ev = struct.unpack_from("<iiQIIQQQQQ", data, toff + j * tstride)
+        ext = struct.unpack_from("<7Q", data, toff + j * tstride + 64) if tstride >= 128 else None
         if tid:
-            table.append((tid, nst, lns, lk, ln, cn, cns, sns, ev))
+            table.append((tid, nst, lns, lk, ln, cn, cns, sns, ev, ext))
 if hang and toff:
     out.write("HANG-CLASS table threads=%d slots=%d dropped_events=%d%s\n"
               % (len(table), tslots, tdropped, " TABLE-OVERFLOW" if tdropped else ""))
 if table:
     # per-thread table (never wrapped): every thread that ever made a call or got a signal
     now = max(r[2] for r in table)
-    for tid, nst, lns, lk, ln, cn, cns, sns, ev in sorted(table):
+    def _age(x):
+        return "%.3fs" % ((now - x) / 1e9) if x else "never"
+    for tid, nst, lns, lk, ln, cn, cns, sns, ev, ext in sorted(table):
         out.write("HANG-CLASS tid=%d saved_reply=%s last=%s=%d age=%.3fs last_call=%d call_age=%.3fs last_signal_age=%s events=%d\n"
                   % (tid, saved.get(tid, "no"), KINDS.get(lk, "kind%d" % lk), ln, (now - lns) / 1e9, cn,
                      (now - cns) / 1e9 if cns else -1, "%.3fs" % ((now - sns) / 1e9) if sns else "never", ev))
+        if ext:
+            hns, hc, rns, rc, sus, susc, sigc = ext
+            out.write("HANG-CLASS-SUSP tid=%d sig5=%d last_sig5_age=%s held6=%d last_held6_age=%s released7=%d last_released7_age=%s suspended_call23=%d last_call23_age=%s\n"
+                      % (tid, sigc, _age(sns), hc, _age(hns), rc, _age(rns), susc, _age(sus)))
 elif hang:
     if not last:
         out.write("HANG-CLASS none (ring has no sigexc/RPC events, recorded=%d)\n" % nxt)

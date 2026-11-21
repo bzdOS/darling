@@ -61,8 +61,8 @@ diff -ru a/src/server.cpp b/src/server.cpp
  };
 diff -ru a/src/thread.cpp b/src/thread.cpp
 --- a/src/thread.cpp	2026-11-21 23:32:03.305719870 +0300
-+++ b/src/thread.cpp	2026-11-22 00:04:12.464978576 +0300
-@@ -1837,3 +1837,63 @@
++++ b/src/thread.cpp	2026-11-22 00:26:25.132260023 +0300
+@@ -1837,3 +1837,69 @@
  
  	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
  };
@@ -78,8 +78,10 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +struct DsdiagLastSlot {
 +	std::atomic<int32_t> tid; int32_t nstid; uint64_t ns; uint32_t kind; uint32_t pad; uint64_t n;
 +	uint64_t callNum; uint64_t callNs; uint64_t sigNs; uint64_t events;
++	// 64..127: suspend handshake — signal held (6) / released (7) last time and count, last thread_suspended call (n 23)
++	uint64_t heldNs; uint64_t heldCount; uint64_t releasedNs; uint64_t releasedCount; uint64_t suspendedNs; uint64_t suspendedCount; uint64_t sigCount; uint64_t pad2;
 +};
-+static_assert(sizeof(DsdiagLastSlot) == 64, "slot size");
++static_assert(sizeof(DsdiagLastSlot) == 128, "slot size");
 +static DsdiagLastSlot* dsdiagLast = nullptr;
 +static const uint64_t dsdiagLastSlots = 1024;
 +
@@ -98,6 +100,7 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +		if (m == MAP_FAILED) return;
 +		uint64_t* hdr = (uint64_t*)((char*)dsdiagRing - 64);
 +		hdr[4] = dsdiagLastSlots;
++		hdr[6] = sizeof(DsdiagLastSlot);
 +		hdr[3] = off;
 +		dsdiagLast = (DsdiagLastSlot*)m;
 +	});
@@ -115,7 +118,10 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +		uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
 +		sl.nstid = nstid; sl.ns = ns; sl.kind = kind; sl.n = n; sl.events++;
 +		if (kind == 8) { sl.callNum = n; sl.callNs = ns; }
-+		if (kind == 5) sl.sigNs = ns;
++		if (kind == 5) { sl.sigNs = ns; sl.sigCount++; }
++		if (kind == 6) { sl.heldNs = ns; sl.heldCount++; }
++		if (kind == 7) { sl.releasedNs = ns; sl.releasedCount++; }
++		if (kind == 8 && n == 23) { sl.suspendedNs = ns; sl.suspendedCount++; }
 +		return;
 +	}
 +	// table full: never overwrite another thread's slot; count the dropped event in header u64[5]

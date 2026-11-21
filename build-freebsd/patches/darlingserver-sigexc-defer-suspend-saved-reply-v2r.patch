@@ -65,8 +65,8 @@ diff -ru b/src/server.cpp c/src/server.cpp
  			sigThread->sendSignal(signal);
  			return 0;
 diff -ru b/src/thread.cpp c/src/thread.cpp
---- b/src/thread.cpp	2026-11-22 00:04:12.464978576 +0300
-+++ c/src/thread.cpp	2026-11-22 00:22:56.379742564 +0300
+--- b/src/thread.cpp	2026-11-22 00:26:25.132260023 +0300
++++ c/src/thread.cpp	2026-11-22 00:26:25.132731084 +0300
 @@ -58,6 +58,8 @@
  #include <sys/wait.h>
  #include <vector>
