@@ -9,11 +9,11 @@ EXT="${PATCH_EXT_DIR:-$SRC/src/external}"
 T=$(mktemp -d "${TMPDIR:-/tmp}/patches-clean.XXXXXX") || exit 1
 trap 'rm -rf "$T"' EXIT INT TERM
 n=0; bad=0; msg=""; : > "$T/files"
-for sub in $(grep -v '^#' "$PDIR/series" | awk 'NF{print $1}' | sort -u); do
+for sub in $(grep -v '^#' "$PDIR/series" | awk 'NF{print $1}' | grep -v '^[.][.]/[.][.]$' | sort -u); do
 	mkdir "$T/$sub" && git -C "$EXT/$sub" archive HEAD | tar -xf - -C "$T/$sub" || { bad=$((bad+1)); msg="$msg archive:$sub"; continue; }
 done
 while read -r sub patch; do
-	case "$sub" in ''|'#'*) continue ;; esac
+	case "$sub" in ''|'#'*|../..) continue ;; esac  # ../.. = main-tree patch (applies at the repo root), not checked here
 	n=$((n+1)); p="$PDIR/$patch"
 	if ! git -C "$T/$sub" apply "$p" >/dev/null 2>&1; then
 		# git apply outside a repo works on plain dirs; failure = not clean on HEAD
