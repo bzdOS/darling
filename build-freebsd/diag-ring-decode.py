@@ -31,12 +31,17 @@ saved, last, kc = {}, {}, {}
 ci = {}
 cyc = []
 lat = []
+lstate = []
 ob = []
 for i in range(first, nxt):
     ns, tid, nk, ret, n = struct.unpack_from("<QiiQQ", data, 64 + (i % cap) * 32)
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
     kc[kind] = kc.get(kind, 0) + 1
+    if kind == 14 and (n >> 56) == 4:
+        # host state of the target at the watchdog's first re-send: kinfo_proc of the thread
+        lstate.append(((n >> 0) & 1, (n >> 1) & 1, (n >> 2) & 1, (n >> 3) & 1, (n >> 4) & 1, (n >> 8) & 0xFF,
+                       bytes([(n >> (16 + 8 * k)) & 0xFF for k in range(4)]).rstrip(b"\0").decode("ascii", "replace")))
     if kind == 14 and (n >> 56) == 3:
         # signal latency: first interrupt_enter after a suspend signal: resent<<55 | usSinceResend<<22 | usSinceSend
         lat.append(((n >> 55) & 1, (n >> 22) & 0x3FFFFF, n & 0x3FFFFF))
@@ -126,6 +131,14 @@ def cycle_summary():
             % (len(lat), len(resent), lost, len(plain) + len(resent) - lost, len(plain), pct(0.5), pct(0.99), pct(1.0)))
 if counts or hang:
     out.write(cycle_summary() + "\n")
+if (counts or hang) and lstate:
+    # target thread state when the first re-send was needed (a lost original): signal 65 pending / blocked / caught / ignored in the
+    # kernel, thread state (ki_stat: 1 idle 2 run 3 sleep 4 stop 5 zomb 6 wait 7 lock) and wait channel
+    import collections
+    c = collections.Counter(("found" if f else "not-found", "pend=%d" % pe, "blocked=%d" % bl, "caught=%d" % ca, "ignored=%d" % ig, "stat=%d" % st, "wmesg=%s" % wm)
+                            for f, pe, bl, ca, ig, st, wm in lstate)
+    for k, v in c.most_common():
+        out.write("SIG-LOSS-STATE %d x %s\n" % (v, " ".join(k)))
 if counts or hang:
     # outbox trace: sub 4 = a sendmmsg that did not send the whole batch (errno in the low 16 bits; 11 = EAGAIN), sub 5 value 1 = outbox
     # full, waiting for EPOLLOUT, value 2 = EPOLLOUT seen. A reply queue stalled for good ends with sub 5/1 and no later sub 5/2.
