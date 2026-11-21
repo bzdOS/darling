@@ -1,7 +1,7 @@
 diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
 --- a/src/startup/mldr/freebsd_syscall_trap.c
 +++ b/src/startup/mldr/freebsd_syscall_trap.c
-@@ -4247,6 +4247,21 @@
+@@ -4247,6 +4247,30 @@
      /* exit-caller logging slice: handler entry with the faulting pc */
      if (mldr_trap_log_enabled && mldr_trap_log_handlers)
          mldr_tlogx("SIGILL ENTER", pc, (long)mc->mc_rax);
@@ -14,6 +14,15 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +        freebsd_raw_syscall(SYS_sigprocmask, SIG_BLOCK, 0, (long)&cur65, 0, 0, 0);
 +        freebsd_raw_syscall(SYS_sigpending, (long)&pend65, 0, 0, 0, 0, 0);
 +        int u65 = sigismember(&uctx->uc_sigmask, 65), c65 = sigismember(&cur65, 65), p65 = sigismember(&pend65, 65);
++        struct sigaction sa65;
++        memset(&sa65, 0, sizeof(sa65));
++        freebsd_raw_syscall(SYS_sigaction, 65, 0, (long)&sa65, 0, 0, 0);
++        int d65 = (sa65.sa_handler == SIG_DFL) ? 1 : (sa65.sa_handler == SIG_IGN) ? 2 : 0;
++        if (d65) {
++            long htd = 0;
++            freebsd_raw_syscall(SYS_thr_self, (long)&htd, 0, 0, 0, 0, 0);
++            fprintf(stderr, "[traplog] sig65-disposition tid=%ld nr=%ld disp=%d (1 DFL, 2 IGN)\n", htd, (long)mc->mc_rax, d65);
++        }
 +        if (u65 || c65 || p65) {
 +            long ht65 = 0;
 +            freebsd_raw_syscall(SYS_thr_self, (long)&ht65, 0, 0, 0, 0, 0);

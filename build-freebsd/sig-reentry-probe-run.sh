@@ -74,6 +74,11 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	if /usr/local/bin/sudo -n test -f "$RING"; then
 		/usr/local/bin/sudo -n cat "$RING" > "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" 2>/dev/null
 		python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" --counts "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" >> "$LOG" 2>&1
+		# SUSPEND-BALANCE: every suspender round is either signalled (kind 5) or coalesced into a signal already in flight
+		# (kind 6): requested = signalled + coalesced must equal the rounds the suspender completed; resent = watchdog re-sends (kind 14)
+		python3 "$DARLING_SRC_DIR/build-freebsd/diag-ring-decode.py" --hang-class "$DARLING_BUILD_DIR/$P-$STAMP-ring.bin" 2>/dev/null | grep -a '^HANG-CLASS-SUSP-TOTAL' | head -1 \
+		  | awk -v rounds="$(sed -n 's/^suspender done rounds=\([0-9]*\).*/\1/p' "$LOG" | head -1)" '{ for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+		      req = v["signalled5"] + v["held6"]; print "SUSPEND-BALANCE rounds=" (rounds == "" ? "none" : rounds) " signalled=" v["signalled5"] " coalesced=" v["held6"] " requested=" req " balanced=" ((rounds != "" && req == rounds) ? "yes" : "no") }' >> "$LOG"
 	fi
 	# also on a timeout kill (rc 124/137): a hang the watchdog misses (worker progressing, suspender stuck) is classified too
 	if grep -aq PROBE-HANG "$LOG" || [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
@@ -101,6 +106,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		fi
 		echo "$P-$i rc=$rc ${d}s/${T}s $v [${sig:-none}]$ev"
 		grep -a "^RING-COUNTS" "$LOG" | head -1
+		grep -a "^SUSPEND-BALANCE" "$LOG" | head -1
 		grep -a "^HANG-CLASS" "$LOG" | head -8
 	fi
 	i=$((i+1))
