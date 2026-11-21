@@ -2,6 +2,7 @@
 # Applied by build-freebsd/apply-patches.sh, verified by build-freebsd/patches-clean-check.sh.
 # darlingserver-resume-trace.patch is superseded by darlingserver-resume-pending-wakeup.patch (unlisted).
 # darlingserver-dtape-clock-monotonic-freebsd.patch and startup-timerfd-condvar-monotonic.patch (the latter applies to the main tree, -p1 at the repo root) are unlisted: they fix the clocks (sig-reentry watchdog sleep(1) took 4.3-4.5 s wall without them) and so expose the interrupt_enter/push_reply livelock (worker never consumes the pushed-back reply, progress=0); they go in with its fix.
+# darlingserver-sigexc-defer-suspend-saved-reply.patch is unlisted: it holds the suspend signal while the thread owns a saved reply (cures livelock kind A: the worker runs again, was 0/5) but loses the held suspend (suspender stuck at round 0); kind B (no saved reply at thread_hold) is not covered.
 # darlingserver-mach-memory-entry.patch is superseded by darlingserver-mach-named-entry.patch
 # (both rewrite _mach_make_memory_entry) and is intentionally not listed.
 darlingserver darlingserver-mach-named-entry.patch
