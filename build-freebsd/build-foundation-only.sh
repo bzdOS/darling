@@ -52,18 +52,25 @@ while IFS= read -r rel; do
 done < "${BUILD}/foundation_sources.txt"
 
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C"
+# Foundation reexports CoreFoundation (as src/external/foundation/CMakeLists.txt does): macOS binaries bind
+# classes such as NSPropertyListSerialization to Foundation, while here they live in CoreFoundation.
+# The reexported library must stay LAST: ld64.lld 19 writes both LC_LOAD_DYLIB and LC_REEXPORT_DYLIB for it but
+# counts one library ordinal, so any library after it would get shifted bind ordinals.
+# Versions match the Foundation that apps were linked against.
 # shellcheck disable=SC2086
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation \
+	-compatibility_version 300.0.0 -current_version 300.0.0 \
 	-o "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	${found_objs} \
-	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libicucore.A.dylib" \
 	"${STAGED_OVERLAY}/usr/lib/libc++.1.dylib" "${STAGED_OVERLAY}/usr/lib/libc++abi.dylib" \
-	"${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
+	"${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib" \
+	-reexport_library "${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
 
 mkdir -p "${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C"
-cp "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
-	"${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"
+FDEST="${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"
+cp "${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" "${FDEST}.new-$$"
+mv -f "${FDEST}.new-$$" "${FDEST}"
 echo "=== Foundation rebuilt and installed to overlay ==="
 file "${OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"
