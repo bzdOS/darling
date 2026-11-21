@@ -1,0 +1,15 @@
+--- a/src/darlingserver.cpp
++++ b/src/darlingserver.cpp
+@@ -270,7 +270,11 @@
+ 
+ 	setenv("__mldr_DYLD_ROOT_PATH", LIBEXEC_PATH, 1);
+ 	setenv("__mldr_sockpath", tmp.c_str(), 1);
+-	execl(DarlingServer::Config::defaultMldrPath.data(), "mldr!" LIBEXEC_PATH "/usr/libexec/darling/vchroot", "vchroot", prefix, initPath, NULL);
++	// DARLING_MLDR_PATH (darling.toml [env], set by the launcher) names the mldr, as for a guest execve
++	// (call.cpp); without it launchd ran under the compiled-in installed mldr while every other guest ran the built one
++	const char* envMldr = getenv("DARLING_MLDR_PATH");
++	const char* mldrPath = (envMldr != NULL && envMldr[0] != 0) ? envMldr : DarlingServer::Config::defaultMldrPath.data();
++	execl(mldrPath, "mldr!" LIBEXEC_PATH "/usr/libexec/darling/vchroot", "vchroot", prefix, initPath, NULL);
+ 
+ 	fprintf(stderr, "Failed to exec launchd: %s\n", strerror(errno));
+ 	abort();

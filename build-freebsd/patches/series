@@ -45,3 +45,4 @@ darlingserver darlingserver-lifetime-pipe.patch
 xnu xnu-dserver-rpc-send-retry-enobufs.patch
 darlingserver darlingserver-socket-rcvbuf.patch
 darlingserver darlingserver-abandon-stray-wait.patch
+darlingserver darlingserver-launchd-mldr-path-env.patch
