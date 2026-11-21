@@ -1,6 +1,7 @@
 # Ordered patch series: <submodule path under src/external> <patch file in this directory>
 # Applied by build-freebsd/apply-patches.sh, verified by build-freebsd/patches-clean-check.sh.
 # darlingserver-resume-trace.patch is superseded by darlingserver-resume-pending-wakeup.patch (unlisted).
+# darlingserver-dtape-clock-monotonic-freebsd.patch and startup-timerfd-condvar-monotonic.patch (the latter applies to the main tree, -p1 at the repo root) are unlisted: they wait for the lost-wakeup fix they unmask (sig-reentry PROBE-HANG with both).
 # darlingserver-mach-memory-entry.patch is superseded by darlingserver-mach-named-entry.patch
 # (both rewrite _mach_make_memory_entry) and is intentionally not listed.
 darlingserver darlingserver-mach-named-entry.patch

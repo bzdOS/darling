@@ -1,0 +1,19 @@
+diff --git a/duct-tape/src/timer.c b/duct-tape/src/timer.c
+index bbaab01..cd914fe 100644
+--- a/duct-tape/src/timer.c
++++ b/duct-tape/src/timer.c
+@@ -9,7 +9,14 @@
+ #include <i386/rtclock_protos.h>
+ #include <i386/pal_native.h>
+ 
++// this file sees no host time.h, so the clock id is spelled by hand. 1 is CLOCK_MONOTONIC on Linux
++// only; on FreeBSD 1 is CLOCK_VIRTUAL (the server's user CPU time), which made mach_absolute_time()
++// run on CPU time while the timerfd deadline is armed against the real CLOCK_MONOTONIC (4).
++#ifdef DARLING_FREEBSD
++#define CLOCK_MONOTONIC 4
++#else
+ #define CLOCK_MONOTONIC 1
++#endif
+ 
+ // copied from glibc's headers
+ struct timespec
