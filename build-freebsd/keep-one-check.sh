@@ -29,6 +29,8 @@
 #     "/tmp/fixcond-*.py /tmp/claude-*.txt") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
 #     Also untracked or ignored *.orig files (patch leftovers) in the source tree <root>/src and its submodules, from
 #     git status --porcelain --ignored (type srcorig, counted in scratch_files); apply re-checks each is untracked.
+#     Also untracked (not ignored) *.txt directly in <root>/src, except names in KEEPONE_SRC_TXT_KEEP (space-separated,
+#     default empty): stray redirected output (type srctxt, counted in scratch_files); apply re-checks untracked, top level.
 #     Also files in <root>/src/build-freebsd/patches that are neither named in series nor tracked by git (type
 #     patchstray, counted in scratch_files); apply re-checks both.
 #  Refinements: files modified within KEEPONE_MIN_AGE_MIN minutes (default 120), files whose name contains
@@ -265,6 +267,11 @@ if [ -d "$SRCT/.git" ] || [ -f "$SRCT/.git" ]; then
 		[ -f "$f" ] || continue
 		printf '%s\tsrcorig\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
 	done >>"$T"
+	git -C "$SRCT" status --porcelain -uall 2>/dev/null | sed -n 's|^?? \([^/]*\.txt\)$|\1|p' | while IFS= read -r n; do
+		case " $KEEPONE_SRC_TXT_KEEP " in *" $n "*) continue;; esac
+		[ -f "$SRCT/$n" ] || continue
+		printf '%s\tsrctxt\t%s\n' "$(stat -f %z "$SRCT/$n" 2>/dev/null || echo 0)" "$SRCT/$n"
+	done >>"$T"
 fi
 
 PD="$ROOT/src/build-freebsd/patches"
@@ -308,6 +315,11 @@ if [ "$MODE" = apply ]; then
 			case "$_rp" in "$_rs"/*.orig) if [ -n "$_rs" ] && [ ! -L "$_path" ] && ! git -C "$(dirname "$_rp")" ls-files --error-unmatch "$(basename "$_rp")" >/dev/null 2>&1; then continue; fi;; esac
 			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked .orig under $SRCT" >&2; continue
 		fi
+		if [ "$_ty" = srctxt ]; then
+			_rs=$(realpath "$SRCT" 2>/dev/null); _n=$(basename "$_rp")
+			case "$_rp" in "$_rs"/*.txt) if [ -n "$_rs" ] && [ "$(dirname "$_rp")" = "$_rs" ] && [ ! -L "$_path" ] && case " $KEEPONE_SRC_TXT_KEEP " in *" $_n "*) false;; *) true;; esac && [ -n "$(git -C "$_rs" status --porcelain -- "$_n" 2>/dev/null | grep '^??')" ]; then continue; fi;; esac
+			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked top-level .txt in $SRCT" >&2; continue
+		fi
 		if [ "$_ty" = patchstray ]; then
 			_rd=$(realpath "$PD" 2>/dev/null); _n=$(basename "$_rp")
 			case "$_rp" in "$_rd"/*) if [ -n "$_rd" ] && [ "$(dirname "$_rp")" = "$_rd" ] && [ ! -L "$_path" ] && [ "$_n" != series ] && ! grep -v "^#" "$_rd/series" | grep -qwF "$_n" && ! git -C "$_rd" ls-files --error-unmatch "$_n" >/dev/null 2>&1; then continue; fi;; esac
@@ -339,7 +351,7 @@ fi
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
 over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
-np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c -e "scratch	" -e "	srcorig	" -e "	patchstray	" "$T")
+np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c -e "scratch	" -e "	srcorig	" -e "	srctxt	" -e "	patchstray	" "$T")
 cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
 v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ "$nsc" -gt 0 ] || [ $over = 1 ]; } && v=fail
