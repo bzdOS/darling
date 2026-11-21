@@ -4676,7 +4676,12 @@ void
 setup_macos_syscall_trap(void)
 {
     /* exit-caller logging slice: capture the gate before any thread exists */
-    mldr_trap_log_enabled = (getenv("DARLING_TRAP_LOG") != NULL);
+    {
+        /* set, non-empty and not "0" (as DARLING_TRAP_LOG_HANDLERS below) */
+        const char *tl = getenv("DARLING_TRAP_LOG");
+
+        mldr_trap_log_enabled = (tl != NULL && tl[0] != '\0' && tl[0] != '0');
+    }
     /* survive-window slice: handler-side sub-gate; DARLING_TRAP_LOG_HANDLERS=0
      * silences only the in-handler write(2) markers. */
     {

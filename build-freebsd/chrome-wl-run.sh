@@ -87,12 +87,15 @@ rm -f "$FIFO"; mkfifo "$FIFO" || exit 1
 LC_ALL=C awk -v cap="${CHROME_SR_LOG_CAP:-209715200}" -v out="$LOG" \
   '!/traplog|prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO" &
 RDP=$!
+# DARLING_TRAP_LOG from the environment, default 1; an empty value leaves the variable out of the guest environment altogether
+TL=""; _tl="${DARLING_TRAP_LOG-1}"
+[ -n "$_tl" ] && TL="DARLING_TRAP_LOG=$_tl"
 ( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
   DARLING_TEST_BINARY=chrome-macho \
   DARLING_STAGING_TREES=System/Library/Frameworks:System/Library/PrivateFrameworks:usr/lib \
-  DARLING_TRAP_LOG=1 \
+  $TL \
   XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
   DARLING_TEST_ARGS="$CHROME_ARGS" \
   DARLING_GUEST_EXPOSE="$DARLING_GUEST_EXPOSE" \

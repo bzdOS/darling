@@ -23,7 +23,10 @@
  * never run inside a signal handler), getenv per call is fine there. */
 static int mldr_trap_log_enabled_elf(void)
 {
-	return getenv("DARLING_TRAP_LOG") != NULL;
+	const char *v = getenv("DARLING_TRAP_LOG");
+
+	/* set, non-empty and not "0" (as DARLING_TRAP_LOG_HANDLERS) */
+	return v != NULL && v[0] != '\0' && v[0] != '0';
 }
 
 static void* dlopen_simple(const char* name)
