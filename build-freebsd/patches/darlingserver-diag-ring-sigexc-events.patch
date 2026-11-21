@@ -61,8 +61,8 @@ diff -ru a/src/server.cpp b/src/server.cpp
  };
 diff -ru a/src/thread.cpp b/src/thread.cpp
 --- a/src/thread.cpp	2026-11-21 23:32:03.305719870 +0300
-+++ b/src/thread.cpp	2026-11-21 23:32:20.218917773 +0300
-@@ -1837,3 +1837,11 @@
++++ b/src/thread.cpp	2026-11-22 00:02:22.348690878 +0300
+@@ -1837,3 +1837,61 @@
  
  	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
  };
@@ -71,6 +71,56 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +// 3 = saved reply re-sent at interrupt_exit, 4 = client-pushed reply saved (n 1 = pending, 0 = normal),
 +// 5 = signal sent via duct-tape (n = signal), 8 = call received (n = call number),
 +// 9 = reply put in the outbox (tid -1, n = reply number).
++// Per-thread last-event table, never overwritten by ring wrap-around: a page-aligned region after the ring in
++// the same file; header u64 [3] = its offset, u64 [4] = its slot count. Slot (64 bytes), keyed by tid (linear probe):
++// {i32 tid, i32 nstid, u64 last ns, u32 last kind, u32 pad, u64 last n, u64 last call number, u64 last call ns,
++//  u64 last signal ns, u64 events}. A thread stuck in a call keeps that call as "last call" with its time.
++struct DsdiagLastSlot {
++	std::atomic<int32_t> tid; int32_t nstid; uint64_t ns; uint32_t kind; uint32_t pad; uint64_t n;
++	uint64_t callNum; uint64_t callNs; uint64_t sigNs; uint64_t events;
++};
++static_assert(sizeof(DsdiagLastSlot) == 64, "slot size");
++static DsdiagLastSlot* dsdiagLast = nullptr;
++static const uint64_t dsdiagLastSlots = 1024;
++
++static void dsdiagLastRecord(int kind, int tid, int nstid, uint64_t n) {
++	static std::once_flag once;
++	std::call_once(once, []() {
++		if (!dsdiagRing) return;
++		std::string path = DarlingServer::Server::sharedInstance().prefix() + "/private/var/log/dserver-diag-ring.bin";
++		int fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
++		if (fd < 0) return;
++		uint64_t off = (64 + dsdiagRingCap * sizeof(DsdiagRingEntry) + 4095) & ~4095ull;
++		size_t len = dsdiagLastSlots * sizeof(DsdiagLastSlot);
++		if (ftruncate(fd, off + len) != 0) { close(fd); return; }
++		void* m = mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, off);
++		close(fd);
++		if (m == MAP_FAILED) return;
++		uint64_t* hdr = (uint64_t*)((char*)dsdiagRing - 64);
++		hdr[4] = dsdiagLastSlots;
++		hdr[3] = off;
++		dsdiagLast = (DsdiagLastSlot*)m;
++	});
++	if (!dsdiagLast || tid < 0) return;
++	for (uint64_t k = 0; k < dsdiagLastSlots; k++) {
++		DsdiagLastSlot& sl = dsdiagLast[((uint64_t)tid + k) % dsdiagLastSlots];
++		int32_t cur = sl.tid.load(std::memory_order_relaxed);
++		if (cur == 0) {
++			int32_t z = 0;
++			if (!sl.tid.compare_exchange_strong(z, tid) && z != tid) continue;
++		} else if (cur != tid) {
++			continue;
++		}
++		struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++		uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
++		sl.nstid = nstid; sl.ns = ns; sl.kind = kind; sl.n = n; sl.events++;
++		if (kind == 8) { sl.callNum = n; sl.callNs = ns; }
++		if (kind == 5) sl.sigNs = ns;
++		return;
++	}
++}
++
 +void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n) {
 +	dsdiagRingRecord(kind, tid, nstid, nullptr, n);
++	dsdiagLastRecord(kind, tid, nstid, n);
 +}
