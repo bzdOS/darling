@@ -251,6 +251,7 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_sendmsg       46
 #define LINUX_SYS_recvmsg       47
 #define LINUX_SYS_setsockopt    54
+#define LINUX_SYS_getsockopt    55
 #define LINUX_SYS_fcntl         72
 #define LINUX_SYS_eventfd      284
 /* 213 is epoll_create (the one taking a size hint), NOT epoll_create1 — that
@@ -2524,6 +2525,28 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
          * codebase actually uses also share values with FreeBSD, same
          * BSD lineage as socket() above. */
         return freebsd_raw_syscall(SYS_setsockopt, a1, a2, a3, a4, a5, 0);
+    case LINUX_SYS_getsockopt: {
+        /* libkqueue (built with the Linux socket constants) asks every socket it
+         * registers getsockopt(fd, SOL_SOCKET=1, SO_ACCEPTCONN=30); left as ENOSYS,
+         * kevent() failed on the socket and crashpad's child-port handshake died
+         * on "kevent: Bad file descriptor". Linux SOL_SOCKET options are mapped to
+         * the FreeBSD ones; a BSD level (0xffff, from macOS-side callers) passes. */
+        long level = a2, opt = a3;
+        if (level == 1) {
+            level = SOL_SOCKET;
+            switch (a3) {
+            case 30: opt = SO_ACCEPTCONN; break;
+            case 3:  opt = SO_TYPE; break;
+            case 4:  opt = SO_ERROR; break;
+            case 7:  opt = SO_SNDBUF; break;
+            case 8:  opt = SO_RCVBUF; break;
+            case 2:  opt = SO_REUSEADDR; break;
+            case 9:  opt = SO_KEEPALIVE; break;
+            default: return -ENOPROTOOPT;
+            }
+        }
+        return freebsd_raw_syscall(SYS_getsockopt, a1, level, opt, a4, a5, 0);
+    }
     case LINUX_SYS_epoll_create:
     case LINUX_SYS_epoll_create1:
         /* FreeBSD has no epoll — kqueue is the native readiness-notification
