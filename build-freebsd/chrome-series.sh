@@ -95,6 +95,8 @@ leftover_report() {
 	LEFT=$(ps -axww -o pid,command | awk '$2 ~ /(^|\/)darlingserver$/ && ($3 ~ /^\/tmp\/darling-run\./ || $3 == "/tmp/darling-dynamic-smoke-fresh") {n++} END{print n+0}')
 	echo "LEFTOVER dservers=$LEFT"
 	[ "$LEFT" -eq 0 ] || _rc=1
+	# stale mldr RPC sockets of dead pids (older than 30 min); live ones are kept
+	sh "$DARLING_SRC_DIR/build-freebsd/keep-one-check.sh" --clean-sockets 2>&1 || true
 	echo "SERIES-EXIT rc=$_rc pid=$$"
 	exit $_rc
 }
