@@ -14,6 +14,10 @@ sh "$(dirname "$0")/apply-patches.sh" || exit 1
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${DARLING_BUILD_DIR:-/var/darling-build}/dserver"
 DS="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src/external/darlingserver"
+# darlingserver RPC wrappers: generated into the build directory, never into the source tree
+DRPC="${DARLING_BUILD_DIR:-/var/darling-build}/dserver/generated-rpc"
+python3 "${DS}/scripts/generate-rpc-wrappers.py" "${DRPC}/include/darlingserver/rpc.h" \
+  "${DRPC}/internal-include/darlingserver/rpc.internal.h" "${DRPC}/src/rpc.c" '"../include/darlingserver/rpc.h"' || exit 1
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src"
 COMPAT="${SRC}/startup/compat-includes"
 DTAPE_LIB="${DARLING_BUILD_DIR:-/var/darling-build}/dtape/dtape-build/libdtape.a"
@@ -40,7 +44,7 @@ set(CMAKE_CXX_FLAGS "\${CMAKE_CXX_FLAGS} -std=c++17  -ggdb -O0")
 
 set(DS   ${DS})
 set(SRC  ${SRC})
-set(DRPC \${DS}/generated-rpc)
+set(DRPC ${DRPC})
 set(COMPAT ${COMPAT})
 
 set(CMAKE_INSTALL_PREFIX "/usr/local")

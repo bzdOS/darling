@@ -22,7 +22,10 @@ MLDR_TMP_BUILD="/tmp/mldr-build-$$"
 MLDR_REAL_BUILD="${BUILD}/mldr-real"
 SRC="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src"
 DS="${SRC}/external/darlingserver"
-DRPC="${DS}/generated-rpc"
+# darlingserver RPC wrappers: generated into the build directory, never into the source tree
+DRPC="${DARLING_BUILD_DIR:-/var/darling-build}/dserver/generated-rpc"
+python3 "${DS}/scripts/generate-rpc-wrappers.py" "${DRPC}/include/darlingserver/rpc.h" \
+  "${DRPC}/internal-include/darlingserver/rpc.internal.h" "${DRPC}/src/rpc.c" '"../include/darlingserver/rpc.h"' || exit 1
 
 rm -rf "${MLDR_TMP_BUILD}" && mkdir -p "${MLDR_TMP_BUILD}" && cd "${MLDR_TMP_BUILD}"
 
@@ -34,7 +37,7 @@ set(CMAKE_C_FLAGS "\${CMAKE_C_FLAGS} -std=gnu11 -ggdb -O2")
 
 set(SRC  ${SRC})
 set(DS   ${DS})
-set(DRPC \${DS}/generated-rpc)
+set(DRPC ${DRPC})
 
 # Generate darling-config.h (needed by stack.c)
 set(CMAKE_INSTALL_PREFIX "/usr/local/darling-overlay")

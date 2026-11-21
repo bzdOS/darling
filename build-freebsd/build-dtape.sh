@@ -18,6 +18,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="${DARLING_SRC_DIR:-${SCRIPT_DIR}}/src"
 DS=${ROOT}/external/darlingserver
+# darlingserver RPC wrappers: generated into the build directory, never into the source tree
+DRPC="${DARLING_BUILD_DIR:-/var/darling-build}/dserver/generated-rpc"
+python3 "${DS}/scripts/generate-rpc-wrappers.py" "${DRPC}/include/darlingserver/rpc.h" \
+  "${DRPC}/internal-include/darlingserver/rpc.internal.h" "${DRPC}/src/rpc.c" '"../include/darlingserver/rpc.h"' || exit 1
 DT=${DS}/duct-tape
 BOOT=${ROOT}/external/bootstrap_cmds
 COMPAT=${ROOT}/startup/compat-includes
@@ -356,8 +360,8 @@ DTFLAGS="\
   -I${DT}/internal-include \
   -I${DS}/include \
   -I${DS}/internal-include \
-  -I${DS}/generated-rpc/include \
-  -I${DS}/generated-rpc/internal-include \
+  -I${DRPC}/include \
+  -I${DRPC}/internal-include \
   -I${ROOT}/libsimple/include \
   -I${DTBUILD} \
   -I${DTBUILD}/xnu/osfmk \
