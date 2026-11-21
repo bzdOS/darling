@@ -1,0 +1,69 @@
+diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
+index 2350299..f5beb61 100644
+--- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
++++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
+@@ -145,6 +145,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/impl/misc/clonefile.c
+ 	src/xnu_syscall/bsd/impl/misc/csops.c
+ 	src/xnu_syscall/bsd/impl/misc/csrctl.c
++	src/xnu_syscall/bsd/impl/misc/mac_syscall.c
+ 	src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
+ 	src/xnu_syscall/bsd/impl/misc/fileport_makeport.c
+ 	src/xnu_syscall/bsd/impl/misc/fsgetpath.c
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h
+new file mode 100644
+index 0000000..ab53fb8
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h
+@@ -0,0 +1,6 @@
++#ifndef LINUX_MAC_SYSCALL_H
++#define LINUX_MAC_SYSCALL_H
++
++long sys_mac_syscall(const char* policy, int call, void* arg);
++
++#endif // LINUX_MAC_SYSCALL_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
+index ecb028a..710d1e1 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
+@@ -36,6 +36,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/clonefile.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/csrctl.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/mac_syscall.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/fileport_makefd.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/fileport_makeport.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/fsgetpath.h>
+@@ -429,6 +430,7 @@ void* __bsd_syscall_table[600] = {
+ 	[369] = sys_kevent64,
+ 	[372] = sys_thread_selfid,
+ 	[374] = sys_kevent_qos,
++	[381] = sys_mac_syscall,
+ 	[394] = sys_pselect,
+ 	[395] = sys_pselect_nocancel,
+ 	[396] = sys_read_nocancel,
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c
+new file mode 100644
+index 0000000..39b567a
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c
+@@ -0,0 +1,19 @@
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/mac_syscall.h>
++
++#include <sys/errno.h>
++
++// __mac_syscall (381) as on macOS with no MAC policy of that name registered (xnu security/mac_base.c):
++// the policy name is copied in (MAC_MAX_POLICY_NAME = 32 bytes including the NUL; NULL -> EFAULT,
++// no NUL within 32 bytes -> ENAMETOOLONG as copyinstr), then no policy matches -> ENOPOLICY.
++#define DARLING_MAC_MAX_POLICY_NAME 32
++
++long sys_mac_syscall(const char* policy, int call, void* arg)
++{
++	(void)call; (void)arg;
++	if (policy == 0)
++		return -EFAULT;
++	for (int i = 0; i < DARLING_MAC_MAX_POLICY_NAME; i++)
++		if (policy[i] == '\0')
++			return -ENOPOLICY;
++	return -ENAMETOOLONG;
++}
