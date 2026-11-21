@@ -16,6 +16,8 @@ DARLING_MLDR_PATH = "/opt/darling/build/dserver/mldr-real/mldr"
 KEEPONE_ROOT = "/opt/darling"
 # the one disk threshold (% use of /): a series does not start, and the batch loop stops, at >= this value
 DARLING_DISK_MAX = 85
+# sig-reentry probe timeout (s), preflight and manual runs (sig-reentry-probe-run.sh): live runs take up to ~120 s
+PROBE_TIMEOUT = 240
 
 [keepone]
 # top-level build/ file globs that are never candidates

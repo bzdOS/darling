@@ -16,7 +16,7 @@
         "DARLING_OVERLAY": {"$ref": "#/$defs/abspath"},
         "DARLING_MLDR_PATH": {"$ref": "#/$defs/abspath"},
         "KEEPONE_ROOT": {"$ref": "#/$defs/abspath"},
-        "DARLING_DISK_MAX": {"type": "integer", "minimum": 50, "maximum": 99}
+        "DARLING_DISK_MAX": {"type": "integer", "minimum": 50, "maximum": 99}, "PROBE_TIMEOUT": {"type": "integer", "minimum": 60, "maximum": 1800}
       }
     },
     "keepone": {

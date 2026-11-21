@@ -7,6 +7,7 @@
 #      PREFLIGHT_PROBE=0   skip the N=1 probe run (default: run it)
 #      PREFLIGHT_IGNORE    egrep pattern of command lines to ignore in the leftover check (e.g. a neighbour smoke loop)
 #      PREFLIGHT_PREFIX    probe log prefix (default: preflight-<epoch>)
+#      PROBE_TIMEOUT       probe timeout in s (darling.toml [env], default 240)
 pf_fail() { echo "PREFLIGHT fail $*"; exit 1; }
 : "${DARLING_BUILD_DIR:?}"
 # 1. leftover servers/mldr from previous runs
@@ -27,7 +28,7 @@ awk -v l="$LOAD" -v m="$MAX" 'BEGIN{exit !(l<m)}' || pf_fail "load $LOAD >= max 
 if [ "${PREFLIGHT_PROBE:-1}" != 0 ]; then
 	: "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}"
 	PX=${PREFLIGHT_PREFIX:-preflight-$(date +%s)}
-	R=$(DARLING_TEST_BINARY=sig-reentry-probe-macho sh "$DARLING_SRC_DIR/build-freebsd/sig-reentry-probe-run.sh" "$PX" 1 180 1500 100 0 2>&1)
+	R=$(DARLING_TEST_BINARY=sig-reentry-probe-macho sh "$DARLING_SRC_DIR/build-freebsd/sig-reentry-probe-run.sh" "$PX" 1 "${PROBE_TIMEOUT:-240}" 1500 100 0 2>&1)
 	echo "$R" | grep -q 'SUMMARY.* ok=1 ' || pf_fail "probe not ok: $(echo "$R" | head -1)"
 fi
 echo "PREFLIGHT ok (load $LOAD<$MAX)"

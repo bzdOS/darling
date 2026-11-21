@@ -30,7 +30,7 @@ if [ "$1" = "--series" ]; then
 	while IFS= read -r _l; do
 		_k=${_l%%=*}; _v=${_l#*=}; _v=${_v#\"}; _v=${_v%\"}; _v=${_v#\'}; _v=${_v%\'}
 		case "$_k" in
-		DARLING_SRC_DIR|DARLING_BUILD_DIR|DARLING_OVERLAY|KEEPONE_ROOT|DARLING_DISK_MAX)
+		DARLING_SRC_DIR|DARLING_BUILD_DIR|DARLING_OVERLAY|KEEPONE_ROOT|DARLING_DISK_MAX|PROBE_TIMEOUT)
 			eval "[ -n \"\${$_k}\" ] || $_k=\$_v; export $_k";;
 		esac
 	done <"$_ef"
