@@ -21,6 +21,13 @@ PROBE_TIMEOUT = 240
 # darlingserver socket receive buffer (bytes, SO_RCVBUF): bursts of calls from many guest threads overflow
 # the 16 KB default and the clients' sendmsg fails with ENOBUFS (-105)
 DSERVER_SOCKET_RCVBUF = 1048576
+# disk gate for a series (env-preflight.sh, iostat -x on the VM disk). From the 21.11 host measurement: a host nvme
+# peak (util 96%) showed up in the VM as vtbd0 qlen 16-192 with ms/w 23000-40000 and stalled every launch on staging;
+# the healthy disk read qlen 0 and ms/w 0-6. Start only below ms/w 50 and at qlen <= 4; stop when two samples in a row exceed ms/w 200.
+PREFLIGHT_DISK_DEV = "vtbd0"
+PREFLIGHT_DISK_MSW_START = 50
+PREFLIGHT_DISK_QLEN_MAX = 4
+PREFLIGHT_DISK_MSW_STOP = 200
 
 [keepone]
 # top-level build/ file globs that are never candidates
