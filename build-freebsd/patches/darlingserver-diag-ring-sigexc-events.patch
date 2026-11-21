@@ -216,56 +216,18 @@ diff -ru a/src/message.cpp b/src/message.cpp
 diff -ru a/src/server.cpp b/src/server.cpp
 --- a/src/server.cpp
 +++ b/src/server.cpp
-@@ -18,6 +18,10 @@
-  */
- 
- #include <cstdint>
-+#include <sys/types.h>
+@@ -38,6 +38,10 @@
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/wait.h>
 +#include <sys/sysctl.h>
 +#include <sys/user.h>
 +#include <signal.h>
- #include <darlingserver/server.hpp>
- #include <sys/socket.h>
- #include <climits>
-@@ -89,6 +93,37 @@
- 	return any;
- }();
++#include <vector>
  
-+// Host state of a guest thread for the suspend-signal loss measurement (ring kind 14 sub 4, sampled at the watchdog's first re-send):
-+// n = 4<<56 | wmesg(first 4 chars)<<16 | stat<<8 | ignored<<4 | caught<<3 | blocked<<2 | pending<<1 | found, from kinfo_proc of the thread
-+// (ki_siglist, ki_sigmask, ki_sigcatch, ki_sigignore for signal 65).
-+static uint64_t dsKinfoThreadState(pid_t pid, pid_t tid) {
-+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID | KERN_PROC_INC_THREAD, (int)pid };
-+	size_t len = 0;
-+	if (sysctl(mib, 4, nullptr, &len, nullptr, 0) != 0 || len == 0) {
-+		return 4ull << 56;
-+	}
-+	std::vector<char> buf(len + 16 * sizeof(struct kinfo_proc));
-+	len = buf.size();
-+	if (sysctl(mib, 4, buf.data(), &len, nullptr, 0) != 0) {
-+		return 4ull << 56;
-+	}
-+	size_t count = len / sizeof(struct kinfo_proc);
-+	for (size_t i = 0; i < count; ++i) {
-+		auto kp = reinterpret_cast<struct kinfo_proc*>(buf.data()) + i;
-+		if (kp->ki_tid != (lwpid_t)tid) {
-+			continue;
-+		}
-+		uint64_t w = 0;
-+		for (int k = 0; k < 4 && kp->ki_wmesg[k]; ++k) {
-+			w |= (uint64_t)(unsigned char)kp->ki_wmesg[k] << (8 * k);
-+		}
-+		return (4ull << 56) | (w << 16) | ((uint64_t)(unsigned char)kp->ki_stat << 8)
-+			| ((uint64_t)sigismember(&kp->ki_sigignore, 65) << 4) | ((uint64_t)sigismember(&kp->ki_sigcatch, 65) << 3)
-+			| ((uint64_t)sigismember(&kp->ki_sigmask, 65) << 2) | ((uint64_t)sigismember(&kp->ki_siglist, 65) << 1) | 1ull;
-+	}
-+	return 4ull << 56;
-+}
-+
- struct DTapeHooks {
- 	static void dtape_hook_thread_suspend(void* thread_context, dtape_thread_continuation_callback_f continuationCallback, void* continuationContext, libsimple_lock_t* unlockMe) {
- 		if (auto thread = DarlingServer::Thread::currentThread()) {
-@@ -257,13 +292,80 @@
+ #include <darlingserver/logging.hpp>
+ 
+@@ -257,13 +261,111 @@
  
  	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
  		try {
@@ -339,6 +301,37 @@ diff -ru a/src/server.cpp b/src/server.cpp
  		}
  	};
  
++// Host state of a guest thread for the suspend-signal loss measurement (ring kind 14 sub 4, sampled at the watchdog's first re-send):
++// n = 4<<56 | wmesg(first 4 chars)<<16 | stat<<8 | ignored<<4 | caught<<3 | blocked<<2 | pending<<1 | found, from kinfo_proc of the thread
++// (ki_siglist, ki_sigmask, ki_sigcatch, ki_sigignore for signal 65).
++static uint64_t dsKinfoThreadState(pid_t pid, pid_t tid) {
++	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID | KERN_PROC_INC_THREAD, (int)pid };
++	size_t len = 0;
++	if (sysctl(mib, 4, nullptr, &len, nullptr, 0) != 0 || len == 0) {
++		return 4ull << 56;
++	}
++	std::vector<char> buf(len + 16 * sizeof(struct kinfo_proc));
++	len = buf.size();
++	if (sysctl(mib, 4, buf.data(), &len, nullptr, 0) != 0) {
++		return 4ull << 56;
++	}
++	size_t count = len / sizeof(struct kinfo_proc);
++	for (size_t i = 0; i < count; ++i) {
++		auto kp = reinterpret_cast<struct kinfo_proc*>(buf.data()) + i;
++		if (kp->ki_tid != (lwpid_t)tid) {
++			continue;
++		}
++		uint64_t w = 0;
++		for (int k = 0; k < 4 && kp->ki_wmesg[k]; ++k) {
++			w |= (uint64_t)(unsigned char)kp->ki_wmesg[k] << (8 * k);
++		}
++		return (4ull << 56) | (w << 16) | ((uint64_t)(unsigned char)kp->ki_stat << 8)
++			| ((uint64_t)sigismember(&kp->ki_sigignore, 65) << 4) | ((uint64_t)sigismember(&kp->ki_sigcatch, 65) << 3)
++			| ((uint64_t)sigismember(&kp->ki_sigmask, 65) << 2) | ((uint64_t)sigismember(&kp->ki_siglist, 65) << 1) | 1ull;
++	}
++	return 4ull << 56;
++}
++
 +	static void dtape_hook_thread_diag_event(void* thread_context, int kind, uint64_t n) {
 +		auto t = static_cast<DarlingServer::Thread*>(thread_context);
 +		dsdiagRingEvent(kind, t->_tid, t->_nstid, n);
