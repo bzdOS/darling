@@ -26,9 +26,11 @@
 #     10 minutes (a build in progress) or when the dir is the real build dir.
 #  6. scratch files: top-level files in build/ matching KEEPONE_SCRATCH_BUILD (default "*.diagbak *.fixed *.condfix
 #     fix*.py": source backups and edit scripts of a diagnosis) and files matching KEEPONE_SCRATCH_TMP (default
-#     "/tmp/fixcond-*.py") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
+#     "/tmp/fixcond-*.py /tmp/claude-*.txt") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
 #     Also untracked or ignored *.orig files (patch leftovers) in the source tree <root>/src and its submodules, from
 #     git status --porcelain --ignored (type srcorig, counted in scratch_files); apply re-checks each is untracked.
+#     Also files in <root>/src/build-freebsd/patches that are neither named in series nor tracked by git (type
+#     patchstray, counted in scratch_files); apply re-checks both.
 #  Refinements: files modified within KEEPONE_MIN_AGE_MIN minutes (default 120), files whose name contains
 #  KEEPONE_FOREIGN (default alt2-r, another owner's series) and files open in a live process (fstat) are never candidates.
 # Never flagged: build/dserver/*, last-two-series files, /tmp/rs-* (outside the scanned dirs), and the dir keep-list
@@ -238,7 +240,7 @@ done
 
 # ---- 6. scratch files of a diagnosis ----
 SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py}"
-SCRT="${KEEPONE_SCRATCH_TMP-/tmp/fixcond-*.py}"
+SCRT="${KEEPONE_SCRATCH_TMP-/tmp/fixcond-*.py /tmp/claude-*.txt}"
 for g in $SCRB; do
 	for f in "$B"/$g; do
 		[ -f "$f" ] || continue
@@ -258,6 +260,17 @@ if [ -d "$SRCT/.git" ] || [ -f "$SRCT/.git" ]; then
 	} | while IFS= read -r f; do
 		[ -f "$f" ] || continue
 		printf '%s\tsrcorig\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
+	done >>"$T"
+fi
+
+PD="$ROOT/src/build-freebsd/patches"
+if [ -f "$PD/series" ]; then
+	for f in "$PD"/*; do
+		[ -f "$f" ] && [ ! -L "$f" ] || continue
+		_n=$(basename "$f"); [ "$_n" = series ] && continue
+		grep -v "^#" "$PD/series" | grep -qwF "$_n" && continue
+		git -C "$PD" ls-files --error-unmatch "$_n" >/dev/null 2>&1 && continue
+		printf '%s\tpatchstray\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
 	done >>"$T"
 fi
 
@@ -291,6 +304,11 @@ if [ "$MODE" = apply ]; then
 			case "$_rp" in "$_rs"/*.orig) if [ -n "$_rs" ] && [ ! -L "$_path" ] && ! git -C "$(dirname "$_rp")" ls-files --error-unmatch "$(basename "$_rp")" >/dev/null 2>&1; then continue; fi;; esac
 			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked .orig under $SRCT" >&2; continue
 		fi
+		if [ "$_ty" = patchstray ]; then
+			_rd=$(realpath "$PD" 2>/dev/null); _n=$(basename "$_rp")
+			case "$_rp" in "$_rd"/*) if [ -n "$_rd" ] && [ "$(dirname "$_rp")" = "$_rd" ] && [ ! -L "$_path" ] && [ "$_n" != series ] && ! grep -v "^#" "$_rd/series" | grep -qwF "$_n" && ! git -C "$_rd" ls-files --error-unmatch "$_n" >/dev/null 2>&1; then continue; fi;; esac
+			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is listed in series, tracked, or outside $PD" >&2; continue
+		fi
 		if [ "$_ty" = stray ]; then
 			_ok=0; for sd in $STRAY; do _rs=$(realpath "$sd" 2>/dev/null); case "$_rp" in "$_rs"/*) [ -n "$_rs" ] && _ok=1;; esac; done
 			[ $_ok = 1 ] && continue
@@ -317,7 +335,7 @@ fi
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
 over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
-np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c -e "scratch	" -e "	srcorig	" "$T")
+np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c -e "scratch	" -e "	srcorig	" -e "	patchstray	" "$T")
 cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
 v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ "$nsc" -gt 0 ] || [ $over = 1 ]; } && v=fail
