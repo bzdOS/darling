@@ -279,6 +279,11 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_exit          60
 #define LINUX_SYS_wait4         61
 #define LINUX_SYS_kill          62
+/* process creation: only the plain-fork forms are translated (see mldr_host_fork) */
+#define LINUX_SYS_clone         56
+#define LINUX_SYS_fork          57
+#define LINUX_SYS_vfork         58
+#define LINUX_SIGCHLD_NR        17
 #define LINUX_SYS_msync         26
 #define LINUX_SYS_sigaltstack  131
 #define LINUX_SYS_arch_prctl   158
@@ -707,6 +712,24 @@ freebsd_raw_syscall(long nr, long a1, long a2, long a3,
     #error freebsd_syscall_trap.c: unsupported architecture
 #endif
     return ret;
+}
+
+/*
+ * purpose:  Host fork(2) for the guest's plain-fork forms (Linux clone(SIGCHLD, 0), fork, vfork).
+ *           libc fork() (libthr's _thr_fork), not a raw SYS_fork: the child's only thread has a new
+ *           tid, and _thr_fork re-initialises it together with the rtld and malloc locks. A raw
+ *           SYS_fork skipped that and the child died in its first host libc call (SIGBUS in
+ *           snprintf). mldr registers no pthread_atfork handlers, and fork is async-signal-safe
+ *           (POSIX), so calling it here, inside the SIGSYS/SIGILL handler, is allowed.
+ * output:   0 in the child, the child's pid in the parent, or -errno (FreeBSD errno).
+ * sideEffects: creates a process (only the calling thread is copied).
+ */
+static long
+mldr_host_fork(void)
+{
+    pid_t p = fork();
+
+    return p < 0 ? -(long)errno : (long)p;
 }
 
 /* ── instruction-byte recovery of original eax (x86-64) ───────────────────── */
@@ -3440,14 +3463,28 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             "[darling-mldr] arch_prctl: unhandled op 0x%lx — ENOSYS\n", a1);
         return -ENOSYS;
 
+    /* Plain process fork. The guest's sys_fork issues clone(SIGCHLD, 0) and
+     * does all Darwin post-fork bookkeeping itself; it only needs the kernel
+     * fork. vfork runs as fork (allowed by vfork's semantics). Any other clone
+     * (threads, CLONE_VM, a child stack) stays ENOSYS below. */
+    case LINUX_SYS_clone:
+        if (a1 != LINUX_SIGCHLD_NR || a2 != 0)
+            goto unhandled;
+        return mldr_host_fork();
+    case LINUX_SYS_fork:
+    case LINUX_SYS_vfork:
+        return mldr_host_fork();
+
     /* Deliberately NOT translated (need real semantic redesign, not a
      * number swap — see file header comment):
      *   clone   — thread/process creation semantics differ fundamentally
-     *             from FreeBSD rfork(2)/thr_new(2); no 1:1 mapping.
+     *             from FreeBSD rfork(2)/thr_new(2); no 1:1 mapping. Only
+     *             clone(SIGCHLD, stack 0) is a plain fork (case above).
      *   futex   — FreeBSD's equivalent is _umtx_op(2), different op encoding.
      *   brk     — FreeBSD has no program-break syscall in the modern ABI;
      *             callers need to be steered to mmap(MAP_ANON) instead. */
     default:
+    unhandled:
         fprintf(stderr,
             "[darling-mldr] unhandled Linux syscall %u — ENOSYS\n", linux_nr);
 #if defined(__x86_64__)

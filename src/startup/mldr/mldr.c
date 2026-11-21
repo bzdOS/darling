@@ -862,7 +862,19 @@ __attribute__((constructor)) static void __mldr_rpc_socket_sweep(void) {
 }
 #endif
 
-int __mldr_create_rpc_socket(void) {
+/*
+ * Entry points the guest calls directly (elfcalls) - the fork child among them (sys_fork closes and
+ * recreates its RPC socket and lifetime pipe). The guest may reach them with rsp not 16-byte aligned;
+ * host libc then faults on an aligned SSE store (movaps in vfprintf: #GP, delivered as SIGBUS at the
+ * instruction). force_align_arg_pointer realigns the stack on entry.
+ */
+#if defined(__x86_64__)
+#define MLDR_GUEST_ENTRY __attribute__((force_align_arg_pointer))
+#else
+#define MLDR_GUEST_ENTRY
+#endif
+
+MLDR_GUEST_ENTRY int __mldr_create_rpc_socket(void) {
 	int pre_fd = -1;
 	int fd = -1;
 
@@ -948,7 +960,7 @@ err_out:
 	return -1;
 };
 
-void __mldr_close_rpc_socket(int socket) {
+MLDR_GUEST_ENTRY void __mldr_close_rpc_socket(int socket) {
 	close(socket);
 	socket_bitmap_put(&socket_bitmap, socket);
 #ifdef DARLING_FREEBSD
@@ -960,14 +972,22 @@ void __mldr_close_rpc_socket(int socket) {
 	// removing nothing it owns while leaking the real one, or worse, deleting
 	// a name another process had since bound. Hence the recorded pid rather
 	// than a fresh getpid().
-	char path[108];
-	snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d",
-	         (int)__mldr_rpc_socket_pid(socket), socket);
-	unlink(path);
+	//
+	// And only the binder may unlink it. A fork child closes the inherited
+	// socket (sys_fork replaces it with its own) while the parent still uses
+	// it: unlinking the parent's name there made every later reply to the
+	// parent fail with ENOENT — first of all the ForkWaitForChild reply, so
+	// the parent hung in fork().
+	pid_t bound_by = __mldr_rpc_socket_pid(socket);
+	if (bound_by == getpid()) {
+		char path[108];
+		snprintf(path, sizeof(path), "/tmp/darling-mldr-%d-%d", (int)bound_by, socket);
+		unlink(path);
+	}
 #endif
 };
 
-int __mldr_create_process_lifetime_pipe(int* fds) {
+MLDR_GUEST_ENTRY int __mldr_create_process_lifetime_pipe(int* fds) {
 	// These pipes are not required for Linux 5.3 or newer,
 	// we already have pidfd_open.
 #ifndef DARLING_FREEBSD
@@ -1015,7 +1035,7 @@ err_out:
 	return -1;
 }
 
-void __mldr_close_process_lifetime_pipe(int fd) {
+MLDR_GUEST_ENTRY void __mldr_close_process_lifetime_pipe(int fd) {
 	if (fd != -1) {
 		close(fd);
 		socket_bitmap_put(&socket_bitmap, fd);
