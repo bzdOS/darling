@@ -20,6 +20,10 @@
 #  2. backup/ holds at most one entry per library (name with .pre-* and .dylib removed); older ones are candidates.
 #  3. build/ top-level dirs are all keep-list/allowlist; anything else is an experiment dir (candidate).
 #  4. total size of KEEPONE_ROOT under KEEPONE_MAX_GB.
+#  5. stray build dirs: entries under KEEPONE_STRAY_BUILD (default "/var/darling-build /tmp/darling-build", the old
+#     defaults of the build-*.sh scripts, now required DARLING_BUILD_DIR) are candidates (type stray, counted in
+#     stray_builds, fail the verdict); the dir itself is kept. Skipped while anything inside changed in the last
+#     10 minutes (a build in progress) or when the dir is the real build dir.
 #  Refinements: files modified within KEEPONE_MIN_AGE_MIN minutes (default 120), files whose name contains
 #  KEEPONE_FOREIGN (default alt2-r, another owner's series) and files open in a live process (fstat) are never candidates.
 # Never flagged: build/dserver/*, last-two-series files, /tmp/rs-* (outside the scanned dirs), and the dir keep-list
@@ -215,6 +219,18 @@ if [ -d "$B" ]; then
 	done >>"$T"
 fi
 
+# ---- 5. stray build dirs outside <root>/build ----
+STRAY="${KEEPONE_STRAY_BUILD-/var/darling-build /tmp/darling-build}"
+RBX=$(realpath "$B" 2>/dev/null)
+for sd in $STRAY; do
+	[ -d "$sd" ] || continue
+	[ "$(realpath "$sd")" = "$RBX" ] && continue
+	[ -n "$(find "$sd" -mmin -10 -print 2>/dev/null | head -1)" ] && continue
+	for e in $(cd "$sd" && ls -A); do
+		printf '%s\tstray\t%s\n' "$(( $(timeout 60 du -sk "$sd/$e" 2>/dev/null | cut -f1) * 1024 ))" "$sd/$e"
+	done >>"$T"
+done
+
 # ---- 2. backup/: one entry per library, newest kept ----
 if [ -d "$BK" ]; then
 	for f in $(cd "$BK" && ls -t); do
@@ -235,6 +251,11 @@ if [ "$MODE" = apply ]; then
 	bad=0
 	while IFS="$(printf '\t')" read -r _sz _ty _path; do
 		_rp=$(realpath "$_path" 2>/dev/null)
+		if [ "$_ty" = stray ]; then
+			_ok=0; for sd in $STRAY; do _rs=$(realpath "$sd" 2>/dev/null); case "$_rp" in "$_rs"/*) [ -n "$_rs" ] && _ok=1;; esac; done
+			[ $_ok = 1 ] && continue
+			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, outside the stray build dirs" >&2; continue
+		fi
 		case "$_rp" in
 		""|"$RB"|"$RK") bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path (realpath '${_rp}')" >&2;;
 		"$RB"/*|"$RK"/*) ;;
@@ -256,9 +277,9 @@ fi
 kb=$(timeout 300 du -sk "$ROOT" 2>/dev/null | cut -f1); kb=${kb:-0}
 over=0; [ "$kb" -gt $((MAXG*1024*1024)) ] && over=1
 nl=$(grep -c "	log	" "$T"); nd=$(grep -c "	dir	" "$T"); nb=$(grep -c "	backup	" "$T")
-np=$(grep -c "	probe	" "$T")
+np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T")
 cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
-v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ $over = 1 ]; } && v=fail
-echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np"
+v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ $over = 1 ]; } && v=fail
+echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np stray_builds=$nsb"
 [ $v = pass ]
