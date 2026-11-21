@@ -1,0 +1,27 @@
+diff -ru a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
+--- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
++++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
+@@ -83,12 +83,18 @@
+ 
+ void sigexc_setup2(void)
+ {
+-	linux_sigset_t set;
+-	set = (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
+-	set |= (1ull << (SIGNAL_S2C-1));
++	linux_sigset_t set = 0;
++	// The 8-byte guest mask names signals 1..64 only. SIGNAL_SIGEXC_SUSPEND / SIGNAL_S2C are 65 / 66 on this host, and
++	// `1ull << 64` is undefined (on x86 it is bit 0 = SIGHUP, so SIGHUP was unblocked and 65/66 never were).
++	// The loader (mldr) unblocks the native signals 65/66 itself (mldr-sig65-unblock-count.patch).
++	if (SIGNAL_SIGEXC_SUSPEND >= 1 && SIGNAL_SIGEXC_SUSPEND <= 64)
++		set |= (1ull << (SIGNAL_SIGEXC_SUSPEND-1));
++	if (SIGNAL_S2C >= 1 && SIGNAL_S2C <= 64)
++		set |= (1ull << (SIGNAL_S2C-1));
+ 
+-	LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
+-		&set, NULL, sizeof(linux_sigset_t));
++	if (set != 0)
++		LINUX_SYSCALL(__NR_rt_sigprocmask, 1 /* LINUX_SIG_UNBLOCK */,
++			&set, NULL, sizeof(linux_sigset_t));
+ }
+ 
+ static void dump_gregs(const struct linux_gregset* regs)
