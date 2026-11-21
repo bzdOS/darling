@@ -56,6 +56,27 @@ timeout = 120
 chrome_extra_args = "--lang=en-US"
 trap_log = 0
 
+[run.series.fix39]
+prefix = "fix39"
+runs = 1
+timeout = 120
+chrome_extra_args = "--lang=en-US"
+trap_log = 0
+
+[run.series.fix40]
+prefix = "fix40"
+runs = 1
+timeout = 120
+chrome_extra_args = "--lang=en-US"
+trap_log = 0
+
+[run.series.fix41]
+prefix = "fix41"
+runs = 1
+timeout = 120
+chrome_extra_args = "--lang=en-US"
+trap_log = 0
+
 # names stub_data_rules.DATA_NAMES treats as data (generated into stub_data_names.py, in the tree)
 [stubs]
 # _k<PREFIX><Upper>...: framework constants
