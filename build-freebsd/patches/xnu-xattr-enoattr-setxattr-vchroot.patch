@@ -1,0 +1,74 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c
+index 6dca738..9e3b473 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c
+@@ -16,6 +16,9 @@ long sys_fgetxattr(int fd, const char* name, char* value,
+ 
+ 	ret = LINUX_SYSCALL(__NR_fgetxattr, fd, name, value, size);
+ 
++	// Linux ENODATA (61) means "no such attribute"; macOS callers expect ENOATTR.
++	if (ret == -61)
++		return -ENOATTR;
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getxattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getxattr.c
+index daca861..42a5743 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getxattr.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/getxattr.c
+@@ -31,8 +31,11 @@ long sys_getxattr(const char* path, const char* name, char* value,
+ 
+ 	ret = LINUX_SYSCALL(__NR_getxattr, vc.path, name, value, size);
+ 
++	// Linux ENODATA (61) means "no such attribute"; macOS callers expect ENOATTR.
++	if (ret == -61)
++		return -ENOATTR;
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
+-	return 0;
++	return ret;
+ }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/setxattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/setxattr.c
+index c1b2d50..49bfef6 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/setxattr.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/setxattr.c
+@@ -5,6 +5,8 @@
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/linux_premigration/vchroot_expand.h>
++#include <darling/emulation/common/bsdthread/per_thread_wd.h>
+ 
+ #define XATTR_NOFOLLOW	1
+ 
+@@ -16,14 +18,21 @@ long sys_setxattr(const char* path, const char* name, const void* value,
+ 	if (pos != 0)
+ 		return -ERANGE;
+ 
+-	if (options & XATTR_NOFOLLOW)
+-	{
+-		ret = LINUX_SYSCALL(__NR_lsetxattr, path, name, value, size);
+-	}
+-	else
+-	{
+-		ret = LINUX_SYSCALL(__NR_setxattr, path, name, value, size);
+-	}
++	struct vchroot_expand_args vc;
++	vc.flags = (options & XATTR_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
++	vc.dfd = get_perthread_wd();
++
++	strcpy(vc.path, path);
++	ret = vchroot_expand(&vc);
++
++	if (ret < 0)
++		return errno_linux_to_bsd(ret);
++
++	// macOS XATTR_CREATE 0x2 / XATTR_REPLACE 0x4 -> Linux XATTR_CREATE 1 / XATTR_REPLACE 2.
++	int lflags = ((options & 0x2) ? 1 : 0) | ((options & 0x4) ? 2 : 0);
++
++	// vchroot_expand already resolved a final symlink unless XATTR_NOFOLLOW was given.
++	ret = LINUX_SYSCALL(__NR_setxattr, vc.path, name, value, size, lflags);
+ 
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
