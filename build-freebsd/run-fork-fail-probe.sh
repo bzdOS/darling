@@ -11,9 +11,11 @@ PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"; export PATH
 . "$(dirname "$0")/series-guard.sh"; series_guard || exit 2
 LOG="${BD}/fork-fail-probe-$(date +%m%d-%H%M%S).log"
 before=$(pgrep -x darlingserver | tr "\n" " ")
+# PROBE_KTRACE=<points> (letters only, e.g. cnf): trace the launcher and every guest process inside sudo
+KT=; [ -n "${PROBE_KTRACE:-}" ] && KT="ktrace -i -t ${PROBE_KTRACE} -f ${LOG%.log}-ktrace.out"
 ( sudo timeout -k 5 $((WAIT+30)) env "DARLING_SRC_DIR=${SRC}" "DARLING_OVERLAY=${OD}" "DARLING_BUILD_DIR=${BD}" \
     "DARLING_TEST_BINARY=fork-fail-probe-macho" $([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) ${PROBE_ENV} \
-    "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
+    ${KT} "${BD}/launch-dynamic" >"${LOG}" 2>&1 & )
 i=0
 while [ "$i" -lt "$WAIT" ]; do
     grep -qa "FORK-VERDICT\|FATAL signal\|Terminating due to uncaught" "${LOG}" 2>/dev/null && break

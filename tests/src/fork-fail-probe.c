@@ -1,6 +1,7 @@
-/* fork-fail-probe.c - fork() and posix_spawn() must return (success or an error), never block, when the
- * host cannot create the child (clone is unsupported under the FreeBSD loader, so fork fails with ENOSYS).
- * A failed fork used to leave the parent in fork_wait_for_child forever (stale _mach_fork_parent).
+/* fork-fail-probe.c - fork() and posix_spawn() must return, never block.
+ * A successful fork passes only if the child is reaped and exited cleanly (status 0); a failed fork
+ * passes if it returns -1 with errno set (a failed fork used to leave the parent in
+ * fork_wait_for_child forever: stale _mach_fork_parent).
  * Output: one line  FORK-VERDICT pass|FAIL n=<checks> bad=<failed> [<names>]  (details on FORK-T lines);
  * no verdict line means a call blocked (the runner reports that as FAIL ... hang). */
 #include <stdio.h>
@@ -30,7 +31,8 @@ int main(void)
 	rc = fork();
 	e = errno;
 	if (rc == 0) _exit(0);
-	if (rc > 0) { waitpid((pid_t)rc, &st, 0); result("fork", 1, rc, 0); }
+	if (rc > 0) { st = -1; e = waitpid((pid_t)rc, &st, 0) == (pid_t)rc ? 0 : errno;
+		result("fork", e == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, rc, e); }
 	else result("fork", rc == -1 && e != 0, rc, e);   /* failed fork: -1 with errno set */
 
 	printf("FORK-T begin posix_spawn\n"); fflush(stdout);
@@ -45,7 +47,8 @@ int main(void)
 	rc = fork();
 	e = errno;
 	if (rc == 0) _exit(0);
-	if (rc > 0) { waitpid((pid_t)rc, &st, 0); result("fork-again", 1, rc, 0); }
+	if (rc > 0) { st = -1; e = waitpid((pid_t)rc, &st, 0) == (pid_t)rc ? 0 : errno;
+		result("fork-again", e == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, rc, e); }
 	else result("fork-again", rc == -1 && e != 0, rc, e);
 
 	printf("FORK-VERDICT %s n=%d bad=%d [%s]\n", nbad ? "FAIL" : "pass", n, nbad, badlist);
