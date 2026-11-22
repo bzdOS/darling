@@ -199,6 +199,9 @@ fi
 
 # ---- 1d. probe runner artifacts (<stem> = <kind>-MMDD-HHMMSS: .log, -ktrace.out, -ring.bin, -dserver.txt, -dserver-full.txt,
 # -dserver-head.txt, -procstat.txt). A diag ring is 128 MB, so the retention is by run, not by file:
+#   - the newest KEEPONE_RECENT_RUNS (default 5) runs of ANY kind are never removed (all artifacts of the stem: log, ring,
+#     procstat, srvgone, server-stderr, ...), regardless of age or the rules below, which apply only beyond them. A run is a
+#     stem <kind>-MMDD-HHMMSS; "newest" is by its MMDD-HHMMSS part, not file mtime;
 #   - stems listed in KEEPONE_KEEP_STEMS (default "nw10-1122-002606": evidence kept on purpose) are always kept;
 #   - a FAILED run (its <stem>-dserver.txt or <stem>-procstat.txt exists) is kept for the newest KEEPONE_FAILED_KEEP (default 4) failed
 #     runs, older failed runs are candidates;
@@ -208,6 +211,10 @@ if [ -d "$B" ]; then
 	_seen=""; _dec=""; _fn=0; _kn=0
 	_keepstems="${KEEPONE_KEEP_STEMS-nw10-1122-002606}"
 	_failkeep="${KEEPONE_FAILED_KEEP:-4}"; _kindkeep="${KEEPONE_KINDS_KEEP:-8}"
+	# newest KEEPONE_RECENT_RUNS stems of any kind, by the MMDD-HHMMSS part of the stem
+	_recent=" $(cd "$B" && ls -p | grep -v / | while read -r _x; do is_probe "$_x" && printf '%s\n' "$_x"; done \
+		| sed -E 's/^(.*-([0-9]{4}-[0-9]{6}))(\.log|-ktrace\.out|-ring\.bin|-dserver(-full|-head)?\.txt|-procstat\.txt|-srvgone\.txt|-server-stderr\.txt)$/\2 \1/' \
+		| sort -u | sort -r | head -n "${KEEPONE_RECENT_RUNS:-5}" | cut -d' ' -f2 | tr '\n' ' ')"
 	for f in $(cd "$B" && ls -t -p | grep -v /); do
 		if is_probe_old "$f"; then
 			case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
@@ -233,6 +240,7 @@ if [ -d "$B" ]; then
 			case " $_keepstems " in
 			*" $_st "*) _k=1;;
 			*)
+			case "$_recent" in *" $_st "*) _k=1;; *)
 				if [ -f "$B/$_st-dserver.txt" ] || [ -f "$B/$_st-procstat.txt" ] || [ -f "$B/$_st-srvgone.txt" ] || [ -f "$B/$_st-server-stderr.txt" ]; then
 					_fn=$((_fn+1)); if [ $_fn -le "$_failkeep" ]; then _k=1; else _k=0; fi
 				else
@@ -241,6 +249,7 @@ if [ -d "$B" ]; then
 					*) _seen="$_seen $_kd"; _kn=$((_kn+1)); if [ $_kn -le "$_kindkeep" ]; then _k=1; else _k=0; fi;;
 					esac
 				fi;;
+			esac;;
 			esac
 			if [ $_k = 1 ]; then _dec="$_dec $_st=keep"; else _dec="$_dec $_st=del"; fi;;
 		esac
