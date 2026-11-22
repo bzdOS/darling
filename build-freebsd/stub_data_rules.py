@@ -206,6 +206,10 @@ def data_asm(name, size=DATA_SIZE, strings=False):
 # itself instead of the global forward handler: build-freebsd/SERIES-FIX24-DIAG.md
 # measured all nine as OBJC-FWD-MISS in every fix24 run (41 % of the hits), and the
 # forward handler's nil/0 is the empty-dictionary answer the rc133 class hangs on.
+# Two string primitives (OBJC-FWD-MISS in a Chrome run, right after the Wayland
+# event class registers): something hands a dictionary record to CFString code. A dictionary has no characters, so
+# _encodingCantBeStoredInEightBitCFString answers NO and getCharacters:range: writes `range.length` zero characters
+# instead of leaving the caller's buffer uninitialised.
 # Its instances are the constant records the linker emits into __objc_dictobj: measured
 # over the six records of one framework binary, the record is
 # {isa, word, count, keys, values}, 40 bytes, the key/value arrays holding `count`
@@ -216,7 +220,7 @@ def data_asm(name, size=DATA_SIZE, strings=False):
 # src/external/corefoundation/NSObject.m); release is a no-op on a static record.
 # The generated file is compiled without an include path, so BOOL/NO come from this
 # typedef: the runtime's x86_64 BOOL is signed char (objc.h).
-_NSCT_PRELUDE = "typedef signed char BOOL;\n#define NO ((BOOL)0)\n\n"
+_NSCT_PRELUDE = "typedef signed char BOOL;\n#define NO ((BOOL)0)\ntypedef struct { unsigned long location, length; } NSRange;\n\n"
 _NSCT_IVARS = ("    unsigned long _flags;\n    unsigned long _count;\n"
                "    id *_keys;\n    id *_values;\n")
 _NSCT_METHODS = (
@@ -228,7 +232,10 @@ _NSCT_METHODS = (
     "- (BOOL)isNSDictionary__ { return NO; }\n"
     "- (BOOL)isNSNumber__ { return NO; }\n"
     "- (BOOL)isNSString__ { return NO; }\n"
-    "- (void)release { }\n")
+    "- (void)release { }\n"
+    "- (BOOL)_encodingCantBeStoredInEightBitCFString { return NO; }\n"
+    "- (void)getCharacters:(unsigned short *)buffer range:(NSRange)range"
+    " { unsigned long i; for (i = 0; i < range.length; i++) buffer[i] = 0; }\n")
 EXTRAS = {"NSConstantDictionary": (_NSCT_PRELUDE, _NSCT_IVARS, _NSCT_METHODS)}
 
 
