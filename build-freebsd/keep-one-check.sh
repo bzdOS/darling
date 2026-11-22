@@ -139,7 +139,7 @@ owner() {
 OPEN=" $(timeout 60 fstat -f "$B" 2>/dev/null | awk 'NR>1 && $6 ~ /^[0-9]+$/ {print $6}' | sort -u | tr '\n' ' ')"
 
 # probe runner logs and traces (run-*-probe.sh): <kind>-MMDD-HHMMSS.log, -ktrace.out and -ring.bin (diag ring); handled in 1d only
-is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out|-ring\.bin)$'; }
+is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out|-ring\.bin|-dserver\.txt|-dserver-full\.txt|-dserver-head\.txt|-procstat\.txt)$'; }
 # Old sig-reentry-probe-run.sh naming (before <kind>-MMDD-HHMMSS): <prefix><run>-<i>.log and
 # <prefix><run>-<i>-dserver[-head].txt, for the runner prefixes used on this tree. All of them are probe candidates.
 PROBE_OLD_PREFIXES="cancelrpc abold abnew cnt sigre"
@@ -197,11 +197,17 @@ if [ -d "$B" ]; then
 	done >>"$T"
 fi
 
-# ---- 1d. probe runner logs/traces: the newest one of each kind (<kind>.log, <kind>-ktrace.out, <kind>-ring.bin) is kept,
-# and every file of a failed run (<stem>-dserver.txt present); older ones are
-# type probe: shown by --list, removed by --apply, counted as probe_logs, never fail the verdict (the gate's own probes write them) ----
+# ---- 1d. probe runner artifacts (<stem> = <kind>-MMDD-HHMMSS: .log, -ktrace.out, -ring.bin, -dserver.txt, -dserver-full.txt,
+# -dserver-head.txt, -procstat.txt). A diag ring is 128 MB, so the retention is by run, not by file:
+#   - stems listed in KEEPONE_KEEP_STEMS (default "nw10-1122-002606": evidence kept on purpose) are always kept;
+#   - a FAILED run (its <stem>-dserver.txt or <stem>-procstat.txt exists) is kept for the newest KEEPONE_FAILED_KEEP (default 4) failed
+#     runs, older failed runs are candidates;
+#   - of the passing runs only the newest run of each kind is kept, and only for the newest KEEPONE_KINDS_KEEP (default 8) kinds.
+# Everything else is type probe: shown by --list, removed by --apply, counted as probe_logs, never fails the verdict. ----
 if [ -d "$B" ]; then
-	_seen=""
+	_seen=""; _dec=""; _fn=0; _kn=0
+	_keepstems="${KEEPONE_KEEP_STEMS-nw10-1122-002606}"
+	_failkeep="${KEEPONE_FAILED_KEEP:-4}"; _kindkeep="${KEEPONE_KINDS_KEEP:-8}"
 	for f in $(cd "$B" && ls -t -p | grep -v /); do
 		if is_probe_old "$f"; then
 			case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
@@ -209,12 +215,34 @@ if [ -d "$B" ]; then
 			continue
 		fi
 		is_probe "$f" || continue
-		case "$f" in *-ktrace.out) _st=${f%-ktrace.out}; _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-ktrace.out}.ktrace;;
-		*-ring.bin) _st=${f%-ring.bin}; _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-ring.bin}.ring;;
-		*) _st=${f%.log}; _kd=${f%-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log}.log;; esac
-		# a failed run (its <stem>-dserver.txt exists) keeps its log, trace and ring: the evidence of a hang
-		[ -f "$B/$_st-dserver.txt" ] && continue
-		case " $_seen " in *" $_kd "*) ;; *) _seen="$_seen $_kd"; continue;; esac
+		case "$f" in
+		*-ktrace.out) _st=${f%-ktrace.out};;
+		*-ring.bin) _st=${f%-ring.bin};;
+		*-dserver-full.txt) _st=${f%-dserver-full.txt};;
+		*-dserver-head.txt) _st=${f%-dserver-head.txt};;
+		*-dserver.txt) _st=${f%-dserver.txt};;
+		*-procstat.txt) _st=${f%-procstat.txt};;
+		*) _st=${f%.log};; esac
+		case " $_dec " in
+		*" $_st=keep "*) _k=1;;
+		*" $_st=del "*) _k=0;;
+		*)
+			_kd=$(printf '%s' "$_st" | sed -E 's/-[0-9]{4}-[0-9]{6}$//')
+			case " $_keepstems " in
+			*" $_st "*) _k=1;;
+			*)
+				if [ -f "$B/$_st-dserver.txt" ] || [ -f "$B/$_st-procstat.txt" ]; then
+					_fn=$((_fn+1)); if [ $_fn -le "$_failkeep" ]; then _k=1; else _k=0; fi
+				else
+					case " $_seen " in
+					*" $_kd "*) _k=0;;
+					*) _seen="$_seen $_kd"; _kn=$((_kn+1)); if [ $_kn -le "$_kindkeep" ]; then _k=1; else _k=0; fi;;
+					esac
+				fi;;
+			esac
+			if [ $_k = 1 ]; then _dec="$_dec $_st=keep"; else _dec="$_dec $_st=del"; fi;;
+		esac
+		[ $_k = 1 ] && continue
 		case "$OPEN" in *" $(stat -f %i "$B/$f") "*) continue;; esac
 		printf '%s\tprobe\t%s\n' "$(stat -f %z "$B/$f" 2>/dev/null || echo 0)" "$B/$f"
 	done >>"$T"
