@@ -54,6 +54,22 @@ int main(void)
 		const void *(*rs)(const void *, const void *, long) = dlsym(h, "SCDynamicStoreCreateRunLoopSource");
 		res("SCDynamicStoreCreateRunLoopSource", rs && st ? rs(0, st, 0) : 0);
 	}
+	{
+		/* IOKit power sources (Chrome battery_status_manager_mac.cc): no IOPS* may be missing or return NULL */
+		void *k = dlopen("/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit", RTLD_NOW);
+		if (!k) res("IOKit dlopen", 0);
+		else {
+			const void *(*pi)(void) = dlsym(k, "IOPSCopyPowerSourcesInfo");
+			const void *(*pl)(const void *) = dlsym(k, "IOPSCopyPowerSourcesList");
+			const void *(*pd)(const void *, const void *) = dlsym(k, "IOPSGetPowerSourceDescription");
+			const void *(*pn)(void (*)(void *), void *) = dlsym(k, "IOPSNotificationCreateRunLoopSource");
+			const void *info = pi ? pi() : 0;
+			res("IOPSCopyPowerSourcesInfo", info);
+			res("IOPSCopyPowerSourcesList", pl && info ? pl(info) : 0);
+			res("IOPSGetPowerSourceDescription(sym)", (const void *)pd);
+			res("IOPSNotificationCreateRunLoopSource", pn ? pn(0, 0) : 0);
+		}
+	}
 	printf("SCCHK DONE fail=%d\n", bad);
 	return bad ? 1 : 0;
 }

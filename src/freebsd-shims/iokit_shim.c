@@ -300,3 +300,47 @@ IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key,
 	(void)options;
 	return NULL;
 }
+
+/*
+ * IOKit power sources (IOPowerSources.h), imported by Chrome's battery_status_manager_mac.cc, which logs
+ * "Failed to create battery status notification run loop" when the notification source is NULL.
+ * There is no powerd here: the machine has no batteries, so the snapshot is an empty dictionary, the
+ * list is an empty array, and the notification source is an inert version-0 CFRunLoopSource that never
+ * fires.
+ */
+CFTypeRef
+IOPSCopyPowerSourcesInfo(void)
+{
+	return CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0,
+			&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+}
+
+CFArrayRef
+IOPSCopyPowerSourcesList(CFTypeRef blob)
+{
+	(void)blob;
+	return CFArrayCreate(kCFAllocatorDefault, NULL, 0, &kCFTypeArrayCallBacks);
+}
+
+/* Get rule: no source is ever listed, so any ps is unknown; an unretained empty description is returned. */
+CFDictionaryRef
+IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps)
+{
+	static CFDictionaryRef empty;
+	(void)blob;
+	(void)ps;
+	if (empty == NULL) {
+		empty = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0,
+				&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	}
+	return empty;
+}
+
+CFTypeRef
+IOPSNotificationCreateRunLoopSource(void (*callback)(void *), void *context)
+{
+	CFRunLoopSourceContext ctx = { 0 };
+	(void)callback;
+	(void)context;
+	return CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &ctx);
+}
