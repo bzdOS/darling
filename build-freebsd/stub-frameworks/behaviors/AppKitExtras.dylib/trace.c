@@ -249,6 +249,7 @@ G_RECT(g_svf, "NSScreen", "visibleFrame")
 G_DBL(g_sbsf, "NSScreen", "backingScaleFactor")
 G_ID(g_screens, "+NSScreen", "screens")
 G_ID(g_mainscr, "+NSScreen", "mainScreen")
+G_ID(g_sdd, "NSScreen", "deviceDescription")
 
 /* contentView: also remembers the view so that the NSView getters print for it only */
 static IMP o_cview;
@@ -380,6 +381,7 @@ static void try_window(void)
         hook_sel(c, "frame", (IMP)g_sfr, &o_g_sfr);
         hook_sel(c, "visibleFrame", (IMP)g_svf, &o_g_svf);
         hook_sel(c, "backingScaleFactor", (IMP)g_sbsf, &o_g_sbsf);
+        hook_sel(c, "deviceDescription", (IMP)g_sdd, &o_g_sdd);
         hook_sel(objc_getMetaClass("NSScreen"), "screens", (IMP)g_screens, &o_g_screens);
         hook_sel(objc_getMetaClass("NSScreen"), "mainScreen", (IMP)g_mainscr, &o_g_mainscr);
     } else
