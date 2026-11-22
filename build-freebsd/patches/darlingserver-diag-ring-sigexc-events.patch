@@ -76,13 +76,16 @@ diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlings
  		std::optional<Message> _deferredReply = std::nullopt;
  
  		struct InterruptContext {
-@@ -302,5 +315,12 @@
+@@ -302,5 +315,15 @@
  		void logToStream(Log::Stream& stream) const;
  	};
  };
 +
 +// Diag ring event (DSERVER_DIAG_RING), defined in thread.cpp; kinds listed there.
 +void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n);
++// push_reply synchronization pipe of the client: write the byte and close the descriptor without ever dying of SIGPIPE
++// (the client may be gone: its read end is closed, the write then raises SIGPIPE on the calling thread and killed the whole server)
++void dsAckPushReply(int fd);
 +// Same with the ring entry's ret field set (kind 15 checkin trace: ret = hash of the destination socket path).
 +void dsdiagRingEventRet(int kind, int tid, int nstid, uint64_t ret, uint64_t n);
 +struct sockaddr_un;
@@ -103,7 +106,33 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
  
  	if (header->number == dserver_callnum_s2c) {
-@@ -238,6 +242,7 @@
+@@ -204,8 +208,7 @@
+ 		// client's problem, never the server's. Drop the reply, but release the synchronization pipe so nobody blocks on it.
+ 		if (!process->readMemory(pushReplyCall->reply, replyToSave.data().data(), pushReplyCall->reply_size)) {
+ 			callLog.warning() << "Dropping client-pushed reply: client memory unreadable (client dead?)" << callLog.endLog;
+-			write(pipeDesc, &tmp, sizeof(tmp));
+-			close(pipeDesc);
++			dsAckPushReply(pipeDesc);
+ 			return nullptr;
+ 		}
+ 
+@@ -224,26 +227,23 @@
+ 			} else {
+ 				if (thread->_interrupts.empty()) {
+ 					callLog.error() << "Client tried to push reply outside of interrupt; dropping it" << callLog.endLog;
+-					write(pipeDesc, &tmp, sizeof(tmp));
+-					close(pipeDesc);
++					dsAckPushReply(pipeDesc);
+ 					return nullptr;
+ 				}
+ 				if (thread->_interrupts.top().savedReply) {
+ 					callLog.error() << "Client-pushed reply would overwrite existing saved reply; dropping it" << callLog.endLog;
+-					write(pipeDesc, &tmp, sizeof(tmp));
+-					close(pipeDesc);
++					dsAckPushReply(pipeDesc);
+ 					return nullptr;
+ 				}
+ 				thread->_interrupts.top().savedReply = std::move(replyToSave);
  			}
  		}
  
@@ -111,7 +140,14 @@ diff -ru a/src/call.cpp b/src/call.cpp
  		callLog.debug() << *thread << ": Saved client-pushed reply (" << ((thread->_pendingSavedReply) ? "pending" : "normal") << ")" << callLog.endLog;
  
  		// write a byte to the pipe so the caller can continue
-@@ -823,6 +828,20 @@
+-		write(pipeDesc, &tmp, sizeof(tmp));
+-		// and close it
+-		close(pipeDesc);
++		dsAckPushReply(pipeDesc);
+ 
+ 		return nullptr;
+ 	}
+@@ -823,6 +823,20 @@
  };
  
  void DarlingServer::Call::InterruptEnter::processCall() {
@@ -132,7 +168,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	Thread::_handleInterruptEnterForCurrentThread();
  
  	_sendReply(0);
-@@ -831,6 +850,19 @@
+@@ -831,6 +845,19 @@
  void DarlingServer::Call::InterruptExit::processCall() {
  	auto thread = _thread.lock();
  
@@ -152,7 +188,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  	dtape_thread_sigexc_exit(thread->_dtapeThread);
  
  	_sendReply(0);
-@@ -844,6 +876,7 @@
+@@ -844,6 +871,7 @@
  
  		if (tmp.savedReply) {
  			callLog.debug() << *thread << ": Going to send saved reply" << callLog.endLog;
@@ -160,7 +196,7 @@ diff -ru a/src/call.cpp b/src/call.cpp
  			Server::sharedInstance().sendMessage(std::move(*tmp.savedReply));
  			tmp.savedReply = std::nullopt;
  		}
-@@ -1048,6 +1081,11 @@
+@@ -1048,6 +1076,11 @@
  	int code = 0;
  
  	if (auto thread = _thread.lock()) {
@@ -400,7 +436,7 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
  	if (_interruptedForSignal) {
  		if (_interrupts.top().savedReply) {
  			throw std::runtime_error("New reply would overwrite existing saved reply");
-@@ -1837,3 +1851,83 @@
+@@ -1837,3 +1851,108 @@
  
  	dtape_thread_sigexc_enter2(currentThreadVar->_dtapeThread);
  };
@@ -479,6 +515,31 @@ diff -ru a/src/thread.cpp b/src/thread.cpp
 +void dsdiagRingEventRet(int kind, int tid, int nstid, uint64_t ret, uint64_t n) {
 +	dsdiagRingRecord(kind, tid, nstid, reinterpret_cast<const void*>(ret), n);
 +};
++
++void dsAckPushReply(int fd) {
++	// SIGPIPE blocked on this thread only (an SIG_IGN would be inherited by the guest processes the server spawns); a SIGPIPE raised by
++	// the write stays pending for this thread and is consumed with sigtimedwait before the mask is restored.
++	sigset_t pipeSet, oldSet;
++	sigemptyset(&pipeSet);
++	sigaddset(&pipeSet, SIGPIPE);
++	pthread_sigmask(SIG_BLOCK, &pipeSet, &oldSet);
++	char tmp = 1;
++	ssize_t r;
++	do {
++		r = write(fd, &tmp, sizeof(tmp));
++	} while (r < 0 && errno == EINTR);
++	if (r < 0) {
++		int err = errno;
++		if (err == EPIPE) {
++			struct timespec zero = { 0, 0 };
++			while (sigtimedwait(&pipeSet, nullptr, &zero) == SIGPIPE) {
++			}
++		}
++		dsdiagRingEvent(14, -1, -1, (8ull << 56) | (uint64_t)err); // ring kind 14 sub 8: ack write failed (32 = EPIPE: the client is gone)
++	}
++	pthread_sigmask(SIG_SETMASK, &oldSet, nullptr);
++	close(fd);
++}
 +
 +void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n) {
 +	dsdiagRingRecord(kind, tid, nstid, nullptr, n);
