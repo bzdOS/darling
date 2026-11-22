@@ -15,10 +15,10 @@ cleanup() { rm -rf "$W"; }
 trap cleanup EXIT INT TERM HUP
 LOG="$W/font-metrics-probe.log"
 [ -d "$SDK_FLAT/usr/include" ] || { echo "$F0 bad=[no flattened SDK]"; exit 1; }
-rm -f "$W/link.err"
+rm -f "$W/link.err" "$W/compile.err"
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w \
-	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/font-metrics-probe.c" -o "$W/probe.o" || {
-	echo "$F0 bad=[compile: $(tail -1 "$W/link.err" 2>/dev/null)]"; exit 1; }
+	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/font-metrics-probe.c" -o "$W/probe.o" 2>"$W/compile.err" || {
+	echo "$F0 bad=[compile: $(tail -1 "$W/compile.err" 2>/dev/null)]"; exit 1; }
 ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -o "$SRC/tests/$T" "$W/probe.o" \
 	"$OD/usr/lib/AppKitExtras.dylib" "$OD/usr/lib/CoreTextExtras.dylib" \
 	"$OD/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit" \
