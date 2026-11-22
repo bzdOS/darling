@@ -676,15 +676,6 @@ diff -ruN a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_
  
  #include <signal.h>
  #include <sys/syscall.h>
-@@ -368,7 +369,7 @@
-         if (sig65_print < 0)
-             sig65_print = getenv("DARLING_SIG65_COUNT") != NULL;
-         if (sig65_print)
--            fprintf(stderr, "[sig65-count] tramp=%lu\n", c);
-+            TRAPLOG("[sig65-count] tramp=%lu\n", c);
-     }
-     int linux_signo = sat_freebsd_signo_to_linux(native_signo);
-     int slot = sat_slot(linux_signo);
 @@ -392,7 +393,7 @@
          long long rip = (long long)uc->uc_mcontext.mc_rip;
          int si_code = native_info->si_code;

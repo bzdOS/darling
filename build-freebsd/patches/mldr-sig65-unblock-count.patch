@@ -12,7 +12,7 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +{
 +    unsigned long n65 = __atomic_load_n(&mldr_sig65_tramp_count, __ATOMIC_RELAXED);
 +    if (n65 && getenv("DARLING_SIG65_COUNT"))
-+        fprintf(stderr, "[sig65-count] tramp=%lu\n", n65);
++        dprintf(2, "[sig65-count] tramp=%lu\n", n65);
 +}
 +
  /* ── open(2) flag translation ──────────────────────────────────────────────── */
@@ -71,7 +71,7 @@ diff -ru a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_t
 +        if (sig65_print < 0)
 +            sig65_print = getenv("DARLING_SIG65_COUNT") != NULL;
 +        if (sig65_print)
-+            fprintf(stderr, "[sig65-count] tramp=%lu\n", c);
++            dprintf(2, "[sig65-count] tramp=%lu\n", c);
 +    }
      int linux_signo = sat_freebsd_signo_to_linux(native_signo);
      int slot = sat_slot(linux_signo);

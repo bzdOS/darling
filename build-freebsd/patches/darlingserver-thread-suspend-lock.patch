@@ -1,19 +1,11 @@
-diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+index f4ce909..eafde90 100644
 --- a/duct-tape/src/thread.c
 +++ b/duct-tape/src/thread.c
-@@ -55,6 +55,7 @@
- 	thread->processing_signal = false;
- 	thread->name = NULL;
- 	thread->waiting_suspended = false;
-+	thread->suspend_signal_inflight = false;
- 	LIST_INIT(&thread->user_states);
- 	dtape_mutex_init(&thread->suspension_mutex);
- 	dtape_condvar_init(&thread->suspension_condvar);
-@@ -371,7 +372,20 @@
+@@ -369,6 +369,18 @@ kern_return_t handle_ux_exception(thread_t xthread, int exception, mach_exceptio
  	return KERN_SUCCESS;
  };
  
--void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
 +// One lock for all threads: it only covers the short window between the suspend_count check and the park
 +// (see dtape_thread_wait_while_user_suspended) and the decrement + resume in thread_release().
 +static libsimple_lock_t dtape_suspend_lock = LIBSIMPLE_LOCK_INITIALIZER;
@@ -26,12 +18,10 @@ diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
 +	return state == 1;
 +}
 +
-+static bool dtape_wait_while_user_suspended_impl(dtape_thread_t* thread, bool exit_variant) {
-+	bool parked = false;
+ void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
  	if (&thread->xnu_thread != current_thread()) {
  		panic("Cannot wait with non-current thread");
- 	}
-@@ -396,7 +410,26 @@
+@@ -394,7 +406,22 @@ void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
  	//         2. we can register the signalfd only when we receive a signal, since we only need to check for pending signals during sigprocess,
  	//            but this means signal processing incurs an additional delay.
  
@@ -46,20 +36,16 @@ diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
 +			libsimple_lock_lock(&dtape_suspend_lock);
 +		}
 +		if (thread->xnu_thread.suspend_count <= 0) {
-+			if (exit_variant) {
-+				thread->suspend_signal_inflight = false;
-+			}
 +			if (use_lock) {
 +				libsimple_lock_unlock(&dtape_suspend_lock);
 +			}
 +			break;
 +		}
-+		parked = true;
 +
  		dtape_log_debug("sigexc: going to sleep");
  
  		dtape_mutex_lock(&thread->suspension_mutex);
-@@ -404,11 +437,10 @@
+@@ -402,11 +429,10 @@ void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
  		dtape_mutex_unlock(&thread->suspension_mutex);
  		dtape_condvar_signal(&thread->suspension_condvar, SIZE_MAX);
  
@@ -73,70 +59,7 @@ diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
  
  		dtape_log_debug("sigexc: woken up");
  
-@@ -418,11 +450,33 @@
- 		dtape_condvar_signal(&thread->suspension_condvar, SIZE_MAX);
- 
- 		if (thread->xnu_thread.wait_result == THREAD_INTERRUPTED) {
-+			if (exit_variant) {
-+				if (use_lock) {
-+					libsimple_lock_lock(&dtape_suspend_lock);
-+				}
-+				thread->suspend_signal_inflight = false;
-+				if (use_lock) {
-+					libsimple_lock_unlock(&dtape_suspend_lock);
-+				}
-+			}
- 			break;
- 		}
- 	}
-+	return parked;
- };
- 
-+void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
-+	dtape_wait_while_user_suspended_impl(thread, false);
-+};
-+
-+bool dtape_thread_suspend_unacked(dtape_thread_t* thread) {
-+	return thread->xnu_thread.suspend_count > 0 && !thread->waiting_suspended;
-+};
-+
-+bool dtape_thread_wait_while_user_suspended_exit(dtape_thread_t* thread) {
-+	return dtape_wait_while_user_suspended_impl(thread, true);
-+};
-+
- void dtape_thread_retain(dtape_thread_t* thread) {
- 	thread_reference(&thread->xnu_thread);
- };
-@@ -1402,15 +1456,43 @@
- 	if (xthread->suspend_count++ == 0) {
- 		// This signal leads to sigexc.c which will end up calling darlingserver;
- 		// darlingserver will hold the caller so long as the suspend_count > 0.
--		dtape_hooks->thread_send_signal(thread->context, LINUX_SIGRTMIN);
-+		// decide under the suspend lock (the handler's final check at interrupt_exit takes it too): while a suspend signal's
-+		// handler is still in flight it will see this suspend and park, so no second signal is sent
-+		bool use_lock = dtape_suspend_lock_enabled();
-+		if (use_lock) {
-+			libsimple_lock_lock(&dtape_suspend_lock);
-+		}
-+		bool coalesce = thread->suspend_signal_inflight;
-+		thread->suspend_signal_inflight = true;
-+		if (use_lock) {
-+			libsimple_lock_unlock(&dtape_suspend_lock);
-+		}
-+		if (coalesce) {
-+			dtape_hooks->thread_diag_event(thread->context, 6, 1); // suspend without a new signal (previous one in flight)
-+		} else if (dtape_hooks->thread_send_signal(thread->context, LINUX_SIGRTMIN) < 0) {
-+			if (use_lock) {
-+				libsimple_lock_lock(&dtape_suspend_lock);
-+			}
-+			thread->suspend_signal_inflight = false;
-+			if (use_lock) {
-+				libsimple_lock_unlock(&dtape_suspend_lock);
-+			}
-+		}
- 	}
- };
- 
+@@ -1365,8 +1391,15 @@ void thread_hold(thread_t xthread) {
  void thread_release(thread_t xthread) {
  	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
  	dtape_log_debug("sigexc: thread_release(%p)\n", xthread);

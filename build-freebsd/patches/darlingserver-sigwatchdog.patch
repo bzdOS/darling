@@ -1,0 +1,198 @@
+diff -ru a/duct-tape/include/darlingserver/duct-tape.h b/duct-tape/include/darlingserver/duct-tape.h
+--- a/duct-tape/include/darlingserver/duct-tape.h
++++ b/duct-tape/include/darlingserver/duct-tape.h
+@@ -83,6 +83,8 @@
+ void dtape_thread_sigexc_exit(dtape_thread_t* thread);
+ void dtape_thread_sigexc_enter2(dtape_thread_t* thread);
+ void dtape_thread_dying(dtape_thread_t* thread);
++// true while a suspend is requested and the thread has not parked yet (its suspend signal may have been lost)
++bool dtape_thread_suspend_unacked(dtape_thread_t* thread);
+ 
+ void dtape_task_uidgid(dtape_task_t* task, int new_uid, int new_gid, int* old_uid, int* old_gid);
+ void dtape_task_retain(dtape_task_t* task);
+diff -ru a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+--- a/duct-tape/src/thread.c
++++ b/duct-tape/src/thread.c
+@@ -550,6 +550,10 @@
+ 	thread_unlock(&thread->xnu_thread);
+ };
+ 
++bool dtape_thread_suspend_unacked(dtape_thread_t* thread) {
++	return thread->xnu_thread.suspend_count > 0 && !thread->waiting_suspended;
++};
++
+ thread_t current_thread(void) {
+ 	dtape_thread_t* thread = dtape_hooks->current_thread();
+ 	return thread ? &thread->xnu_thread : NULL;
+diff -ru a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
+--- a/internal-include/darlingserver/thread.hpp
++++ b/internal-include/darlingserver/thread.hpp
+@@ -129,6 +129,15 @@
+ 		std::optional<Message> _pendingSavedReply = std::nullopt;
+ 		bool _dead = false;
+ 		std::shared_ptr<Thread> _selfReference = nullptr;
++		// suspend-signal watchdog and latency records (darlingserver-sigwatchdog.patch)
++		// thread_suspended calls received (a suspend signal's handler reached the server); the watchdog compares it
++		std::atomic<uint64_t> _suspendedCalls{0};
++		// interrupt_enter calls received (a signal handler of this thread is running); the watchdog does not re-send then
++		std::atomic<uint64_t> _interruptEnters{0};
++		std::atomic<uint64_t> _lastEnterNs{0}; // CLOCK_MONOTONIC ns of the last interrupt_enter (watchdog outcome timing)
++		// first suspend signal sent and not yet answered by an interrupt_enter: send time, last watchdog re-send time (CLOCK_MONOTONIC ns)
++		std::atomic<uint64_t> _sigSentNs{0};
++		std::atomic<uint64_t> _sigResendNs{0};
+ 
+ 		static void microthreadWorker();
+ 		static void microthreadContinuation();
+diff -ru a/src/call.cpp b/src/call.cpp
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -823,6 +823,20 @@
+ };
+ 
+ void DarlingServer::Call::InterruptEnter::processCall() {
++	if (auto t = _thread.lock()) {
++		struct timespec ets; clock_gettime(CLOCK_MONOTONIC, &ets);
++		uint64_t nowNs = (uint64_t)ets.tv_sec * 1000000000ull + ets.tv_nsec;
++		t->_lastEnterNs.store(nowNs);
++		// signal latency record (ring kind 14, sub 3): n = 3<<56 | resent<<55 | usSinceResend<<22 (22 bits) | usSinceSend (22 bits)
++		uint64_t sent = t->_sigSentNs.exchange(0);
++		if (sent) {
++			uint64_t rs = t->_sigResendNs.exchange(0);
++			uint64_t us = (nowNs - sent) / 1000; if (us > 0x3fffff) us = 0x3fffff;
++			uint64_t ur = rs ? (nowNs - rs) / 1000 : 0x3fffff; if (ur > 0x3fffff) ur = 0x3fffff;
++			dsdiagRingEvent(14, t->_tid, t->_nstid, (3ull << 56) | ((rs ? 1ull : 0ull) << 55) | (ur << 22) | us);
++		}
++		++t->_interruptEnters;
++	}
+ 	Thread::_handleInterruptEnterForCurrentThread();
+ 
+ 	_sendReply(0);
+@@ -1059,6 +1073,9 @@
+ };
+ 
+ void DarlingServer::Call::ThreadSuspended::processCall() {
++	if (auto t = _thread.lock()) {
++		++t->_suspendedCalls;
++	}
+ 	int code = 0;
+ 
+ 	if (auto thread = _thread.lock()) {
+diff -ru a/src/server.cpp b/src/server.cpp
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -38,6 +38,10 @@
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/wait.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#include <signal.h>
++#include <vector>
+ 
+ #include <darlingserver/logging.hpp>
+ 
+@@ -255,9 +259,103 @@
+ 		return static_cast<dtape_thread_state_t>(static_cast<DarlingServer::Thread*>(thread_context)->getRunState());
+ 	};
+ 
++	// Host state of a guest thread for the suspend-signal loss measurement (ring kind 14 sub 4, sampled at the watchdog's first re-send):
++	// n = 4<<56 | wmesg(first 4 chars)<<16 | stat<<8 | ignored<<4 | caught<<3 | blocked<<2 | pending<<1 | found, from kinfo_proc of the thread
++	// (ki_siglist, ki_sigmask, ki_sigcatch, ki_sigignore for signal 65).
++	static uint64_t dsKinfoThreadState(pid_t pid, pid_t tid) {
++		int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID | KERN_PROC_INC_THREAD, (int)pid };
++		size_t len = 0;
++		if (sysctl(mib, 4, nullptr, &len, nullptr, 0) != 0 || len == 0) {
++			return 4ull << 56;
++		}
++		std::vector<char> buf(len + 16 * sizeof(struct kinfo_proc));
++		len = buf.size();
++		if (sysctl(mib, 4, buf.data(), &len, nullptr, 0) != 0) {
++			return 4ull << 56;
++		}
++		size_t count = len / sizeof(struct kinfo_proc);
++		for (size_t i = 0; i < count; ++i) {
++			auto kp = reinterpret_cast<struct kinfo_proc*>(buf.data()) + i;
++			if (kp->ki_tid != (lwpid_t)tid) {
++				continue;
++			}
++			uint64_t w = 0;
++			for (int k = 0; k < 4 && kp->ki_wmesg[k]; ++k) {
++				w |= (uint64_t)(unsigned char)kp->ki_wmesg[k] << (8 * k);
++			}
++			return (4ull << 56) | (w << 16) | ((uint64_t)(unsigned char)kp->ki_stat << 8)
++				| ((uint64_t)sigismember(&kp->ki_sigignore, 65) << 4) | ((uint64_t)sigismember(&kp->ki_sigcatch, 65) << 3)
++				| ((uint64_t)sigismember(&kp->ki_sigmask, 65) << 2) | ((uint64_t)sigismember(&kp->ki_siglist, 65) << 1) | 1ull;
++		}
++		return 4ull << 56;
++	}
++
+ 	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
+ 		try {
+-			static_cast<DarlingServer::Thread*>(thread_context)->sendSignal(signal);
++			auto sigThread = static_cast<DarlingServer::Thread*>(thread_context);
++			dsdiagRingEvent(5, sigThread->_tid, sigThread->_nstid, (uint64_t)signal);
++			struct timespec sts; clock_gettime(CLOCK_MONOTONIC, &sts);
++			uint64_t sentNs = (uint64_t)sts.tv_sec * 1000000000ull + sts.tv_nsec;
++			sigThread->_sigResendNs.store(0);
++			sigThread->_sigSentNs.store(sentNs);
++			sigThread->sendSignal(signal);
++			// Watchdog (off by default; DSERVER_SIGWATCHDOG=1 turns it on for diagnostics): re-send the suspend signal every 25 ms
++			// (backoff 25/100/400) until the handler reaches the server (thread_suspended), the thread parked, or the suspend was
++			// undone. It covered a signal that the PT_DETACH of the memory-access shim cancelled (fixed by
++			// darlingserver-memaccess-detach-signal.patch); a duplicate is harmless: its handler re-checks the suspend count.
++			static const bool sigWatchdogOn = getenv("DSERVER_SIGWATCHDOG") != nullptr;
++			if (sigWatchdogOn) {
++				std::weak_ptr<DarlingServer::Thread> weak = sigThread->weak_from_this();
++				uint64_t base = sigThread->_suspendedCalls.load();
++				uint64_t baseEnter = sigThread->_interruptEnters.load();
++				std::thread([weak, base, baseEnter, signal, sentNs]() {
++					// One outcome record (ring kind 14, sub 2) per cycle that reaches the first check: n = 2<<56 | outcome<<52 |
++					// resends<<44 | usSinceLastResend<<22 | usSinceSend (22 bits each, saturating, times at the handler's
++					// interrupt_enter). outcome 1 = handler seen, 2 = thread_suspended seen, 3 = parked/resumed. Resends are sub 0.
++					uint64_t lastResendNs = 0;
++					unsigned resends = 0;
++					auto us22 = [](uint64_t ns) { uint64_t u = ns / 1000; return u > 0x3fffff ? (uint64_t)0x3fffff : u; };
++					auto record = [&](const std::shared_ptr<DarlingServer::Thread>& t, unsigned outcome, uint64_t enterNs) {
++						uint64_t sinceSend = enterNs > sentNs ? enterNs - sentNs : 0;
++						uint64_t sinceResend = (resends && enterNs >= lastResendNs) ? enterNs - lastResendNs : 0x3fffff000ull;
++						dsdiagRingEvent(14, t->_tid, t->_nstid, (2ull << 56) | ((uint64_t)outcome << 52) | ((uint64_t)(resends > 255 ? 255 : resends) << 44) | (us22(sinceResend) << 22) | us22(sinceSend));
++					};
++					for (int i = 1; i <= 200; i++) {
++						std::this_thread::sleep_for(std::chrono::milliseconds(i == 1 ? 25 : (i == 2 ? 100 : 400)));
++						auto t = weak.lock();
++						if (!t || t->isDead() || !t->_dtapeThread) {
++							return;
++						}
++						if (t->_suspendedCalls.load() != base) {
++							if (resends) record(t, 2, t->_lastEnterNs.load());
++							return;
++						}
++						if (!dtape_thread_suspend_unacked(t->_dtapeThread)) {
++							if (resends) record(t, 3, t->_lastEnterNs.load());
++							return;
++						}
++						if (t->_interruptEnters.load() != baseEnter) {
++							// a handler is running (interrupt_enter seen): the signal was delivered, only slow (or a resend was)
++							record(t, 1, t->_lastEnterNs.load());
++							return;
++						}
++						if (resends == 0) {
++							auto proc = t->process();
++							dsdiagRingEvent(14, t->_tid, t->_nstid, dsKinfoThreadState(proc ? proc->id() : -1, t->id()));
++						}
++						struct timespec rts; clock_gettime(CLOCK_MONOTONIC, &rts);
++						lastResendNs = (uint64_t)rts.tv_sec * 1000000000ull + rts.tv_nsec;
++						++resends;
++						t->_sigResendNs.store(lastResendNs);
++						dsdiagRingEvent(14, t->_tid, t->_nstid, (uint64_t)i); // suspend signal re-sent
++						try {
++							t->sendSignal(signal);
++						} catch (...) {
++							return;
++						}
++					}
++				}).detach();
++			}
+ 			return 0;
+ 		} catch (std::system_error e) {
+ 			return -e.code().value();

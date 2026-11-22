@@ -26,6 +26,8 @@ fi
 P=${1:?}; N=${2:?}; T=${3:-${PROBE_TIMEOUT:-240}}; SU=${4:-3000}; SP=${5:-300}; IW=${6:-0}
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
 PB=${PROBE_BINARY:-sig-reentry-probe-macho}; SL=${PROBE_SERVER_LOG:-$CHROME_SR_SERVER_LOG}
+# The suspend-signal watchdog of the server is off by default; PROBE_SIGWATCHDOG=1 turns it on (DSERVER_SIGWATCHDOG=1 in the server environment).
+[ -n "$PROBE_SIGWATCHDOG" ] && PROBE_EXTRA_ENV="$PROBE_EXTRA_ENV DSERVER_SIGWATCHDOG=1"
 # The diag ring is always on with at least 4M entries (a hang that lasts tens of seconds wraps a smaller ring and loses the
 # start of the stuck thread: kind D, planck-1517). An explicit DSERVER_DIAG_RING in PROBE_EXTRA_ENV below 4194304 is raised.
 case " $PROBE_EXTRA_ENV " in
