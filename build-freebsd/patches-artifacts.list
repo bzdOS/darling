@@ -6,5 +6,3 @@ libdispatch src/protocolServer.c
 libdispatch src/protocolUser.c
 nghttp2 third-party/mruby
 nghttp2 third-party/neverbleed
-file *
-glut *

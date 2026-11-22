@@ -1,0 +1,3 @@
+# submodule-snapshots.lock: <name> <gitlink> <archive sha256> <files>; archives are <name>.tar in SUBMODULE_SNAPSHOT_DIR, content sums in <name>.files.sha256
+file c6ee65265d253d24b1a496f8ca54b5e449fe108c 9f034f9b9454c10f5be17b388f158bdb389a617a002b0b66a77d4c935d67759a 500
+glut b53a2d8f0c6dc0c2052aef410a120d14ee553056 ae3e48e90af47caefb186299e8e4847d338bc04ee3020b0b670a671327360069 165

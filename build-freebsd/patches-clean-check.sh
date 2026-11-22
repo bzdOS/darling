@@ -42,5 +42,18 @@ done
 if [ -f "$T/extra" ]; then
 	k=$(wc -l < "$T/extra" | tr -d ' '); bad=$((bad+k)); msg="$msg uncovered:$(head -5 "$T/extra" | tr ' \n' ': ' )($k)"
 fi
+# snapshot-only submodules (submodule-snapshots.lock): file list and content sums must equal <name>.files.sha256
+LOCK="$SRC/build-freebsd/submodule-snapshots.lock"
+if [ -f "$LOCK" ]; then
+sha256_file() { if command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"; else sha256sum "$1" | awk '{print $1}'; fi; }
+	sha256_stdin() { if command -v sha256 >/dev/null 2>&1; then sha256 -q; else sha256sum | awk '{print $1}'; fi; }
+	sha() { if [ -L "$1" ]; then printf 'L:%s' "$(readlink "$1")" | sha256_stdin; else sha256_file "$1"; fi; }
+
+	grep -v '^#' "$LOCK" | awk 'NF{print $1}' | while read -r name; do
+		( cd "$EXT/$name" 2>/dev/null && find . -path ./.git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort | sed 's|^\./||' | while IFS= read -r f; do
+			printf '%s %s\n' "$(sha "$f")" "$f"; done ) | cmp -s - "$SRC/build-freebsd/$name.files.sha256" || echo "$name" >> "$T/snapbad"
+	done
+	if [ -f "$T/snapbad" ]; then bad=$((bad+1)); msg="$msg snapshot:$(tr '\n' ',' < "$T/snapbad")"; fi
+fi
 if [ $bad -eq 0 ]; then echo "PATCHES-CLEAN ok ($n patches apply on HEAD, match working tree, no uncovered changes)"; exit 0; fi
 echo "PATCHES-CLEAN fail ($bad problems:$msg)"; exit 1
