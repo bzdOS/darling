@@ -1,7 +1,7 @@
 diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
 --- a/src/startup/mldr/freebsd_syscall_trap.c
 +++ b/src/startup/mldr/freebsd_syscall_trap.c
-@@ -4335,12 +4335,195 @@
+@@ -4335,12 +4335,234 @@
   *              actually executed by the CPU); re-raises as the default
   *              action for any #UD that isn't one of our own patches.
   */
@@ -11,12 +11,21 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 + * thread, and whether the thread entered a signal 65+ handler after its last emulation. Fixed array claimed by one atomic add; no locks,
 + * stdio or malloc in the handler. The histogram is written from atexit with write(2). */
 +#define MLDR_DUPREC_MAX 256
-+struct mldr_duprec { long delta; unsigned char nested, sig65_active, sig65_since_emu, valid; };
++struct mldr_duprec { long delta; unsigned long long ns, gap_ns; long tid; int si_code, si_pid; unsigned char nested, sig65_active, sig65_since_emu, valid; };
 +static struct mldr_duprec mldr_duprecs[MLDR_DUPREC_MAX];
 +static volatile unsigned long mldr_duprec_n;
 +static volatile int mldr_sigill_depth[64];
 +static volatile int mldr_sig65_depth[64];
 +static volatile unsigned long mldr_emu_seq[64], mldr_sig65_seq[64];
++static volatile unsigned long long mldr_emu_ns[64];   /* CLOCK_MONOTONIC ns of the last emulation on the thread */
++
++static unsigned long long
++mldr_dupdiag_now(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
++}
 +static volatile unsigned long mldr_dupdiag_seq;
 +static int mldr_dupdiag_on = -1;
 +
@@ -28,11 +37,13 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +    return mldr_dupdiag_on;
 +}
 +
++static long mldr_dupdiag_last_tid;   /* racy: only for the record just made by the caller's thread, see mldr_dupdiag_record */
 +static int
 +mldr_dupdiag_slot(void)
 +{
 +    long ht = 0;
 +    freebsd_raw_syscall(SYS_thr_self, (long)&ht, 0, 0, 0, 0, 0);
++    mldr_dupdiag_last_tid = ht;
 +    return (int)(ht & 63);
 +}
 +
@@ -60,11 +71,13 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +{
 +    if (!mldr_dupdiag_enabled())
 +        return;
-+    __atomic_store_n(&mldr_emu_seq[mldr_dupdiag_slot()], __atomic_add_fetch(&mldr_dupdiag_seq, 1, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
++    int slot = mldr_dupdiag_slot();
++    __atomic_store_n(&mldr_emu_seq[slot], __atomic_add_fetch(&mldr_dupdiag_seq, 1, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
++    __atomic_store_n(&mldr_emu_ns[slot], mldr_dupdiag_now(), __ATOMIC_RELAXED);
 +}
 +
 +static void
-+mldr_dupdiag_record(long delta)
++mldr_dupdiag_record(long delta, const siginfo_t *info)
 +{
 +    unsigned long idx;
 +    int slot;
@@ -74,6 +87,11 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +    if (idx >= MLDR_DUPREC_MAX)
 +        return;
 +    slot = mldr_dupdiag_slot();
++    mldr_duprecs[idx].ns = mldr_dupdiag_now();
++    mldr_duprecs[idx].gap_ns = mldr_duprecs[idx].ns - __atomic_load_n(&mldr_emu_ns[slot], __ATOMIC_RELAXED);
++    mldr_duprecs[idx].tid = mldr_dupdiag_last_tid;
++    mldr_duprecs[idx].si_code = info->si_code;
++    mldr_duprecs[idx].si_pid = (int)info->si_pid;
 +    mldr_duprecs[idx].delta = delta;
 +    mldr_duprecs[idx].nested = __atomic_load_n(&mldr_sigill_depth[slot], __ATOMIC_RELAXED) > 1;
 +    mldr_duprecs[idx].sig65_active = __atomic_load_n(&mldr_sig65_depth[slot], __ATOMIC_RELAXED) > 0;
@@ -112,6 +130,27 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +        n = MLDR_DUPREC_MAX;
 +    memset(done, 0, sizeof(done));
 +    (void)!write(2, tag, sizeof(tag) - 1);
++    for (unsigned long i = 0; i < n; i++) {
++        char rb[192];
++        char *q = rb;
++        if (!mldr_duprecs[i].valid)
++            continue;
++        memcpy(q, "[sigill-dup-rec] ns=", 20);
++        q += 20;
++        mldr_dupdiag_fmt(&q, (long)mldr_duprecs[i].ns);
++        memcpy(q, " tid=", 5); q += 5;
++        mldr_dupdiag_fmt(&q, mldr_duprecs[i].tid);
++        memcpy(q, " delta=", 7); q += 7;
++        mldr_dupdiag_fmt(&q, mldr_duprecs[i].delta);
++        memcpy(q, " si_code=", 9); q += 9;
++        mldr_dupdiag_fmt(&q, mldr_duprecs[i].si_code);
++        memcpy(q, " si_pid=", 8); q += 8;
++        mldr_dupdiag_fmt(&q, mldr_duprecs[i].si_pid);
++        memcpy(q, " gap_ns=", 8); q += 8;
++        mldr_dupdiag_fmt(&q, (long)mldr_duprecs[i].gap_ns);
++        *q++ = '\n';
++        (void)!write(2, rb, (size_t)(q - rb));
++    }
 +    for (unsigned long i = 0; i < n; i++) {
 +        long cnt = 0;
 +        char buf[96];
@@ -197,18 +236,18 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
  
  static void
  sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
-@@ -4376,8 +4559,8 @@
+@@ -4376,8 +4598,8 @@
      if (info->si_addr != NULL && (uintptr_t)info->si_addr != (uintptr_t)mc->mc_rip) {
          for (int i = 0; i < _mldr_ud2_site_count; i++) {
              if (_mldr_ud2_sites[i] == (uintptr_t)info->si_addr) {
 -                static volatile unsigned long dups;
 -                unsigned long n = ++dups;
 +                unsigned long n = __atomic_add_fetch(&mldr_sigill_dups, 1, __ATOMIC_RELAXED);
-+                mldr_dupdiag_record((long)((intptr_t)info->si_addr - (intptr_t)mc->mc_rip));
++                mldr_dupdiag_record((long)((intptr_t)info->si_addr - (intptr_t)mc->mc_rip), info);
                  if (mldr_trap_log_enabled)
                      mldr_tlogx("SIGILL DUPLICATE-RESUME", pc, (long)n);
                  return;
-@@ -4614,6 +4797,7 @@
+@@ -4614,6 +4836,7 @@
       * that convention belongs to the macOS BSD-syscall class only. */
      mc->mc_rax = (uint64_t)ret;
      mc->mc_rip += 2; /* skip the ud2 the CPU never actually executed */
@@ -216,7 +255,7 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
      if (h1 != NULL) { h1->rip_out = (uintptr_t)mc->mc_rip; h1->rax_out = (unsigned long)mc->mc_rax; }
      if (mldr_trap_log_enabled && mldr_trap_log_handlers)
          mldr_tlog("SIGILL LEAVE", (long)mc->mc_rax, (long)linux_nr);
-@@ -4863,7 +5047,23 @@
+@@ -4863,7 +5086,23 @@
  #define MLDR_UCTX_RSP(u) ((uintptr_t)0)
  #endif
  MLDR_TRAP_WRAPPER(sigsys_handler)
