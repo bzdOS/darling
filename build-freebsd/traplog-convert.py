@@ -83,6 +83,24 @@ mldr_tl_printf(const char *fmt, ...)
     s = s[:i] + add.lstrip('\n') + '\n' + s[i:]
     open(path, 'w').write(s)
 
+BT_OLD = """        char **names = backtrace_symbols(frames, n);
+        TRAPLOG("  backtrace (%d frames):\\n", n);
+        for (int i = 0; i < n; i++) {
+            TRAPLOG("    #%02d %p  %s\\n", i, frames[i],
+                    (names && names[i]) ? names[i] : "?");
+        }
+        if (names) free(names);
+"""
+BT_NEW = """        TRAPLOG("  backtrace (%d frames):\\n", n);
+        /* backtrace_symbols_fd, not backtrace_symbols: no malloc in the crash handler */
+        backtrace_symbols_fd(frames, n, STDERR_FILENO);
+"""
+
+def backtrace_fd(path):
+    s = open(path).read()
+    if BT_OLD in s:
+        open(path, 'w').write(s.replace(BT_OLD, BT_NEW))
+
 def main():
     listing = '--list' in sys.argv
     root = [a for a in sys.argv[1:] if not a.startswith('--')][0]
@@ -95,6 +113,7 @@ def main():
         if listing:
             for ln, fn, t in left: print('  left %d [%s] %s' % (ln, fn, t))
     if not listing:
+        backtrace_fd(os.path.join(d, 'freebsd_syscall_trap.c'))
         patch_header(os.path.join(d, 'trap_log.h'))
         add_include(os.path.join(d, 'sigaction_translate.c'), r'^#include "linux_ucontext.h"')
         add_include(os.path.join(d, 'crash_dump.c'), r'^#include "crash_dump.h"')

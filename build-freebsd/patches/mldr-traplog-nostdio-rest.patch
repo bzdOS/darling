@@ -1,6 +1,6 @@
 diff -ruN a/src/startup/mldr/crash_dump.c b/src/startup/mldr/crash_dump.c
 --- a/src/startup/mldr/crash_dump.c	2026-11-22 01:42:36.487747000 +0000
-+++ b/src/startup/mldr/crash_dump.c	2026-11-22 01:42:41.315880000 +0000
++++ b/src/startup/mldr/crash_dump.c	2026-11-22 01:44:17.773221000 +0000
 @@ -62,6 +62,7 @@
  #include <unistd.h>
  
@@ -48,7 +48,7 @@ diff -ruN a/src/startup/mldr/crash_dump.c b/src/startup/mldr/crash_dump.c
  }
 diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
 --- a/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:42:36.487540000 +0000
-+++ b/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:42:41.314863000 +0000
++++ b/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:44:17.772805000 +0000
 @@ -1083,7 +1083,7 @@
          return freebsd_raw_syscall(SYS_sigprocmask, a1, a2, a3, 0, 0, 0);
  
@@ -647,24 +647,27 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
      }
  
      /* DIAG (Chrome dyld-init crash hunt): backtrace_symbols on the live stack
-@@ -4754,12 +4739,11 @@
+@@ -4753,14 +4738,9 @@
+     {
          void *frames[32];
          int n = backtrace(frames, 32);
-         char **names = backtrace_symbols(frames, n);
+-        char **names = backtrace_symbols(frames, n);
 -        fprintf(stderr, "  backtrace (%d frames):\n", n);
-+        TRAPLOG("  backtrace (%d frames):\n", n);
-         for (int i = 0; i < n; i++) {
+-        for (int i = 0; i < n; i++) {
 -            fprintf(stderr, "    #%02d %p  %s\n", i, frames[i],
-+            TRAPLOG("    #%02d %p  %s\n", i, frames[i],
-                     (names && names[i]) ? names[i] : "?");
-         }
+-                    (names && names[i]) ? names[i] : "?");
+-        }
 -        fflush(stderr);
-         if (names) free(names);
+-        if (names) free(names);
++        TRAPLOG("  backtrace (%d frames):\n", n);
++        /* backtrace_symbols_fd, not backtrace_symbols: no malloc in the crash handler */
++        backtrace_symbols_fd(frames, n, STDERR_FILENO);
      }
  
+     /* DEBUG: dump the GUEST stack at rsp (backtrace(3) on FreeBSD only walks
 diff -ruN a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_translate.c
 --- a/src/startup/mldr/sigaction_translate.c	2026-11-22 01:42:36.487722000 +0000
-+++ b/src/startup/mldr/sigaction_translate.c	2026-11-22 01:42:41.315772000 +0000
++++ b/src/startup/mldr/sigaction_translate.c	2026-11-22 01:44:17.773018000 +0000
 @@ -17,6 +17,7 @@
  #include "freebsd_syscall_trap.h"
  #include "linux_siginfo.h"
@@ -714,7 +717,7 @@ diff -ruN a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_
      /* Every guest syscall reaches mldr as SIGILL (raw-syscall ud2) or SIGSYS.
 diff -ruN a/src/startup/mldr/trap_log.h b/src/startup/mldr/trap_log.h
 --- a/src/startup/mldr/trap_log.h	2026-11-22 01:42:36.487791000 +0000
-+++ b/src/startup/mldr/trap_log.h	2026-11-22 01:42:41.315639000 +0000
++++ b/src/startup/mldr/trap_log.h	2026-11-22 01:44:17.772881000 +0000
 @@ -23,6 +23,8 @@
  #include <unistd.h>  /* write */
  #include <sys/types.h>
