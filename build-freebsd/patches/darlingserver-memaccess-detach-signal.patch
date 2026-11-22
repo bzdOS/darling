@@ -38,7 +38,7 @@ diff -ru a/src/process.cpp b/src/process.cpp
  	}
  #else
  	const pid_t targetPid = id();
-@@ -387,7 +403,21 @@
+@@ -387,7 +403,27 @@
  	int ioErrno = errno;
  
  #ifdef DARLING_FREEBSD
@@ -56,6 +56,12 @@ diff -ru a/src/process.cpp b/src/process.cpp
 +		if (us > 1000) {
 +			::dsdiagRingEvent(14, -1, -1, (6ull << 56) | (uint64_t)us);
 +		}
++	}
++	if (detachSignal == SIGILL || detachSignal == SIGSEGV || detachSignal == SIGBUS || detachSignal == SIGFPE || detachSignal == SIGTRAP) {
++		// synchronous fault: PT_DETACH(sig) requeues the original ksiginfo (old si_addr) after the guest handler may already have
++		// emulated the trap and advanced rip (duplicate SIGILL deliveries). Drop it; re-execution regenerates an unhandled fault.
++		::dsdiagRingEvent(14, -1, -1, (8ull << 56) | (uint64_t)detachSignal); // sync fault dropped on detach (counter)
++		detachSignal = 0;
 +	}
 +	if (ptrace(PT_DETACH, targetPid, (caddr_t)1, detachSignal) == -1) {
  		processMemoryAccessLog.error()
