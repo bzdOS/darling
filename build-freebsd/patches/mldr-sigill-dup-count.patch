@@ -1,10 +1,161 @@
 diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
 --- a/src/startup/mldr/freebsd_syscall_trap.c
 +++ b/src/startup/mldr/freebsd_syscall_trap.c
-@@ -4342,6 +4342,45 @@
+@@ -4335,12 +4335,195 @@
+  *              actually executed by the CPU); re-raises as the default
+  *              action for any #UD that isn't one of our own patches.
+  */
++/* Step 56 residual-path diagnostics (DARLING_SIG65_COUNT set). Per thread (slot = tid & 63, no TLS: guest threads rewrite fsbase): sigill_handler
++ * depth, signal 65+ trampoline depth, and sequence numbers of the last emulated ud2 (rip += 2) and of the last signal 65+ entry. A duplicate
++ * (Step 56 branch) records si_addr - rip, whether sigill_handler is nested on the thread, whether a signal 65+ handler is running on the
++ * thread, and whether the thread entered a signal 65+ handler after its last emulation. Fixed array claimed by one atomic add; no locks,
++ * stdio or malloc in the handler. The histogram is written from atexit with write(2). */
++#define MLDR_DUPREC_MAX 256
++struct mldr_duprec { long delta; unsigned char nested, sig65_active, sig65_since_emu, valid; };
++static struct mldr_duprec mldr_duprecs[MLDR_DUPREC_MAX];
++static volatile unsigned long mldr_duprec_n;
++static volatile int mldr_sigill_depth[64];
++static volatile int mldr_sig65_depth[64];
++static volatile unsigned long mldr_emu_seq[64], mldr_sig65_seq[64];
++static volatile unsigned long mldr_dupdiag_seq;
++static int mldr_dupdiag_on = -1;
++
++static int
++mldr_dupdiag_enabled(void)
++{
++    if (mldr_dupdiag_on < 0)
++        mldr_dupdiag_on = getenv("DARLING_SIG65_COUNT") != NULL;
++    return mldr_dupdiag_on;
++}
++
++static int
++mldr_dupdiag_slot(void)
++{
++    long ht = 0;
++    freebsd_raw_syscall(SYS_thr_self, (long)&ht, 0, 0, 0, 0, 0);
++    return (int)(ht & 63);
++}
++
++void
++mldr_dupdiag_sig65_enter(void)
++{
++    int slot;
++    if (!mldr_dupdiag_enabled())
++        return;
++    slot = mldr_dupdiag_slot();
++    __atomic_add_fetch(&mldr_sig65_depth[slot], 1, __ATOMIC_RELAXED);
++    __atomic_store_n(&mldr_sig65_seq[slot], __atomic_add_fetch(&mldr_dupdiag_seq, 1, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
++}
++
++void
++mldr_dupdiag_sig65_leave(void)
++{
++    if (!mldr_dupdiag_enabled())
++        return;
++    __atomic_sub_fetch(&mldr_sig65_depth[mldr_dupdiag_slot()], 1, __ATOMIC_RELAXED);
++}
++
++static void
++mldr_dupdiag_emulated(void)
++{
++    if (!mldr_dupdiag_enabled())
++        return;
++    __atomic_store_n(&mldr_emu_seq[mldr_dupdiag_slot()], __atomic_add_fetch(&mldr_dupdiag_seq, 1, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
++}
++
++static void
++mldr_dupdiag_record(long delta)
++{
++    unsigned long idx;
++    int slot;
++    if (!mldr_dupdiag_enabled())
++        return;
++    idx = __atomic_fetch_add(&mldr_duprec_n, 1, __ATOMIC_RELAXED);
++    if (idx >= MLDR_DUPREC_MAX)
++        return;
++    slot = mldr_dupdiag_slot();
++    mldr_duprecs[idx].delta = delta;
++    mldr_duprecs[idx].nested = __atomic_load_n(&mldr_sigill_depth[slot], __ATOMIC_RELAXED) > 1;
++    mldr_duprecs[idx].sig65_active = __atomic_load_n(&mldr_sig65_depth[slot], __ATOMIC_RELAXED) > 0;
++    mldr_duprecs[idx].sig65_since_emu = __atomic_load_n(&mldr_sig65_seq[slot], __ATOMIC_RELAXED) > __atomic_load_n(&mldr_emu_seq[slot], __ATOMIC_RELAXED);
++    __atomic_store_n(&mldr_duprecs[idx].valid, 1, __ATOMIC_RELEASE);
++}
++
++static void
++mldr_dupdiag_fmt(char **pp, long v)
++{
++    char tmp[24];
++    char *e = tmp + sizeof(tmp);
++    char *lo;
++    char *p = *pp;
++    if (v < 0) {
++        *p++ = '-';
++        v = -v;
++    }
++    lo = mldr_fmt_dec(e, v);
++    while (lo < e)
++        *p++ = *lo++;
++    *pp = p;
++}
++
++static volatile int mldr_dupdiag_reported;
++static void
++mldr_dupdiag_report(void)
++{
++    static const char tag[] = "[sigill-dup-hist] delta nested sig65_on_thread sig65_since_emu count\n";
++    static const char ovf[] = "[sigill-dup-hist] overflow (records beyond 256 dropped)\n";
++    unsigned long n = __atomic_load_n(&mldr_duprec_n, __ATOMIC_RELAXED);
++    unsigned char done[MLDR_DUPREC_MAX];
++    if (n == 0 || __atomic_exchange_n(&mldr_dupdiag_reported, 1, __ATOMIC_RELAXED))
++        return;
++    if (n > MLDR_DUPREC_MAX)
++        n = MLDR_DUPREC_MAX;
++    memset(done, 0, sizeof(done));
++    (void)!write(2, tag, sizeof(tag) - 1);
++    for (unsigned long i = 0; i < n; i++) {
++        long cnt = 0;
++        char buf[96];
++        char *p = buf;
++        if (done[i] || !__atomic_load_n(&mldr_duprecs[i].valid, __ATOMIC_ACQUIRE))
++            continue;
++        for (unsigned long j = i; j < n; j++) {
++            if (!done[j] && mldr_duprecs[j].valid && mldr_duprecs[j].delta == mldr_duprecs[i].delta &&
++                mldr_duprecs[j].nested == mldr_duprecs[i].nested && mldr_duprecs[j].sig65_active == mldr_duprecs[i].sig65_active &&
++                mldr_duprecs[j].sig65_since_emu == mldr_duprecs[i].sig65_since_emu) {
++                done[j] = 1;
++                cnt++;
++            }
++        }
++        memcpy(p, "[sigill-dup-hist] ", 18);
++        p += 18;
++        mldr_dupdiag_fmt(&p, mldr_duprecs[i].delta);
++        *p++ = ' ';
++        mldr_dupdiag_fmt(&p, mldr_duprecs[i].nested);
++        *p++ = ' ';
++        mldr_dupdiag_fmt(&p, mldr_duprecs[i].sig65_active);
++        *p++ = ' ';
++        mldr_dupdiag_fmt(&p, mldr_duprecs[i].sig65_since_emu);
++        *p++ = ' ';
++        mldr_dupdiag_fmt(&p, cnt);
++        *p++ = '\n';
++        (void)!write(2, buf, (size_t)(p - buf));
++    }
++    if (__atomic_load_n(&mldr_duprec_n, __ATOMIC_RELAXED) > MLDR_DUPREC_MAX)
++        (void)!write(2, ovf, sizeof(ovf) - 1);
++}
++__attribute__((constructor)) static void
++mldr_dupdiag_register_atexit(void)
++{
++    atexit(mldr_dupdiag_report);
++}
++
+ /* sig-reentry diagnostic (DARLING_TRAP_LOG only): the last SIGILL frame seen per host
+  * thread. Racy by design, nothing is printed on the hot path; the not-ours branch
+  * below prints the previous and the current record. */
+ struct mldr_h1rec { long tid; uintptr_t uctx, info, rip_in, rip_out; unsigned long rax_out, seq; };
  static struct mldr_h1rec mldr_h1[64];
  static unsigned long mldr_h1_seq;
- 
++
 +/* Step 56 duplicates: SIGILL deliveries of a trap that was already emulated (resumed without touching the context). The count is written at
 + * process exit with write(2), without stdio, when DARLING_SIG65_COUNT is set (the same switch as the signal 65 trampoline counter); the
 + * probe turns it into the SIGILL-DUP=N item of its summary. The report runs from mldr_sig65_report (the exit syscall paths, via
@@ -43,17 +194,50 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +{
 +    atexit(mldr_sigill_dup_write_report);
 +}
-+
+ 
  static void
  sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
- {
-@@ -4376,8 +4415,7 @@
+@@ -4376,8 +4559,8 @@
      if (info->si_addr != NULL && (uintptr_t)info->si_addr != (uintptr_t)mc->mc_rip) {
          for (int i = 0; i < _mldr_ud2_site_count; i++) {
              if (_mldr_ud2_sites[i] == (uintptr_t)info->si_addr) {
 -                static volatile unsigned long dups;
 -                unsigned long n = ++dups;
 +                unsigned long n = __atomic_add_fetch(&mldr_sigill_dups, 1, __ATOMIC_RELAXED);
++                mldr_dupdiag_record((long)((intptr_t)info->si_addr - (intptr_t)mc->mc_rip));
                  if (mldr_trap_log_enabled)
                      mldr_tlogx("SIGILL DUPLICATE-RESUME", pc, (long)n);
                  return;
+@@ -4614,6 +4797,7 @@
+      * that convention belongs to the macOS BSD-syscall class only. */
+     mc->mc_rax = (uint64_t)ret;
+     mc->mc_rip += 2; /* skip the ud2 the CPU never actually executed */
++    mldr_dupdiag_emulated();
+     if (h1 != NULL) { h1->rip_out = (uintptr_t)mc->mc_rip; h1->rax_out = (unsigned long)mc->mc_rax; }
+     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
+         mldr_tlog("SIGILL LEAVE", (long)mc->mc_rax, (long)linux_nr);
+@@ -4863,7 +5047,23 @@
+ #define MLDR_UCTX_RSP(u) ((uintptr_t)0)
+ #endif
+ MLDR_TRAP_WRAPPER(sigsys_handler)
+-MLDR_TRAP_WRAPPER(sigill_handler)
++/* sigill_handler: the MLDR_TRAP_WRAPPER shape plus the per-thread depth of the duplicate diagnostics. */
++static void
++sigill_handler(int signo, siginfo_t *info, void *uctx_void)
++{
++    struct mldr_sigstk_hdr *h = mldr_cur_hdr();
++    uintptr_t prev = h ? h->trap_guest_rsp : 0;
++    int slot = -1;
++    if (h) h->trap_guest_rsp = MLDR_UCTX_RSP(uctx_void);
++    if (mldr_dupdiag_enabled()) {
++        slot = mldr_dupdiag_slot();
++        __atomic_add_fetch(&mldr_sigill_depth[slot], 1, __ATOMIC_RELAXED);
++    }
++    sigill_handler_inner(signo, info, uctx_void);
++    if (slot >= 0)
++        __atomic_sub_fetch(&mldr_sigill_depth[slot], 1, __ATOMIC_RELAXED);
++    if (h) h->trap_guest_rsp = prev;
++}
+ 
+ /*
+  * purpose:  Give the calling thread its own alternate signal stack, so the
