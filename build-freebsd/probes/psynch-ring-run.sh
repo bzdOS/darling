@@ -27,8 +27,14 @@ done
 sleep 1
 for p in $(pgrep -x darlingserver); do
     case " $before " in *" $p "*) continue ;; esac
-    sudo sh "${SRC}/build-freebsd/ds-microthreads-dump.sh" "$p" >"${DUMP}.$p" 2>&1
-    if grep -qa "^psynch ring:" "${DUMP}.$p"; then mv "${DUMP}.$p" "${DUMP}"; break; fi
+    # the attach can fail on a loaded machine (lldb: "Cannot get process architecture"): up to 3 tries, 3 s apart
+    for try in 1 2 3; do
+        sudo sh "${SRC}/build-freebsd/ds-microthreads-dump.sh" "$p" >"${DUMP}.$p" 2>&1
+        grep -qa "^psynch ring:" "${DUMP}.$p" && break
+        grep -qa "attach failed" "${DUMP}.$p" && ATTACH_FAILED=1
+        sleep 3
+    done
+    if grep -qa "^psynch ring:" "${DUMP}.$p"; then ATTACH_FAILED=; mv "${DUMP}.$p" "${DUMP}"; break; fi
 done
 for p in $(pgrep -x darlingserver); do
     case " $before " in *" $p "*) ;; *) sudo kill -9 "$p" 2>/dev/null ;; esac
@@ -39,7 +45,9 @@ rc=0
 # PSYNCH-RING: count ring records of the phase-1 address in the psynch class ring (fields parsed, not matched as text)
 A1=$(grep -a "^PSRING-ADDR" "$LOG" | head -1 | sed 's/.*addr=\(0x[0-9a-f]*\).*/\1/')
 N1=$(grep -a "^PSRING-ADDR" "$LOG" | head -1 | sed 's/.*n=\([0-9]*\).*/\1/')
-if [ -z "$A1" ] || [ ! -f "$DUMP" ]; then
+if [ -n "$A1" ] && [ ! -f "$DUMP" ] && [ -n "$ATTACH_FAILED" ]; then
+    echo "PSYNCH-RING fail dump-attach-failed expected=${N1:-0} (the debugger could not attach to the server in 3 tries; the probe itself ran)"; rc=1
+elif [ -z "$A1" ] || [ ! -f "$DUMP" ]; then
     echo "PSYNCH-RING fail expected=${N1:-0} got=0 (no probe address or no ring in the dump)"; rc=1
 else
     # one pass over the dump: per ring class recorded/dropped, and the psynch ring entries whose uaddr field equals A1
@@ -58,7 +66,7 @@ fi
 L=$(grep -a "^RWLABEL-WAIT" "$LOG" | head -1)
 A2=$(echo "$L" | sed 's/.*addr=\(0x[0-9a-f]*\).*/\1/'); RD=$(echo "$L" | sed 's/.*rd=\([0-9]*\).*/\1/'); WR=$(echo "$L" | sed 's/.*wr=\([0-9]*\).*/\1/')
 if [ -z "$L" ] || [ ! -f "$DUMP" ]; then
-    echo "RWLABEL fail (no wait line or no dump)"; rc=1
+    echo "RWLABEL fail ${ATTACH_FAILED:+dump-attach-failed }(no wait line or no dump)"; rc=1
 else
     # the kwq line whose uaddr field equals A2 is followed by "   waiters: R:tid=a/nsB(..)@seq.. W:tid=.." ; each waiter is one token
     W=$(awk -v a="$A2" -v rd="$RD" -v wr="$WR" '

@@ -12,7 +12,7 @@
 #include <pthread.h>
 
 #define N 100
-#define HOLD 15
+#define HOLD 45
 
 static pthread_rwlock_t rw1 = PTHREAD_RWLOCK_INITIALIZER;
 static pthread_rwlock_t rw2 = PTHREAD_RWLOCK_INITIALIZER;
