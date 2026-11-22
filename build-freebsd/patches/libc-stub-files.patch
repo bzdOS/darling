@@ -1,0 +1,10 @@
+diff --git a/nls/empty.c b/nls/empty.c
+new file mode 100644
+index 0000000..5f190bc
+--- /dev/null
++++ b/nls/empty.c
+@@ -0,0 +1 @@
++/* stub for cmake configure */
+diff --git a/os/empty.c b/os/empty.c
+new file mode 100644
+index 0000000..e69de29

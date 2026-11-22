@@ -1,0 +1,7 @@
+diff --git a/darling/src/libsystem_kernel/empty.c b/darling/src/libsystem_kernel/empty.c
+new file mode 100644
+index 0000000..ed53894
+--- /dev/null
++++ b/darling/src/libsystem_kernel/empty.c
+@@ -0,0 +1 @@
++/* stub */

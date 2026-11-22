@@ -1,0 +1,7 @@
+diff --git a/stub.c b/stub.c
+new file mode 100644
+index 0000000..5f190bc
+--- /dev/null
++++ b/stub.c
+@@ -0,0 +1 @@
++/* stub for cmake configure */

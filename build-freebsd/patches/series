@@ -66,3 +66,19 @@ xnu xnu-sigexc-setup2-no-shift64.patch
 ../.. mldr-rpc-socket-close-order.patch
 # darlingserver-memaccess-detach-signal.patch: ROOT CAUSE of the lost suspend signals (about 3 percent, always sent while the server copied guest memory for the thread last call, usually mach_port_allocate): process_vm_readv/writev is shimmed with PT_ATTACH, waitpid, PT_IO, PT_DETACH; a signal sent to a guest thread in that window becomes a ptrace stop, the wait status names it instead of SIGSTOP, and PT_DETACH with signal 0 cancels it. The status signal is now handed back at detach.
 darlingserver darlingserver-memaccess-detach-signal.patch
+# Control #113: weak os_unfair_lock_lock/unlock copies must not be exported (the Chrome stub bound to the empty libsystem_kernel copy).
+libplatform libplatform-hidden-weak-os-unfair-lock.patch
+xnu xnu-hidden-weak-os-unfair-lock.patch
+# dyld: manual classic-rebase applier for the FreeBSD raw-clang dyld (new file, byte-for-byte).
+dyld dyld-freebsd-rebase.patch
+# xnu bsd/machine/i386/_types.h: copy of bsd/i386/_types.h, included by bsd/machine/_types.h (see restore-sdk-types.sh).
+xnu xnu-bsd-machine-i386-types.patch
+# Placeholder files so CMake can configure (empty.c / stub.c, Libinfo stand-in target); one patch per submodule.
+Libinfo Libinfo-stub-files.patch
+libc libc-stub-files.patch
+libdispatch libdispatch-stub-files.patch
+libsystem libsystem-stub-files.patch
+libxpc libxpc-stub-files.patch
+ncurses ncurses-stub-files.patch
+xnu xnu-stub-files.patch
+# darlingserver-diag-ring-sigexc-events.patch also holds dsAckPushReply: the server died of SIGPIPE when the client of a push_reply had already closed the read end of its synchronization pipe (write(2) raised SIGPIPE on the server thread; DTrace: EPIPE on write at call.cpp:249, sig=13 from the server itself, proc-exit 1.2 ms later; clients then got ECONNREFUSED/-111 because the dead server left its socket file). The write now runs with SIGPIPE blocked on that thread, consumes the pending signal and reports the failure in the ring (kind 14 sub 8).

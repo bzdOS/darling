@@ -1,0 +1,18 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..a0dcee9
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,2 @@
++# Control #114: minimal stand-in for the absent Libinfo submodule.
++add_library(system_info SHARED empty.c)
+diff --git a/empty.c b/empty.c
+new file mode 100644
+index 0000000..a0ab42c
+--- /dev/null
++++ b/empty.c
+@@ -0,0 +1,4 @@
++/* Control #114: placeholder — the real Libinfo submodule is absent in this
++ * checkout; only its CMake target (system_info) is needed for CMake to
++ * regenerate, not for the libsystem_kernel build under test. */
++void __libinfo_placeholder(void) {}

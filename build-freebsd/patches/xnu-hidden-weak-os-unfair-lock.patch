@@ -1,0 +1,36 @@
+diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/file_handle.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/file_handle.c
+index 08c05fd..12b17fa 100644
+--- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/file_handle.c
++++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/file_handle.c
+@@ -29,8 +29,12 @@ static struct SavedRef g_savedRefs[200];
+ static int g_nextSavedRef = 0, g_nextGen = 0;
+ static os_unfair_lock g_savedRefLock = OS_UNFAIR_LOCK_INIT;
+ 
+-void __attribute__((weak)) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
+-void __attribute__((weak)) os_unfair_lock_lock(os_unfair_lock_t lock) {}
++/* Control #113: these weak definitions must NOT be exported. As exported weak
++ * symbols they let the Chrome stub 0xdbbeffc bind to libsystem_kernel's empty
++ * copy instead of libsystem_platform's real implementation. Hidden keeps them
++ * for intra-dylib linking only. */
++void __attribute__((weak, visibility("hidden"))) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
++void __attribute__((weak, visibility("hidden"))) os_unfair_lock_lock(os_unfair_lock_t lock) {}
+ 
+ VISIBLE
+ int sys_name_to_handle(const char* name, RefData* ref, int follow)
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.c
+index dbcdd98..29a79d3 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/workq_kernreturn.c
+@@ -84,8 +84,10 @@ struct timespec
+ 	long tv_nsec;
+ };
+ 
+-void __attribute__((weak)) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
+-void __attribute__((weak)) os_unfair_lock_lock(os_unfair_lock_t lock) {}
++/* Control #113: hidden, so this empty copy is not exported and the Chrome stub
++ * 0xdbbeffc binds to libsystem_platform's real _os_unfair_lock_unlock instead. */
++void __attribute__((weak, visibility("hidden"))) os_unfair_lock_unlock(os_unfair_lock_t lock) {}
++void __attribute__((weak, visibility("hidden"))) os_unfair_lock_lock(os_unfair_lock_t lock) {}
+ 
+ //void* __attribute__((weak)) __attribute__((visibility("default"))) pthread_getspecific(unsigned long key) { return NULL; }
+ //int __attribute__((weak)) __attribute__((visibility("default"))) pthread_setspecific(unsigned long key, const void* value) { return 1; }

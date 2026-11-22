@@ -1,0 +1,10 @@
+# patches-artifacts.list - working-tree changes in submodules that are deliberately NOT vendor patches.
+# Format: <submodule> <path>   path = exact file, a prefix ending in "/", or "*" for the whole submodule.
+# Used by patches-clean-check.sh (completeness step).
+darlingserver generated-rpc/
+libdispatch src/protocolServer.c
+libdispatch src/protocolUser.c
+nghttp2 third-party/mruby
+nghttp2 third-party/neverbleed
+file *
+glut *

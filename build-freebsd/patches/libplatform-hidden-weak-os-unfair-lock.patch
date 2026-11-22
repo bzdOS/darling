@@ -1,0 +1,40 @@
+diff --git a/include/os/lock.h b/include/os/lock.h
+index 5c46f28..d95ba20 100644
+--- a/include/os/lock.h
++++ b/include/os/lock.h
+@@ -100,7 +100,7 @@ typedef struct os_unfair_lock_s {
+  * Pointer to an os_unfair_lock.
+  */
+ OS_UNFAIR_LOCK_AVAILABILITY
+-OS_EXPORT OS_NOTHROW OS_NONNULL_ALL
++extern __attribute__((__visibility__("hidden"))) OS_NOTHROW OS_NONNULL_ALL
+ void os_unfair_lock_lock(os_unfair_lock_t lock);
+ 
+ /*!
+@@ -138,7 +138,7 @@ bool os_unfair_lock_trylock(os_unfair_lock_t lock);
+  * Pointer to an os_unfair_lock.
+  */
+ OS_UNFAIR_LOCK_AVAILABILITY
+-OS_EXPORT OS_NOTHROW OS_NONNULL_ALL
++extern __attribute__((__visibility__("hidden"))) OS_NOTHROW OS_NONNULL_ALL
+ void os_unfair_lock_unlock(os_unfair_lock_t lock);
+ 
+ /*!
+diff --git a/src/os/lock.c b/src/os/lock.c
+index a01eb67..feced84 100644
+--- a/src/os/lock.c
++++ b/src/os/lock.c
+@@ -452,11 +452,11 @@ typedef struct _os_unfair_lock_s {
+ _Static_assert(sizeof(struct os_unfair_lock_s) ==
+ 		sizeof(struct _os_unfair_lock_s), "os_unfair_lock size mismatch");
+ 
+-OS_ATOMIC_EXPORT void os_unfair_lock_lock(os_unfair_lock_t lock);
++__attribute__((__visibility__("hidden"))) void os_unfair_lock_lock(os_unfair_lock_t lock);
+ OS_ATOMIC_EXPORT void os_unfair_lock_lock_with_options(os_unfair_lock_t lock,
+ 		os_unfair_lock_options_t options);
+ OS_ATOMIC_EXPORT bool os_unfair_lock_trylock(os_unfair_lock_t lock);
+-OS_ATOMIC_EXPORT void os_unfair_lock_unlock(os_unfair_lock_t lock);
++__attribute__((__visibility__("hidden"))) void os_unfair_lock_unlock(os_unfair_lock_t lock);
+ 
+ OS_ATOMIC_EXPORT void os_unfair_lock_lock_no_tsd(os_unfair_lock_t lock,
+ 		os_unfair_lock_options_t options, mach_port_t mts);
