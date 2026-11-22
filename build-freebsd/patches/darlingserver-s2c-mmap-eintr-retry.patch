@@ -1,0 +1,22 @@
+diff --git a/src/thread.cpp b/src/thread.cpp
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -1505,7 +1505,17 @@
+ 	} else if (fixed) {
+ 		flags |= MAP_FIXED_NOREPLACE;
+ 	}
+-	auto result = _mmap(addressHint, pageCount * sysconf(_SC_PAGESIZE), protection, flags, -1, 0, err);
++	// the S2C call reports EINTR when the wait for the guest was interrupted (suspend/signal traffic on the
++	// thread); the allocation did not happen, so retry instead of failing the Mach message copyout
++	// (task_threads then returned MACH_RCV_BODY_ERROR|VM_KERNEL and libobjc aborted)
++	uintptr_t result = (uintptr_t)MAP_FAILED;
++	for (int attempt = 0; attempt < 256; ++attempt) {
++		err = 0;
++		result = _mmap(addressHint, pageCount * sysconf(_SC_PAGESIZE), protection, flags, -1, 0, err);
++		if (result != (uintptr_t)MAP_FAILED || err != EINTR) {
++			break;
++		}
++	}
+ 	if (result == (uintptr_t)MAP_FAILED) {
+ 		throw std::system_error(err, std::generic_category(), "S2C mmap call failed");
+ 	}
