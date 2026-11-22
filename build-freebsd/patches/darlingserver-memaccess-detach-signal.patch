@@ -1,0 +1,45 @@
+diff -ru a/src/process.cpp b/src/process.cpp
+--- a/src/process.cpp
++++ b/src/process.cpp
+@@ -36,6 +36,7 @@
+ #endif
+ #include <sys/ptrace.h> /* PT_ATTACH/PT_DETACH — #198 process_vm_readv/writev shim needs an active attach */
+ #include <sys/wait.h>   /* waitpid — sync with PT_ATTACH's stop before PT_IO */
++void dsdiagRingEvent(int kind, int tid, int nstid, uint64_t n); /* thread.cpp: diag ring */
+ #endif
+ 
+ static DarlingServer::Log processLog("process");
+@@ -359,6 +360,8 @@
+ 		}
+ 		return false;
+ 	}
++	// signal the PT_ATTACH stop reported instead of SIGSTOP (see below); handed back to the thread at PT_DETACH
++	int detachSignal = 0;
+ 	{
+ 		int status;
+ 		if (waitpid(targetPid, &status, 0) < 0) {
+@@ -378,6 +381,15 @@
+ 			}
+ 			return false;
+ 		}
++		// The thread chosen to report the attach stop may be one that had a real signal in flight (a guest thread that was sent
++		// the thread_suspend signal 65 just before the attach): ptrace turns that signal into a debugger stop and the wait status
++		// then names it instead of SIGSTOP. PT_DETACH with signal 0 would cancel it (td_xsig = 0): the signal was lost
++		// (about 3 % of the suspend signals, always while the server copied memory for the thread's last call, e.g. the port name
++		// of mach_port_allocate). Hand it back at detach so the thread takes it.
++		if (WIFSTOPPED(status) && WSTOPSIG(status) != SIGSTOP) {
++			detachSignal = WSTOPSIG(status);
++			::dsdiagRingEvent(14, -1, -1, (5ull << 56) | (uint64_t)detachSignal);
++		}
+ 	}
+ #else
+ 	const pid_t targetPid = id();
+@@ -387,7 +399,7 @@
+ 	int ioErrno = errno;
+ 
+ #ifdef DARLING_FREEBSD
+-	if (ptrace(PT_DETACH, targetPid, (caddr_t)1, 0) == -1) {
++	if (ptrace(PT_DETACH, targetPid, (caddr_t)1, detachSignal) == -1) {
+ 		processMemoryAccessLog.error()
+ 			<< "Failed to PT_DETACH from process "
+ 			<< targetPid

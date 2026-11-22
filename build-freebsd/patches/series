@@ -64,3 +64,5 @@ xnu xnu-sigexc-setup2-no-shift64.patch
 ../.. mldr-traplog-nostdio.patch
 # mldr-rpc-socket-close-order.patch: __mldr_close_rpc_socket released the fd number (socket_bitmap_put) before unlinking /tmp/darling-mldr-<pid>-<fd>; a new thread could take the number, bind the same name and then lose it to the late unlink.
 ../.. mldr-rpc-socket-close-order.patch
+# darlingserver-memaccess-detach-signal.patch: ROOT CAUSE of the lost suspend signals (about 3 percent, always sent while the server copied guest memory for the thread last call, usually mach_port_allocate): process_vm_readv/writev is shimmed with PT_ATTACH, waitpid, PT_IO, PT_DETACH; a signal sent to a guest thread in that window becomes a ptrace stop, the wait status names it instead of SIGSTOP, and PT_DETACH with signal 0 cancels it. The status signal is now handed back at detach.
+darlingserver darlingserver-memaccess-detach-signal.patch

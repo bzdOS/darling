@@ -227,7 +227,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  
  #include <darlingserver/logging.hpp>
  
-@@ -257,13 +261,111 @@
+@@ -257,13 +261,112 @@
  
  	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
  		try {
@@ -246,7 +246,8 @@ diff -ru a/src/server.cpp b/src/server.cpp
 +			std::weak_ptr<DarlingServer::Thread> weak = sigThread->weak_from_this();
 +			uint64_t base = sigThread->_suspendedCalls.load();
 +			uint64_t baseEnter = sigThread->_interruptEnters.load();
-+			std::thread([weak, base, baseEnter, signal, sentNs]() {
++			// DSERVER_NO_SIGWATCHDOG=1 (probe measurements only): no re-send, a lost signal then hangs the suspender
++			if (getenv("DSERVER_NO_SIGWATCHDOG") == nullptr) std::thread([weak, base, baseEnter, signal, sentNs]() {
 +				// One outcome record (ring kind 14, sub 2) per cycle that reaches the first check, to tell a lost signal from a slow
 +				// one: n = 2<<56 | outcome<<52 | resends<<44 | usSinceLastResend<<22 | usSinceSend (22 bits each, saturating, times at the
 +				// handler's interrupt_enter). outcome 1 = handler seen, 2 = thread_suspended seen, 3 = parked/resumed, 4 = thread gone.
@@ -340,7 +341,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  	static void dtape_hook_thread_context_dispose(void* thread_context) {
  		static_cast<DarlingServer::Thread*>(thread_context)->_dispose();
  	};
-@@ -460,6 +562,7 @@
+@@ -460,6 +563,7 @@
  		.thread_lookup_eternal = dtape_hook_thread_lookup_eternal,
  		.thread_get_state = dtape_hook_thread_get_state,
  		.thread_send_signal = dtape_hook_thread_send_signal,
@@ -348,7 +349,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  		.thread_context_dispose = dtape_hook_thread_context_dispose,
  		.thread_eternal_id = dtape_hook_thread_eternal_id,
  
-@@ -653,6 +756,9 @@
+@@ -653,6 +757,9 @@
  
  		if (_canWrite) {
  			_canWrite = _outbox.sendMany(_listenerSocket);
@@ -358,7 +359,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  		}
  
  		struct epoll_event settings;
-@@ -684,6 +790,7 @@
+@@ -684,6 +791,7 @@
  
  				if (event->events & EPOLLOUT) {
  					_canWrite = true;
@@ -366,7 +367,7 @@ diff -ru a/src/server.cpp b/src/server.cpp
  				}
  			} else if (event->data.ptr == &_wakeupFD) {
  				// we allow the loop to go back to the top and try to send some messages
-@@ -917,5 +1024,8 @@
+@@ -917,5 +1025,8 @@
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {

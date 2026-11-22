@@ -31,6 +31,7 @@ saved, last, kc = {}, {}, {}
 ci = {}
 cyc = []
 lat = []
+saved_sig = []
 lstate = []
 ob = []
 for i in range(first, nxt):
@@ -38,6 +39,8 @@ for i in range(first, nxt):
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
     kc[kind] = kc.get(kind, 0) + 1
+    if kind == 14 and (n >> 56) == 5:
+        saved_sig.append(n & 0xFF)   # signal handed back at PT_DETACH of the memory-access shim
     if kind == 14 and (n >> 56) == 4:
         # host state of the target at the watchdog's first re-send: kinfo_proc of the thread
         lstate.append(((n >> 0) & 1, (n >> 1) & 1, (n >> 2) & 1, (n >> 3) & 1, (n >> 4) & 1, (n >> 8) & 0xFF,
@@ -131,6 +134,8 @@ def cycle_summary():
             % (len(lat), len(resent), lost, len(plain) + len(resent) - lost, len(plain), pct(0.5), pct(0.99), pct(1.0)))
 if counts or hang:
     out.write(cycle_summary() + "\n")
+if counts or hang:
+    out.write("MEMACCESS-SIGNAL-SAVED handed back at detach=%d (sig 65: %d)\n" % (len(saved_sig), sum(1 for x in saved_sig if x == 65)))
 if (counts or hang) and lstate:
     # target thread state when the first re-send was needed (a lost original): signal 65 pending / blocked / caught / ignored in the
     # kernel, thread state (ki_stat: 1 idle 2 run 3 sleep 4 stop 5 zomb 6 wait 7 lock) and wait channel
