@@ -38,7 +38,9 @@ if [ -z "$STAGE_GATE_INNER" ]; then
 	# node env file (read as data like the inner part does). An empty value, a missing directory or a missing marker is a failure
 	# of the gate (GATE-PROBE-CLEAN FAIL, rc=1), never a silent skip.
 	if [ "$_rc" = 0 ]; then
-		_bd=$DARLING_BUILD_DIR; _ef="${DARLING_ENV_FILE:-/opt/darling/build/darling.env}"
+		_bd=$DARLING_BUILD_DIR
+		_sg_here_o=$(cd "$(dirname "$0")" && pwd -P)
+		_ef="${DARLING_ENV_FILE:-$_sg_here_o/../../build/darling.env}"
 		if [ -z "$_bd" ] && [ -f "$_ef" ]; then
 			_bd=$(sed -n 's/^DARLING_BUILD_DIR=//p' "$_ef" | tail -1 | tr -d "\"'")
 		fi
@@ -54,8 +56,9 @@ if [ -z "$STAGE_GATE_INNER" ]; then
 	echo "GATE mode=$_md skipped=$_sk rc=$_rc"; exit "$_rc"
 fi
 # DARLING_BUILD_DIR / DARLING_OVERLAY unset: take them from the node env file (KEY=VALUE lines, read as data, never sourced).
-# DARLING_ENV_FILE names the file; an absent file changes nothing.
-_envf="${DARLING_ENV_FILE:-/opt/darling/build/darling.env}"
+# DARLING_ENV_FILE names the file; default is darling.env next to the build dir derived from this script's tree location (no hardcoded node path).
+_sg_here=$(cd "$(dirname "$0")" && pwd -P)
+_envf="${DARLING_ENV_FILE:-$_sg_here/../../build/darling.env}"
 if { [ -z "$DARLING_BUILD_DIR" ] || [ -z "$DARLING_OVERLAY" ]; } && [ -f "$_envf" ]; then
 	while IFS= read -r _l; do
 		_v=${_l#*=}; _v=${_v#\"}; _v=${_v%\"}; _v=${_v#\'}; _v=${_v%\'}
@@ -67,7 +70,7 @@ if { [ -z "$DARLING_BUILD_DIR" ] || [ -z "$DARLING_OVERLAY" ]; } && [ -f "$_envf
 	export DARLING_BUILD_DIR DARLING_OVERLAY
 fi
 if [ -z "$DARLING_BUILD_DIR" ] || [ -z "$DARLING_OVERLAY" ]; then
-	echo "STAGECHK FAIL missing env:$([ -z "$DARLING_BUILD_DIR" ] && printf ' DARLING_BUILD_DIR')$([ -z "$DARLING_OVERLAY" ] && printf ' DARLING_OVERLAY')"; exit 1
+	echo "STAGECHK FAIL missing env:$([ -z "$DARLING_BUILD_DIR" ] && printf ' DARLING_BUILD_DIR')$([ -z "$DARLING_OVERLAY" ] && printf ' DARLING_OVERLAY') env_file=$_envf"; exit 1
 fi
 # STAGE_GATE_RUN_ALL=1: run to the end. Every line still runs and prints; a failing line sets RED=1 instead of exiting,
 # and the gate exits 1 at the end if any line was red. Without it the first red line exits 1 as before.
