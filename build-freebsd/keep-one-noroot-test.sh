@@ -1,10 +1,10 @@
 #!/bin/sh
-# keep-one-check.sh without KEEPONE_ROOT/DARLING_BUILD_DIR: one line "KEEP-ONE verdict=fail no-root", rc 2, all modes.
+# keep-one-check.sh without KEEPONE_ROOT/DARLING_BUILD_DIR: one line "KEEP-ONE usage error: KEEPONE_ROOT or DARLING_BUILD_DIR required", rc 2, all modes.
 D=$(dirname "$0")
 v=pass
 for m in "" --list --apply --clean-sockets; do
 	out=$(env -u KEEPONE_ROOT -u DARLING_BUILD_DIR sh "$D/keep-one-check.sh" $m); rc=$?
-	[ "$out" = "KEEP-ONE verdict=fail no-root" ] && [ $rc = 2 ] || { v=fail; echo "mode '$m': rc=$rc out=$out"; }
+	[ "$out" = "KEEP-ONE usage error: KEEPONE_ROOT or DARLING_BUILD_DIR required" ] && [ $rc = 2 ] || { v=fail; echo "mode '$m': rc=$rc out=$out"; }
 done
 R=$(mktemp -d /opt/darling/build/scratch/keepone-noroot.XXXXXX) || exit 2
 mkdir -p "$R/build" "$R/backup"

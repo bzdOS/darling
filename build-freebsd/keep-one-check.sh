@@ -1,12 +1,12 @@
 #!/bin/sh
 # keep-one-check.sh - "one tree, one final build, nothing grows" check. Read-only by default; only --clean-sockets (stale mldr sockets) and --apply (exactly the --list paths) delete.
-# usage: keep-one-check.sh           prints exactly one line: KEEP-ONE verdict=pass|fail <details>; exit 1 on fail
+# usage: keep-one-check.sh           prints exactly one line: KEEP-ONE verdict=pass|fail <details>; exit 1 on fail. Without KEEPONE_ROOT or DARLING_BUILD_DIR: rc 2, "KEEP-ONE usage error: KEEPONE_ROOT or DARLING_BUILD_DIR required" (a usage error, not a verdict).
 #        keep-one-check.sh --clean-sockets  removes only stale /tmp/darling-mldr-<pid>-<fd> sockets (dead pid, >5 min); prints KEEP-ONE sockets removed=N kept_live=M
 #        keep-one-check.sh --list    prints the candidate paths (one per line); still deletes nothing
 #        keep-one-check.sh --apply   deletes exactly the paths --list prints, then prints the verdict again. Only paths whose
 #                                    realpath is inside <root>/build or <root>/backup; any other path: refuse, delete nothing, rc 4.
 #                                    Skipped (rc 3, "KEEP-ONE apply skipped: ...") while <root>/build/.darling-run.lock is held
-#                                    or a darlingserver/mldr process is alive. rc 2 on bad usage.
+#                                    or a darlingserver/mldr process is alive. rc 2 on usage error.
 #        keep-one-check.sh --apply-check  validates the --list paths with the same rules as --apply but deletes nothing;
 #                                    prints "KEEP-ONE apply-check ok paths=N" (rc 0) or "... refused n=K" (rc 4). For a gate
 #                                    that must never apply: it tells "cleanup possible" from "cleanup refused" without doing it.
@@ -43,7 +43,7 @@
 # Never flagged: build/dserver/*, last-two-series files, /tmp/rs-* (outside the scanned dirs), and the dir keep-list
 # below (sources not in git, dirs scripts write to).
 ROOT="${KEEPONE_ROOT:-}"; [ -z "$ROOT" ] && [ -n "${DARLING_BUILD_DIR:-}" ] && ROOT=$(dirname "$DARLING_BUILD_DIR")
-[ -n "$ROOT" ] || { echo "KEEP-ONE verdict=fail no-root"; exit 2; }
+[ -n "$ROOT" ] || { echo "KEEP-ONE usage error: KEEPONE_ROOT or DARLING_BUILD_DIR required"; exit 2; }
 B="$ROOT/build"; BK="$ROOT/backup"; MAXG="${KEEPONE_MAX_GB:-14}"
 FOREIGN="${KEEPONE_FOREIGN:-alt2-r}"; AGE="${KEEPONE_MIN_AGE_MIN:-120}"
 # flags combine in any order: --clean-sockets runs first, then --list / --apply / the check

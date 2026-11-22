@@ -42,21 +42,26 @@ sed -n '/# START_KEEPONE_VERDICT/,/# END_KEEPONE_VERDICT/p' "$GATE_DIR/stage-gat
 printf '#!/bin/sh\nexit "${AC_RC:-0}"\n' >"$T/keep-one-check.sh"
 HERE="$T"
 . "$T/ko.sh"
-ko_case() { # want verdict-line apply-check-rc
+ko_case() { # want verdict-line check-rc apply-rc
 	ko=skip
-	AC_RC="$3"; export AC_RC
-	ko_out "$2" >"$T/line" 2>&1
+	AC_RC="$4"; export AC_RC
+	ko_out "$2" "$3" >"$T/line" 2>&1
 	[ "$ko" = "$1" ] || echo "  got ko=$ko want $1"
 	[ "$ko" = "$1" ]; ck "ko-$1" $?
 }
-ko_case pass          "KEEP-ONE verdict=pass series=a,b stale_logs=0 candidate_bytes=0 total=12.9G max=14G over=0" 9
-ko_case fail-apply-ok "KEEP-ONE verdict=fail series=a,b stale_logs=5 candidate_bytes=65160576 total=12.9G max=14G over=0" 0
-ko_case FAIL          "KEEP-ONE verdict=fail series=a,b stale_logs=1 experiment_dirs=2 total=12.9G max=14G over=0" 4
-ko_case FAIL          "KEEP-ONE verdict=fail series=a,b stale_logs=1 total=14.5G max=14G over=1" 0
+ko_case pass          "KEEP-ONE verdict=pass series=a,b stale_logs=0 candidate_bytes=0 total=12.9G max=14G over=0" 0 9
+ko_case fail-apply-ok "KEEP-ONE verdict=fail series=a,b stale_logs=5 candidate_bytes=65160576 total=12.9G max=14G over=0" 1 0
+ko_case FAIL          "KEEP-ONE verdict=fail series=a,b stale_logs=1 experiment_dirs=2 total=12.9G max=14G over=0" 1 4
+ko_case FAIL          "KEEP-ONE verdict=fail series=a,b stale_logs=1 total=14.5G max=14G over=1" 1 0
 # a refused cleanup is red and prints the FAIL line
 AC_RC=4; export AC_RC; ko=skip
-ko_out "KEEP-ONE verdict=fail series=a,b stale_logs=1 total=1.0G max=14G over=0" >"$T/line" 2>&1
+ko_out "KEEP-ONE verdict=fail series=a,b stale_logs=1 total=1.0G max=14G over=0" 1 >"$T/line" 2>&1
 grep -q 'STAGECHK FAIL keepone=FAIL' "$T/line"; ck refused-is-red $?
+# usage error: rc 2, no "verdict=" word in the line -> not a verdict fail, red, and not printed as a verdict fail
+ko=skip; AC_RC=0; export AC_RC
+ko_out "KEEP-ONE usage error: KEEPONE_ROOT or DARLING_BUILD_DIR required" 2 >"$T/line" 2>&1
+[ "$ko" = FAIL ]; ck ko-usage-red $?
+grep -q 'keep-one-check usage error, not a verdict' "$T/line"; ck ko-usage-not-verdict $?
 
 # sh -n of both scripts
 sh -n "$GATE_DIR/keep-one-check.sh"; ck syntax-keepone $?

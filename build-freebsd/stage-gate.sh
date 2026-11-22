@@ -83,27 +83,46 @@ m() { md5 -q "$1" 2>/dev/null || echo none; }
 # STAGE-ONCE: the staged overlay is staged by one launch (see the staging run below), then every shared-staging probe runs with
 # STAGE_GATE_KEEP_STAGED=1 (DARLING_KEEP_LOCAL, no refresh). stage_snapshot lists the staged regular files that came from the overlay
 # (test binaries *-macho excluded) and their md5; stage_check compares them again after the last shared probe.
-stage_hash() { ( cd "$SO" && tr '\n' '\0' <"$SLIST" | xargs -0 md5 -r 2>&1 ) | sort; }
+# START_GATE_SWEEPGUARD
+# Contract: this run's own TMPDIR artifacts may be swept mid-run (a role temp dir emptied while the gate
+# works: stage-gate-list.*, stage-gate-base.*, stage-gate-pre.* all vanished from one run, 22.11). A lost
+# artifact then says so on one defined line and yields "not verifiable" (skip, rc 0) — never a raw
+# "cannot open" from a redirection and never a verdict invented from an absent baseline.
+stage_hash() { [ -f "$SLIST" ] || return 1; ( cd "$SO" && tr '\n' '\0' <"$SLIST" | xargs -0 md5 -r 2>&1 ) | sort; }
 stage_snapshot() {
 	( cd "$SO" && find . -type f ! -name '*-macho' | sort ) >"$SLIST" || return 1
 	[ -s "$SLIST" ] || return 1
 	stage_hash >"$SBASE"
 }
 stage_check() {
-	stage_hash >"$SAFTR"
+	if [ ! -f "$SLIST" ] || [ ! -f "$SBASE" ]; then
+		echo "STAGED-MUTATED skipped (snapshot lost mid-run: TMPDIR swept; baseline absent, mutation not verifiable)"
+		return 0
+	fi
+	stage_hash >"$SAFTR" || { echo "STAGED-MUTATED skipped (snapshot lost mid-run: TMPDIR swept; file list absent, mutation not verifiable)"; return 0; }
+	[ -f "$SAFTR" ] || { echo "STAGED-MUTATED skipped (snapshot lost mid-run: TMPDIR swept; hashed list absent, mutation not verifiable)"; return 0; }
 	if cmp -s "$SBASE" "$SAFTR"; then echo "STAGED-MUTATED pass files=$(wc -l <"$SLIST" | tr -d ' ')"; return 0; fi
 	echo "STAGED-MUTATED FAIL staged tree mutated: $(comm -13 "$SBASE" "$SAFTR" | wc -l | tr -d ' ') file(s) changed or missing, first: $(comm -13 "$SBASE" "$SAFTR" | head -3 | cut -c1-140 | tr '\n' ';')"
 	return 1
 }
+# END_GATE_SWEEPGUARD
 # Orphans: after a probe, no process of it may remain. New pids (not in the snapshot taken before the probe) of launch-dynamic,
 # mldr or darlingserver are reported with pid and full ps line; nothing is stopped. STAGE_GATE_PS_CMD overrides the ps command (tests);
 # STAGE_GATE_ORPHAN_WAIT = seconds to let a probe's own teardown finish before it counts (default 10).
 orphan_pids() { eval "${STAGE_GATE_PS_CMD:-ps -axo pid=,ppid=,lstart=,args=}" 2>/dev/null | grep -E 'launch-dynamic|mldr-real/mldr|darlingserver' | grep -v 'grep -E'; }
-orphan_begin() { _OPRE=$(mktemp "${TMPDIR:-/tmp}/stage-gate-pre.XXXXXX") || return 1; orphan_pids | awk '{print $1}' | sort >"$_OPRE"; }
+orphan_begin() { _OPRE=; _OPRE=$(mktemp "${TMPDIR:-/tmp}/stage-gate-pre.XXXXXX") || return 1; orphan_pids | awk '{print $1}' | sort >"$_OPRE"; }
 orphan_check() { # name prefile
+	# The baseline is read once: a snapshot swept between orphan_begin and here (or between two
+	# comparisons) must not turn into a redirection error and must not be read as "no baseline
+	# = every pid is new". Same discipline as the lost own log copy (skip counter contract above).
+	if [ ! -f "$2" ]; then
+		echo "PROBE-ORPHAN skipped $1 (baseline snapshot lost mid-run: TMPDIR swept; new pids not verifiable)"
+		return 0
+	fi
+	_obase=$(tr '\n' ' ' <"$2") || { echo "PROBE-ORPHAN skipped $1 (baseline snapshot unreadable; new pids not verifiable)"; return 0; }
 	_oi=0
 	while :; do
-		_onew=$(orphan_pids | awk -v pre="$(tr '\n' ' ' <"$2")" 'BEGIN{n=split(pre,a," ");for(i=1;i<=n;i++)p[a[i]]=1} !($1 in p)')
+		_onew=$(orphan_pids | awk -v pre="$_obase" 'BEGIN{n=split(pre,a," ");for(i=1;i<=n;i++)p[a[i]]=1} !($1 in p)')
 		[ -z "$_onew" ] && return 0
 		[ "$_oi" -ge "${STAGE_GATE_ORPHAN_WAIT:-10}" ] && break
 		sleep 1; _oi=$((_oi+1))
@@ -113,7 +132,8 @@ orphan_check() { # name prefile
 	return 1
 }
 orphan_end() { # name
-	orphan_check "$1" "$_OPRE"; _or=$?; rm -f "$_OPRE"
+	orphan_check "$1" "$_OPRE"; _or=$?
+	[ -n "$_OPRE" ] && rm -f "$_OPRE"
 	[ "$_or" = 0 ] || { echo "STAGECHK FAIL $(echo "$1" | tr A-Z a-z)=orphan"; stage_fail; }
 }
 # END stage-once helpers
@@ -202,7 +222,10 @@ if [ "${STAGE_GATE_ONCE:-1}" = 1 ] && [ "${STAGE_GATE_FSOPS_RUN:-1}" = 1 ]; then
 	"FSOPS-VERDICT pass"*)
 		if stage_snapshot; then
 			STAGED_ONCE=1; STAGE_GATE_KEEP_STAGED=1; export STAGE_GATE_KEEP_STAGED
-			echo "STAGE-ONCE staged files=$(wc -l <"$SLIST" | tr -d ' ')"
+			if [ -f "$SLIST" ]; then echo "STAGE-ONCE staged files=$(wc -l <"$SLIST" | tr -d ' ')"
+				else echo "STAGE-ONCE staged files=n/a (file list lost mid-run: TMPDIR swept)"; fi
+		elif [ ! -f "$SLIST" ]; then
+			echo "STAGE-ONCE skipped (snapshot lost mid-run: TMPDIR swept; staged-file list absent, not verifiable)"
 		else echo "STAGE-ONCE FAIL no staged overlay files to hash in $SO"; echo "STAGECHK FAIL stage-once=FAIL"; stage_fail; fi;;
 	*) echo "STAGE-ONCE skipped (staging run gave no pass; probes restage)";;
 	esac
@@ -351,13 +374,15 @@ python3 "$HERE/gen-from-schema.py" --check --out "$DARLING_BUILD_DIR" || { echo 
 # STAGE_GATE_KEEPONE=0 opts out of the verdict entirely (keepone=skip); the default in the full gate is 1.
 ko=skip
 if [ -f "$HERE/keep-one-check.sh" ]; then
+	_ko_root="${KEEPONE_ROOT:-$(dirname "$DARLING_BUILD_DIR")}"
+	export KEEPONE_ROOT="$_ko_root"
 	sh "$HERE/keep-one-check.sh" --clean-sockets 2>&1 | tail -1
-	kol=$(sh "$HERE/keep-one-check.sh" 2>/dev/null | tail -1)
+	_kv=$(sh "$HERE/keep-one-check.sh" 2>/dev/null); _krc=$?; kol=$_kv
 	# start keepone_verdict
 	# START_KEEPONE_VERDICT
 	# Contract: kol is the one KEEP-ONE verdict line; sets ko=pass|fail-apply-ok|FAIL and prints the STAGECHK FAIL line
 	# only for FAIL, so an unremovable or over-limit tree is the one red outcome.
-	ko_out() { # verdict-line
+	ko_out() { # $1 = verdict-line, $2 = its rc
 		case "$1" in "KEEP-ONE verdict=pass"*) ko=pass; return 0;; esac
 		case "$1" in
 		"KEEP-ONE verdict=fail"*)
@@ -369,12 +394,16 @@ if [ -f "$HERE/keep-one-check.sh" ]; then
 			else
 				ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; --apply-check refused a candidate, cleanup cannot remove it)"
 			fi
-			;;
-		*) ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; no KEEP-ONE verdict line)";;
+			return 0;;
 		esac
+		if [ "$2" = 2 ]; then
+			# rc 2 with no "verdict=" word in the line is a usage error, not a verdict fail
+			ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; keep-one-check usage error, not a verdict)"; return 0
+		fi
+		ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; no KEEP-ONE verdict line)"; return 0
 	}
 	# END_KEEPONE_VERDICT
-	ko_out "$kol"
+	ko_out "$kol" "$_krc"
 	if [ "$ko" = FAIL ] && [ "${STAGE_GATE_KEEPONE:-0}" = 1 ]; then stage_fail; fi
 	if [ "$ko" = FAIL ] && [ "${STAGE_GATE_KEEPONE:-0}" != 1 ]; then ko="FAIL(skip)"; fi
 fi
