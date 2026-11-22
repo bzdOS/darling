@@ -20,10 +20,15 @@ if [ "${STAGE_GATE_FULL:-0}" = 1 ]; then
 fi
 if [ -z "$STAGE_GATE_INNER" ]; then
 	# Every line reaches the terminal as soon as its probe is done (tee); the copy in $_gt only feeds the skipped count.
-	_gt=$(mktemp "${TMPDIR:-/tmp}/stage-gate.XXXXXX") || { echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
-	_rcf=$(mktemp "${TMPDIR:-/tmp}/stage-gate-rc.XXXXXX") || { rm -f "$_gt"; echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
+	# Gate temp files live in the build scratch dir, not in TMPDIR: the role TMPDIR is swept
+	# between runs (22.11: _mk vanished mid-run, GATE-PROBE-CLEAN FAIL on a green tree).
+	_gsd=""; [ -n "$DARLING_BUILD_DIR" ] && [ -d "$DARLING_BUILD_DIR/scratch" ] && _gsd="$DARLING_BUILD_DIR/scratch"
+	[ -z "$_gsd" ] && { _gsd_o=$(cd "$(dirname "$0")" && pwd -P) 2>/dev/null && [ -d "$_gsd_o/../../build/scratch" ] && _gsd="$_gsd_o/../../build/scratch"; }
+	[ -z "$_gsd" ] && _gsd="${TMPDIR:-/tmp}"
+	_gt=$(mktemp "$_gsd/stage-gate.XXXXXX") || { echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
+	_rcf=$(mktemp "$_gsd/stage-gate-rc.XXXXXX") || { rm -f "$_gt"; echo "GATE mode=quick skipped=0 rc=1"; exit 1; }
 	# run-start marker: on success the gate removes only the probe/preflight logs this run created (newer than the marker)
-	_mk=$(mktemp "${TMPDIR:-/tmp}/stage-gate-mk.XXXXXX") || _mk=
+	_mk=$(mktemp "$_gsd/stage-gate-mk.XXXXXX") || _mk=
 	{ STAGE_GATE_INNER=1 sh "$0" 2>&1; echo $? >"$_rcf"; } | tee "$_gt"
 	_rc=$(cat "$_rcf"); [ -n "$_rc" ] || _rc=1
 	# START_GATE_SKIPCNT
@@ -110,7 +115,13 @@ stage_check() {
 # mldr or darlingserver are reported with pid and full ps line; nothing is stopped. STAGE_GATE_PS_CMD overrides the ps command (tests);
 # STAGE_GATE_ORPHAN_WAIT = seconds to let a probe's own teardown finish before it counts (default 10).
 orphan_pids() { eval "${STAGE_GATE_PS_CMD:-ps -axo pid=,ppid=,lstart=,args=}" 2>/dev/null | grep -E 'launch-dynamic|mldr-real/mldr|darlingserver' | grep -v 'grep -E'; }
-orphan_begin() { _OPRE=; _OPRE=$(mktemp "${TMPDIR:-/tmp}/stage-gate-pre.XXXXXX") || return 1; orphan_pids | awk '{print $1}' | sort >"$_OPRE"; }
+gate_tmpdir() { # echo the dir for this run's own temp files; never the swept role TMPDIR
+	if [ -n "$_GSD" ]; then echo "$_GSD"; return 0; fi
+	[ -n "$DARLING_BUILD_DIR" ] && [ -d "$DARLING_BUILD_DIR/scratch" ] && { _GSD="$DARLING_BUILD_DIR/scratch"; echo "$_GSD"; return 0; }
+	_gh=$(cd "$(dirname "$0")" && pwd -P) 2>/dev/null && [ -d "$_gh/../../build/scratch" ] && { _GSD="$_gh/../../build/scratch"; echo "$_GSD"; return 0; }
+	_GSD="${STAGE_GATE_TMPDIR:-${TMPDIR:-/tmp}}"; echo "$_GSD"
+}
+orphan_begin() { _OPRE=; _OPRE=$(mktemp "$(gate_tmpdir)/stage-gate-pre.XXXXXX") || return 1; orphan_pids | awk '{print $1}' | sort >"$_OPRE"; }
 orphan_check() { # name prefile
 	# The baseline is read once: a snapshot swept between orphan_begin and here (or between two
 	# comparisons) must not turn into a redirection error and must not be read as "no baseline
@@ -137,7 +148,7 @@ orphan_end() { # name
 	[ "$_or" = 0 ] || { echo "STAGECHK FAIL $(echo "$1" | tr A-Z a-z)=orphan"; stage_fail; }
 }
 # END stage-once helpers
-SLIST=$(mktemp "${TMPDIR:-/tmp}/stage-gate-list.XXXXXX"); SBASE=$(mktemp "${TMPDIR:-/tmp}/stage-gate-base.XXXXXX"); SAFTR=$(mktemp "${TMPDIR:-/tmp}/stage-gate-aftr.XXXXXX")
+SLIST=$(mktemp "$(gate_tmpdir)/stage-gate-list.XXXXXX"); SBASE=$(mktemp "$(gate_tmpdir)/stage-gate-base.XXXXXX"); SAFTR=$(mktemp "$(gate_tmpdir)/stage-gate-aftr.XXXXXX")
 trap 'rm -f "$SLIST" "$SBASE" "$SAFTR"' EXIT
 ML=$(m "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
 # START_MLDR_REASON
