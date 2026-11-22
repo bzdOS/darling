@@ -787,6 +787,8 @@ linux_setxattr(long path, long name, long value, long size, long flags)
     if (flags & 3) {
         long have = freebsd_raw_syscall(SYS_extattr_get_file, path, EXTATTR_NAMESPACE_USER, name, 0, 0, 0);
         if ((flags & 1) && have >= 0)
+#include "linux_ifioctl.h" /* Linux SIOCGIF* -> host ifreq ioctls (sysctl NET_RT_IFLIST); needs freebsd_raw_syscall */
+
             return -17;     /* EEXIST */
         if ((flags & 2) && have < 0)
             return xattr_errno_to_linux(have);
@@ -2370,6 +2372,8 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
          * natively would be misread by the Linux caller. Substitute a
          * native-sized scratch buffer for the call, then translate whatever
          * FreeBSD actually wrote back into Linux's layout (truncated to
+        if (lif_is_linux_if_ioctl((unsigned long)a2))
+            return linux_if_ioctl(a1, (unsigned long)a2, a3);
          * the caller's original buffer size) before returning. NULL
          * msg_name (the common case for an already-connected socket, which
          * is all this RPC transport ever uses) is untouched passthrough. */
