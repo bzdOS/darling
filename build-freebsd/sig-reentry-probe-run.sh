@@ -165,6 +165,15 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		grep -a "^RING-COUNTS" "$LOG" | head -1
 		grep -a "^SUSPEND-BALANCE" "$LOG" | head -1
 		echo "SIGILL-DUP=$(sed -n 's/^\[sigill-dup\] dups=//p' "$LOG" | tail -1)"
+		# durable one-line-per-run summary (keep-one never removes probe-summary.tsv)
+		PS=$DARLING_BUILD_DIR/probe-summary.tsv
+		[ -f "$PS" ] || printf 'stem\ttimestamp\trc\tclass\tsuspends\tSIGILL-DUP\tattach_windows\thanded_back_total\thanded_back_split\n' > "$PS"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$P-$STAMP" "$(date +%Y-%m-%dT%H:%M:%S)" "$rc" "$v" \
+		  "$(sed -n 's/^sig-reentry-probe: suspends=\([0-9]*\).*/\1/p' "$LOG" | head -1)" \
+		  "$(sed -n 's/^\[sigill-dup\] dups=//p' "$LOG" | tail -1)" \
+		  "$(sed -n 's/^MEMACCESS-ATTACH windows=\([0-9]*\).*/\1/p' "$LOG" | head -1)" \
+		  "$(sed -n 's/^MEMACCESS-ATTACH .*handed_back_sub5=\([0-9]*\).*/\1/p' "$LOG" | head -1)" \
+		  "$(sed -n 's/^MEMACCESS-SIGNAL-SPLIT //p' "$LOG" | head -1)" >> "$PS"
 		grep -a "^SIG-CYCLES" "$LOG" | head -1
 		grep -a "^MEMACCESS-" "$LOG" | head -2
 		grep -a "^PUSH-REPLY-ACK" "$LOG" | head -1

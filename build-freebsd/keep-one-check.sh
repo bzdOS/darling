@@ -100,7 +100,7 @@ else _kol=$(python3 "$_HERE/gen-from-schema.py" --emit keepone 2>/dev/null); fi
 _kf=$(printf '%s\n' "$_kol" | sed -n "s/^KEEPONE_FILES='\(.*\)'$/\1/p")
 _kb=$(printf '%s\n' "$_kol" | sed -n "s/^KEEPONE_BACKUPS='\(.*\)'$/\1/p")
 { [ -n "$_kf" ] && [ -n "$_kb" ]; } || { echo "KEEP-ONE verdict=fail no-keepone-list"; exit 2; }
-KEEP_FILES="$_kf $KEEPONE_ALLOW_FILES"
+KEEP_FILES="$_kf probe-summary.tsv $KEEPONE_ALLOW_FILES"  # probe-summary.tsv: durable per-run probe summaries, never a candidate
 KEEP_BACKUPS="$_kb $KEEPONE_ALLOW_BACKUPS"
 
 T=$(mktemp -t keepone.XXXXXX) || exit 2

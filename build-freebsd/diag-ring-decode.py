@@ -147,6 +147,9 @@ if counts or hang:
     wl = sorted(win_us)
     out.write("MEMACCESS-WINDOWS over 1 ms: %d (median %d us, p90 %d us, max %d us)\n" % (len(wl), wl[len(wl)//2] if wl else 0, wl[int(len(wl)*0.9)] if wl else 0, wl[-1] if wl else 0))
     out.write("PUSH-REPLY-ACK-FAILED %d (EPIPE %d)\n" % (len(ack_fail), sum(1 for x in ack_fail if x == 32)))
+    _sp = {}
+    for _x in saved_sig: _sp[_x] = _sp.get(_x, 0) + 1
+    out.write("MEMACCESS-SIGNAL-SPLIT %s\n" % (" ".join("sig%d=%d" % (k, _sp[k]) for k in sorted(_sp)) or "none"))
     out.write("MEMACCESS-ATTACH windows=%d handed_back_sub5=%d (sig 65: %d) detach_sig0_anomaly=%d\n" % (attach_cnt.get(1, 0), len(saved_sig), sum(1 for x in saved_sig if x == 65), attach_cnt.get(2, 0)))
     out.write("MEMACCESS-SIGNAL-SAVED handed back at detach=%d (sig 65: %d)\n" % (len(saved_sig), sum(1 for x in saved_sig if x == 65)))
 if (counts or hang) and lstate:
