@@ -1,0 +1,98 @@
+diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
+--- a/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:45:55.055637000 +0000
++++ b/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:45:55.066641000 +0000
+@@ -124,6 +124,7 @@
+ #include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
+ #include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
+ #include <sys/mount.h> /* native struct statfs — statfs/fstatfs translation */
++#include <sys/sysctl.h> /* CTL_HW/CTL_VM mibs, struct loadavg — sysinfo(2) */
+ #include <bsdos_linux_xlate.h> /* the one host<->guest constant table: errno, signals, mmap/msync flags */
+ #include "sigaction_translate.h" /* mldr_sys_rt_sigaction — see LINUX_SYS_rt_sigaction */
+ #include "trap_log.h"            /* exit-caller logging slice — write(2) markers */
+@@ -302,6 +303,7 @@
+ #define LINUX_SYS_getcpu       309
+ #define LINUX_SYS_sched_yield   24
+ #define LINUX_SYS_uname         63
++#define LINUX_SYS_sysinfo       99
+ #define LINUX_SYS_prctl        157
+ #define LINUX_SYS_getrandom    318
+ 
+@@ -2096,6 +2098,69 @@
+ }
+ 
+ /*
++ * Linux x86-64 struct sysinfo, spelled out (the guest sees the Linux layout, not FreeBSD headers):
++ * 112 bytes. loads[] are fixed point with 16 fractional bits (SI_LOAD_SHIFT). Fields with no cheap
++ * host source stay 0 rather than being invented: procs, sharedram, bufferram, totalswap/freeswap,
++ * totalhigh/freehigh. mem_unit is 1, so the ram fields are bytes.
++ */
++struct mldr_linux_sysinfo {
++    long          uptime;
++    unsigned long loads[3];
++    unsigned long totalram, freeram, sharedram, bufferram, totalswap, freeswap;
++    unsigned short procs;
++    unsigned short pad;
++    unsigned long totalhigh, freehigh;
++    unsigned int  mem_unit;
++    char          _f[20 - 2 * sizeof(long) - sizeof(int)];
++};
++_Static_assert(sizeof(struct mldr_linux_sysinfo) == 112, "Linux x86-64 struct sysinfo is 112 bytes");
++
++/*
++ * purpose:  Linux sysinfo(2). Runs inside the SIGILL handler: no stdio, no malloc, only raw
++ *           syscalls and sysctl(3) on fixed or by-name mibs (sysctlnametomib allocates nothing).
++ * input:    out — guest struct sysinfo*
++ * output:   0, or -EFAULT for a NULL pointer
++ * sideEffects: writes the whole 112-byte struct; a field whose sysctl fails stays 0.
++ */
++static long
++mldr_linux_sysinfo(void *out)
++{
++    struct mldr_linux_sysinfo si;
++    if (out == NULL)
++        return -EFAULT;
++    memset(&si, 0, sizeof(si));
++
++    struct timespec ts;
++    if (freebsd_raw_syscall(SYS_clock_gettime, CLOCK_UPTIME, (long)&ts, 0, 0, 0, 0) == 0)
++        si.uptime = (long)ts.tv_sec;
++
++    struct loadavg la;
++    size_t len = sizeof(la);
++    int mib_la[2] = { CTL_VM, VM_LOADAVG };
++    if (sysctl(mib_la, 2, &la, &len, NULL, 0) == 0 && len == sizeof(la) && la.fscale > 0) {
++        for (int i = 0; i < 3; i++)
++            si.loads[i] = (unsigned long)(((unsigned long long)la.ldavg[i] << 16) / (unsigned long)la.fscale);
++    }
++
++    unsigned long physmem = 0;
++    len = sizeof(physmem);
++    int mib_pm[2] = { CTL_HW, HW_PHYSMEM };
++    if (sysctl(mib_pm, 2, &physmem, &len, NULL, 0) == 0 && len == sizeof(physmem))
++        si.totalram = physmem;
++
++    unsigned int freepages = 0;
++    len = sizeof(freepages);
++    if (sysctlbyname("vm.stats.vm.v_free_count", &freepages, &len, NULL, 0) == 0 && len == sizeof(freepages)) {
++        unsigned long fr = (unsigned long)freepages * (unsigned long)getpagesize();
++        si.freeram = (si.totalram != 0 && fr > si.totalram) ? si.totalram : fr;
++    }
++
++    si.mem_unit = 1;
++    memcpy(out, &si, sizeof(si));
++    return 0;
++}
++
++/*
+  * purpose:  Translate a raw Linux x86-64 syscall (as made directly by the
+  *           upstream dyld/libdyld.dylib overlay binary, which was compiled
+  *           to run on Linux) to a FreeBSD equivalent and execute it.
+@@ -3325,6 +3390,8 @@
+     case LINUX_SYS_sched_yield:
+         /* Linux sched_yield() == FreeBSD sched_yield(2) (syscall 331). */
+         return freebsd_raw_syscall(SYS_sched_yield, 0, 0, 0, 0, 0, 0);
++    case LINUX_SYS_sysinfo:
++        return mldr_linux_sysinfo((void *)a1);
+     case LINUX_SYS_uname: {
+         /* Linux struct new_utsname: six char[65] fields (sysname, nodename,
+          * release, version, machine, domainname), 390 bytes. FreeBSD's
