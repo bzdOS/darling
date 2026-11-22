@@ -9,6 +9,8 @@ SRC="${DARLING_SRC_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PDIR="$SRC/build-freebsd/patches"
 EXT="${PATCH_EXT_DIR:-$SRC/src/external}"
 rc=0
+# snapshot-only submodules (file, glut): restore when empty, silent when present and matching
+QUIET=1 DARLING_SRC_DIR="$SRC" PATCH_EXT_DIR="$EXT" sh "$SRC/build-freebsd/restore-submodule-snapshot.sh" || rc=1
 while read -r sub patch; do
 	case "$sub" in ''|'#'*) continue ;; esac
 	d="$EXT/$sub"; p="$PDIR/$patch"
