@@ -113,6 +113,21 @@ __attribute__((constructor)) static void bootstrap_shim_init(void)
 	pthread_create(&th, &at, serve, 0);
 }
 
+/* DARLING_SHIM_TRACE=1: one "SHIM-TRACE ..." line on stderr per traced call (notify registration, the dns key, kevent64
+ * changes), to see which step of a watcher setup fails in a real process. Off by default; the variable is read per call. */
+extern int snprintf(char *, unsigned long, const char *, ...);
+extern long write(int, const void *, unsigned long);
+extern char *getenv(const char *);
+static int shim_trace_budget = 200;
+static void shim_trace(const char *fmt, long a, long b, long c, const char *s)
+{
+	char buf[256];
+	int n;
+	if (!getenv("DARLING_SHIM_TRACE") || __sync_fetch_and_sub(&shim_trace_budget, 1) <= 0) return;
+	n = snprintf(buf, sizeof buf, fmt, a, b, c, s ? s : "(null)");
+	if (n > 0) write(2, buf, n < (int)sizeof buf ? n : (int)sizeof buf - 1);
+}
+
 /* notify(3) without a notification server. libnotify looks up com.apple.system.notification_center through
  * bootstrap and answers NOTIFY_STATUS_SERVER_NOT_FOUND (9) when nothing serves it (no launchd, no notifyd here);
  * Chrome's ThermalStateObserverMac logged "unable to register to power notifications. Result: 9".
@@ -159,6 +174,7 @@ static int shim_notify_register_signal(const char *n, int sig, int *out)
 static int shim_notify_register_file_descriptor(const char *n, int *fd, int flags, int *out)
 {
 	int r = notify_register_file_descriptor(n, fd, flags, out);
+	shim_trace("SHIM-TRACE notify_register_file_descriptor real=%ld flags=%ld name=%.0s%s\n", r, flags, 0, n);
 	if (r != NTFY_NOT_FOUND || !n || !fd || !out) return r;
 	if (!(flags & NOTIFY_REUSE)) {
 		int p[2];
@@ -228,8 +244,23 @@ extern const char *dns_configuration_notify_key(void);
 static const char *shim_dns_configuration_notify_key(void)
 {
 	const char *k = dns_configuration_notify_key();
+	shim_trace("SHIM-TRACE dns_configuration_notify_key real=%.0s%.0s%.0s%s\n", 0, 0, 0, k);
 	return k ? k : "com.apple.system.SystemConfiguration.dns_configuration";
 }
 __attribute__((used)) static const struct interpose_tuple dnsinfo_interposers[] __attribute__((section("__DATA,__interpose"))) = {
 	{ (const void *)shim_dns_configuration_notify_key, (const void *)dns_configuration_notify_key },
+};
+
+/* kevent64 (what Chrome's message pump registers its descriptors with): traced only, passed through. */
+struct shim_kevent64 { unsigned long long ident; short filter; unsigned short flags; unsigned fflags; long long data; unsigned long long udata; unsigned long long ext[2]; };
+extern int kevent64(int, const struct shim_kevent64 *, int, struct shim_kevent64 *, int, unsigned, const void *);
+static int shim_kevent64_call(int kq, const struct shim_kevent64 *cl, int nch, struct shim_kevent64 *el, int nev, unsigned fl, const void *ts)
+{
+	int r = kevent64(kq, cl, nch, el, nev, fl, ts);
+	if (nch > 0 && cl && getenv("DARLING_SHIM_TRACE") && (r < 0 || (cl[0].flags & 1)))
+		shim_trace("SHIM-TRACE kevent64 nch=%ld filter=%ld ret=%ld %.0s\n", nch, cl[0].filter, r, 0);
+	return r;
+}
+__attribute__((used)) static const struct interpose_tuple kevent64_interposers[] __attribute__((section("__DATA,__interpose"))) = {
+	{ (const void *)shim_kevent64_call, (const void *)kevent64 },
 };
