@@ -7,7 +7,7 @@
  * persistentDomainForName: Chromium's dock code (chrome/browser/mac/dock.mm) reads
  * [[NSUserDefaults standardUserDefaults] persistentDomainForName:@"com.apple.dock"] and logs "dock_plist is not an
  * NSDictionary" when the answer is nil, which it is here: no Dock, no preferences daemon. The method is wrapped: the original
- * answer is kept; only for the com.apple.dock domain, and only when the original gives nil, an empty NSDictionary (a Dock
+ * answer is kept; only for the com.apple.dock domain, and only when the original gives nil, a dictionary with empty NSArrays under persistent-apps and persistent-others (a Dock
  * without persistent apps) is returned. Every other domain keeps its original behaviour.
  * The methods are installed once their classes exist (add-image hook, as the other behaviours of this image). */
 #include "../objc-proto.h"
@@ -33,7 +33,12 @@ static id persistent_domain_for_name(id self, SEL cmd, id name)
             MSG(id, id, SEL, const char *)((id)objc_getClass("NSString"), S("stringWithUTF8String:"), "com.apple.dock") : (id)0;
         Class d = objc_getClass("NSDictionary");
         if (dock && d && (unsigned char)(long)MSG(long, id, SEL, id)(name, S("isEqualToString:"), dock))
-            return MSG(id, id, SEL)((id)d, S("dictionary"));
+        {
+            id arr = MSG(id, id, SEL)((id)objc_getClass("NSArray"), S("array"));
+            id k1 = MSG(id, id, SEL, const char *)((id)objc_getClass("NSString"), S("stringWithUTF8String:"), "persistent-apps");
+            id k2 = MSG(id, id, SEL, const char *)((id)objc_getClass("NSString"), S("stringWithUTF8String:"), "persistent-others");
+            return MSG(id, id, SEL, id, id, id, id, id)((id)d, S("dictionaryWithObjectsAndKeys:"), arr, k1, arr, k2, (id)0);
+        }
     }
     return r;
 }

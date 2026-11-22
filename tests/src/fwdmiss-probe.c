@@ -27,6 +27,12 @@ int main(void)
 	printf("FWDM info ud=%p responds=%d dom=%p\n", ud, ud ? class_respondsToSelector(object_getClass(ud), S("persistentDomainForName:")) : -1, dom);
 	res("dock", dom && (unsigned char)(long)objc_msgSend(dom, S("isKindOfClass:"), objc_getClass("NSDictionary")));
 
+	{
+		id k = CFStringCreateWithCString(0, "persistent-apps", 0x08000100), k2 = CFStringCreateWithCString(0, "persistent-others", 0x08000100);
+		id a = dom ? objc_msgSend(dom, S("objectForKey:"), k) : 0, b = dom ? objc_msgSend(dom, S("objectForKey:"), k2) : 0;
+		res("dock-arrays", a && b && (unsigned char)(long)objc_msgSend(a, S("isKindOfClass:"), objc_getClass("NSArray")) &&
+			(unsigned char)(long)objc_msgSend(b, S("isKindOfClass:"), objc_getClass("NSArray")));
+	}
 	id fm = objc_msgSend(objc_getClass("NSFileManager"), S("defaultManager"));
 	res("ubiquity", fm && class_respondsToSelector(object_getClass(fm), S("ubiquityIdentityToken")) && !objc_msgSend(fm, S("ubiquityIdentityToken")));
 
