@@ -1,0 +1,46 @@
+diff --git a/src/thread.cpp b/src/thread.cpp
+index fe13222..e2d22a2 100644
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -312,7 +312,19 @@ void DarlingServer::Thread::setPendingCall(std::shared_ptr<Call> newPendingCall)
+ 			_pendingInterrupts.push(newPendingCall);
+ 			return;
+ 		} else {
+-			throw std::runtime_error("Thread's pending call overwritten while active");
++			// The client sent a second call before the pending one was started (a call that overlaps another one, e.g. one
++			// sent from a signal handler that raced with the interrupt_enter exchange). Dropping it left the client without
++			// a reply (-> abort); queue it behind the pending call and replay it like an interrupt instead.
++			static std::atomic<unsigned long> overlapCount{0};
++			unsigned long n = ++overlapCount;
++			if (n <= 50 || (n & (n - 1)) == 0) {
++				fprintf(stderr, "[dserver] tid=%d(%d): call %d arrived while call %d is pending (active call %d, interrupts %zu, queued %zu); queued for replay (#%lu)\n",
++					(int)_tid, (int)_nstid, (int)newPendingCall->number(), (int)_pendingCall->number(),
++					_activeCall ? (int)_activeCall->number() : -1, _interrupts.size(), _pendingInterrupts.size(), n);
++				fflush(stderr);
++			}
++			_pendingInterrupts.push(newPendingCall);
++			return;
+ 		}
+ 	}
+ 	_pendingCall = newPendingCall;
+@@ -703,14 +715,13 @@ doneWorking:
+ 		// if we have any pending interrupts, schedule them to be processed now
+ 		// (we've just finished or suspended a call, so now's the time to handle interrupts)
+ 		if (!_terminating && !_dead && !_pendingInterrupts.empty()) {
+-			if (_pendingCall) {
+-				throw std::runtime_error("Need to schedule interrupt for processing, but thread has pending call");
+-			}
+-
+-			_pendingCall = _pendingInterrupts.front();
+-			_pendingInterrupts.pop();
++			// a call that arrived meanwhile is already pending (and scheduled): the queue is drained when it is done
++			if (!_pendingCall) {
++				_pendingCall = _pendingInterrupts.front();
++				_pendingInterrupts.pop();
+ 
+-			Server::sharedInstance().scheduleThread(shared_from_this());
++				Server::sharedInstance().scheduleThread(shared_from_this());
++			}
+ 		}
+ 
+ 		_rwlock.unlock();

@@ -92,3 +92,5 @@ xnu xnu-stub-files.patch
 # mldr-sigill-dup-count.patch (also a per-duplicate histogram: si_addr-rip, nesting and signal 65+ state per thread, sig65 after the last emulation; printed at exit): count of Step 56 duplicate SIGILL deliveries (dups in sigill_handler_inner), written at process exit with write(2) when DARLING_SIG65_COUNT is set; layered on top of mldr-traplog-nostdio-rest and mldr-linux-sysinfo, hooks into the exit report of mldr-sig65-unblock-count.patch.
 ../.. mldr-sigill-dup-count.patch
 darlingserver darlingserver-s2c-mmap-eintr-retry.patch
+# darlingserver-pending-call-queue.patch: a regular call that arrives while another call is still pending is queued behind it (replayed from _pendingInterrupts) instead of dropped with "pending call overwritten while active" (the client got no reply); the replay no longer throws when a call arrived meanwhile.
+darlingserver darlingserver-pending-call-queue.patch
