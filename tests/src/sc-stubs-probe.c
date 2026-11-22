@@ -45,6 +45,15 @@ int main(void)
 	for (int i = 0; syms[i]; i++) res(syms[i], dlsym(h, syms[i]));
 	if ((s = dlsym(h, "SCNetworkInterfaceCopyAll"))) res("SCNetworkInterfaceCopyAll()", ((f0)s)());
 	if ((s = dlsym(h, "SCDynamicStoreKeyCreateProxies"))) res("SCDynamicStoreKeyCreateProxies()", ((f1)s)(0));
+	if (!(s = dlsym(h, "SCDynamicStoreCreate"))) res("SCDynamicStoreCreate(sym)", 0);
+	else {
+		const void *st = ((f3)s)(0, 0, 0);
+		res("SCDynamicStoreCreate", st);
+		const void *(*ck)(const void *, const void *, const void *, const void *) = dlsym(h, "SCDynamicStoreSetNotificationKeys");
+		res("SCDynamicStoreSetNotificationKeys(sym)", (const void *)ck);
+		const void *(*rs)(const void *, const void *, long) = dlsym(h, "SCDynamicStoreCreateRunLoopSource");
+		res("SCDynamicStoreCreateRunLoopSource", rs && st ? rs(0, st, 0) : 0);
+	}
 	printf("SCCHK DONE fail=%d\n", bad);
 	return bad ? 1 : 0;
 }

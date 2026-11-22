@@ -100,3 +100,15 @@ const char *SCErrorString(int status) { return status ? "SystemConfiguration err
 CFArrayRef SCNetworkInterfaceCopyAll(void) { return CFArrayCreate(kCFAllocatorDefault, 0, 0, kCFTypeArrayCallBacks); }
 CFStringRef SCNetworkInterfaceGetBSDName(CFTypeRef i) { return 0; }
 CFStringRef SCNetworkInterfaceGetHardwareAddressString(CFTypeRef i) { return 0; }
+
+/* dynamic store without configd: the store is an empty dictionary (a real, releasable CF object), the
+ * notification keys are accepted, the run loop source is an inert version-0 source that never fires.
+ * Chrome's network_config_watcher_apple.cc retries forever when SCDynamicStoreCreate returns NULL. */
+extern CFTypeRef CFRunLoopSourceCreate(CFAllocatorRef, CFIndex, void *);
+CFTypeRef SCDynamicStoreCreate(CFAllocatorRef a, CFStringRef name, void *callout, void *context) { return reach_new(); }
+Boolean SCDynamicStoreSetNotificationKeys(CFTypeRef store, CFArrayRef keys, CFArrayRef patterns) { return 1; }
+CFTypeRef SCDynamicStoreCreateRunLoopSource(CFAllocatorRef a, CFTypeRef store, CFIndex order)
+{
+	long ctx[9] = { 0 };
+	return CFRunLoopSourceCreate(a, order, ctx);
+}
