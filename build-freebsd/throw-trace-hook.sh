@@ -9,8 +9,11 @@ set -e
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; W="$BD/throw-trace"; mkdir -p "$W"
+B=$(mktemp -d "$BD/throw-trace.XXXXXX") || { echo "FATAL: mktemp workdir failed for throw-trace" >&2; exit 1; }
+cleanup() { rm -rf "$B"; }
+trap cleanup EXIT INT TERM HUP
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w \
-	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/throw-trace-hook.c" -o "$W/hook.o"
+	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/throw-trace-hook.c" -o "$B/hook.o"
 ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -dylib -install_name /throwtrace/throw-trace.dylib \
-	-o "$W/throw-trace.dylib" "$W/hook.o" "$OD/usr/lib/libobjc.A.dylib" "$OD/usr/lib/libc++abi.dylib" "$OD/usr/lib/libSystem.B.dylib" 2>"$W/link.err" || { tail -3 "$W/link.err"; exit 1; }
+	-o "$W/throw-trace.dylib" "$B/hook.o" "$OD/usr/lib/libobjc.A.dylib" "$OD/usr/lib/libc++abi.dylib" "$OD/usr/lib/libSystem.B.dylib" 2>"$B/link.err" || { tail -3 "$B/link.err"; exit 1; }
 echo "$W/throw-trace.dylib"

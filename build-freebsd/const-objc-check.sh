@@ -12,7 +12,10 @@ if [ -z "$SRC" ] || [ -z "$BD" ] || [ -z "$OD" ]; then
 fi
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=const-objc-probe-macho; W="$BD/const-objc"; mkdir -p "$W"
+SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=const-objc-probe-macho
+W=$(mktemp -d "$BD/const-objc.XXXXXX") || { echo "FATAL: mktemp workdir failed for const-objc" >&2; exit 1; }
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM HUP
 [ -d "$SDK_FLAT/usr/include" ] || { echo "CONST-OBJC-VERDICT FAIL n=0 bad=1 [no flattened SDK]"; exit 1; }
 python3 "$HERE/gen-const-objc-table.py" "$OD" "$W/const-objc-table.h" || { echo "CONST-OBJC-VERDICT FAIL n=0 bad=1 [table]"; exit 1; }
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w -I"$W" \
@@ -21,7 +24,7 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 	"$OD/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" "$OD/usr/lib/libobjc.A.dylib" \
 	"$OD/usr/lib/libicucore.A.dylib" "$OD/usr/lib/libSystem.B.dylib" $(cat "$W/const-objc-table.h.libs") 2>/dev/null \
 	|| { echo "CONST-OBJC-VERDICT FAIL n=0 bad=1 [build]"; exit 1; }
-LOG="$BD/const-objc-check.log"
+LOG="$BD/const-objc-check-$(date +%m%d-%H%M%S).log"
 PRE=" $(pgrep -x darlingserver | tr '\n' ' ') "
 . "$(dirname "$0")/probe-launch.sh"
 probe_launch "$LOG" "$WAIT" "CONSTOBJC DONE\|FATAL signal" sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \

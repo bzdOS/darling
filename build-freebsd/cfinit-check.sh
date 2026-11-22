@@ -14,7 +14,7 @@ if [ -z "$SRC" ] || [ -z "$BD" ] || [ -z "$OD" ]; then
 	echo "CFINIT-VERDICT FAIL initialized=-1 string_typeid=0 [missing env:$([ -z "$SRC" ] && printf " DARLING_SRC_DIR")$([ -z "$BD" ] && printf " DARLING_BUILD_DIR")$([ -z "$OD" ] && printf " DARLING_OVERLAY")]"; exit 1
 fi
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
-SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=cfinit-probe-macho; W="$BD/cfinit"; mkdir -p "$W"
+SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=cfinit-probe-macho; W=""
 CF="$OD/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
 st=none
 if llvm-objdump --macho --private-headers "$CF" 2>/dev/null | grep -q "LC_ROUTINES"; then st=ok
@@ -22,13 +22,16 @@ elif llvm-objdump --macho -s --section=__DATA,__mod_init_func "$CF" 2>/dev/null 
 if [ "$st" = ok ]; then echo "CFINIT-STATIC ok (LC_ROUTINES or __mod_init_func entry for ___CFInitialize)"
 else echo "CFINIT-STATIC FAIL no LC_ROUTINES and no ___CFInitialize in __mod_init_func: $(llvm-objdump --macho -s --section=__DATA,__mod_init_func "$CF" 2>/dev/null | awk "NF>=3{printf \"%s \", \$3}")"; fi
 if [ "$STATIC_ONLY" = 1 ]; then [ "$st" = ok ]; exit $?; fi
+W=$(mktemp -d "$BD/cfinit.XXXXXX") || { echo "FATAL: mktemp workdir failed for cfinit" >&2; exit 1; }
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM HUP
 [ -d "$SDK_FLAT/usr/include" ] || { echo "CFINIT-VERDICT FAIL initialized=-1 string_typeid=0 [no flattened SDK]"; exit 1; }
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w \
 	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/cfinit-probe.c" -o "$W/probe.o" &&
 ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -o "$SRC/tests/$T" "$W/probe.o" \
 	"$OD/usr/lib/libSystem.B.dylib" 2>/dev/null \
 	|| { echo "CFINIT-VERDICT FAIL initialized=-1 string_typeid=0 [build]"; exit 1; }
-LOG="$BD/cfinit-check.log"
+LOG="$BD/cfinit-check-$(date +%m%d-%H%M%S).log"
 PRE=" $(pgrep -x darlingserver | tr "\n" " ") "
 . "$(dirname "$0")/probe-launch.sh"
 probe_launch "$LOG" "$WAIT" "CFINIT-VERDICT\|FATAL signal" sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \

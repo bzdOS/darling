@@ -7,7 +7,10 @@
 # Only the darlingserver processes this run started are stopped (by pid).
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"; WAIT="${1:-90}"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
-SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=imageio-probe-macho; W="$BD/imageio-probe"; mkdir -p "$W"
+SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=imageio-probe-macho
+W=$(mktemp -d "$BD/imageio-probe.XXXXXX") || { echo "FATAL: mktemp workdir failed for imageio-probe" >&2; exit 1; }
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM HUP
 F1="IMAGEIO-DECODE FAIL"; F2="IMGREP-NULL FAIL"
 [ -d "$SDK_FLAT/usr/include" ] || { echo "$F1 [no flattened SDK]"; echo "$F2 [no flattened SDK]"; exit 1; }
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w \
@@ -20,7 +23,7 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 	"$OD/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" "$OD/usr/lib/libobjc.A.dylib" \
 	"$OD/usr/lib/libicucore.A.dylib" "$OD/usr/lib/libSystem.B.dylib" 2>"$W/link.err" \
 	|| { echo "$F1 [build: $(tail -1 "$W/link.err")]"; echo "$F2 [build]"; exit 1; }
-LOG="$BD/imageio-probe.log"
+LOG="$BD/imageio-probe-$(date +%m%d-%H%M%S).log"
 PRE=" $(pgrep -x darlingserver | tr '\n' ' ') "
 ( sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
 	$([ "${STAGE_GATE_KEEP_STAGED:-}" = 1 ] && echo DARLING_KEEP_LOCAL=1 || echo DARLING_SMOKE_REFRESH=1) DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc "$BD/launch-dynamic" > "$LOG" 2>&1 & )

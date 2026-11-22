@@ -8,14 +8,17 @@ SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 if [ -z "$DARLING_LOCK_HELD" ]; then exec lockf -t 0 "$BD/.darling-run.lock" env DARLING_LOCK_HELD=1 sh "$0" "$@"; fi
 F0="THROW-TRACE-SELFTEST fail objc=0 cxx=0"
-SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=throw-trace-selftest-macho; W="$BD/throw-trace-selftest"; mkdir -p "$W"
+SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=throw-trace-selftest-macho
+W=$(mktemp -d "$BD/throw-trace-selftest.XXXXXX") || { echo "FATAL: mktemp workdir failed for throw-trace-selftest" >&2; exit 1; }
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM HUP
 HOOK=$(sh "$SRC/build-freebsd/throw-trace-hook.sh") || { echo "$F0 bad=[hook build]"; exit 1; }
 clang++ -x objective-c++ -target x86_64-apple-macos10.12 -nostdinc -nostdinc++ -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O0 -w -fobjc-exceptions -fexceptions \
 	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/throw-trace-selftest.mm" -o "$W/t.o" 2>"$W/cc.err" &&
 ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -o "$SRC/tests/$T" "$W/t.o" \
 	"$OD/usr/lib/libc++.1.dylib" "$OD/usr/lib/libc++abi.dylib" "$OD/usr/lib/libobjc.A.dylib" "$OD/usr/lib/libSystem.B.dylib" 2>"$W/link.err" \
 	|| { echo "$F0 bad=[build: $(tail -1 "$W/cc.err" "$W/link.err" | tr "\n" " " | cut -c1-200)]"; exit 1; }
-LOG="$BD/throw-trace-selftest.log"
+LOG="$BD/throw-trace-selftest-$(date +%m%d-%H%M%S).log"
 PRE=" $(pgrep -x darlingserver | tr "\n" " ") "
 . "$(dirname "$0")/probe-launch.sh"
 probe_launch "$LOG" "$WAIT" "SELFTEST-DONE\|FATAL signal" sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" DARLING_SMOKE_REFRESH=1 \

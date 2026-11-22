@@ -13,12 +13,13 @@ BD="${DARLING_BUILD_DIR:?}"
 OD="${DARLING_OVERLAY:?}"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
 OUT="${SRC}/tests/unwind-probe-macho"
-BUILD="${BD}/unwind-probe-test"
 SDK_FLAT="${BD}/bundle-principal-class-test/sdk-flat"
 FND="${SRC}/src/external/foundation"
 CG="${SRC}/src/external/cocotron/CoreGraphics/include"
 [ -d "${SDK_FLAT}/Frameworks" ] || { echo "FATAL: no flattened SDK at ${SDK_FLAT}" >&2; exit 1; }
-mkdir -p "${BUILD}"
+BUILD=$(mktemp -d "${BD}/unwind-probe-test.XXXXXX") || { echo "FATAL: mktemp workdir failed for unwind-probe-test" >&2; exit 1; }
+cleanup() { rm -rf "$BUILD"; }
+trap cleanup EXIT INT TERM HUP
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 \
 	-fblocks -fconstant-cfstrings -fobjc-runtime=macosx-10.12 -DDARLING \
 	-F"${SDK_FLAT}/Frameworks" -I"${SRC}/tests/vendor/fakesdk" \

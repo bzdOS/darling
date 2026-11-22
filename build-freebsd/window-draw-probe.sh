@@ -22,7 +22,10 @@ if [ -z "$WD_MODE" ]; then
 	WD_MODE=alert WINDOW_DRAW_ALERT=1 sh "$0" "$@" || rc=1
 	exit $rc
 fi
-SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=window-draw-probe-macho; W="$BD/window-draw-probe"; mkdir -p "$W"
+SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=window-draw-probe-macho
+W=$(mktemp -d "$BD/window-draw-probe.XXXXXX") || { echo "FATAL: mktemp workdir failed for window-draw-probe" >&2; exit 1; }
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM HUP
 [ -d "$SDK_FLAT/usr/include" ] || fail "no flattened SDK"
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w \
 	-I"$SRC/tests/vendor/fakesdk" -I"$SDK_FLAT/usr/include" -c "$SRC/tests/src/window-draw-probe.c" -o "$W/probe.o" &&
@@ -32,15 +35,15 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 	"$OD/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"$OD/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" "$OD/usr/lib/libobjc.A.dylib" \
 	"$OD/usr/lib/libicucore.A.dylib" "$OD/usr/lib/libSystem.B.dylib" 2>"$W/link.err" || fail "build: $(tail -1 "$W/link.err")"
-RUN=/tmp/wd-probe-run; rm -rf "$RUN"; mkdir -p "$RUN" && chmod 700 "$RUN"
+RUN=$(mktemp -d /tmp/wd-probe-run.XXXXXX) || fail "mktemp rundir"; chmod 700 "$RUN"
 XR=$RUN/xdg; mkdir -p "$XR" && chmod 700 "$XR"
 XDG_RUNTIME_DIR=$XR WAYLAND_DISPLAY=wayland-wd WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
 	sway --unsupported-gpu > "$RUN/sway.log" 2>&1 &
 SWAYPID=$!
 i=0; while [ ! -S "$XR/wayland-1" ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
 WD=$(ls "$XR" | grep -E "^wayland-[0-9]+$" | head -1)
-[ -n "$WD" ] || { kill $SWAYPID; fail "sway did not start"; }
-LOG=$BD/window-draw-probe.log; PNG=$BD/window-draw-probe.png; rm -f "$LOG" "$PNG"
+[ -n "$WD" ] || { kill $SWAYPID; rm -rf "$RUN"; fail "sway did not start"; }
+LOG=$BD/window-draw-probe-$(date +%m%d-%H%M%S).log; PNG=${LOG%.log}.png; rm -f "$LOG" "$PNG"
 PRE=" $(pgrep -x darlingserver | tr "\n" " ") "
 ( sudo -n timeout -k 5 "${WAIT:-40}" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
 	DARLING_KEEP_LOCAL=1 DARLING_STAGING_TREES=usr/lib:System/Library/Frameworks:System/Library/PrivateFrameworks:private/etc \
@@ -102,7 +105,7 @@ PY
 	) || color=none
 fi
 for p in $(pgrep -x darlingserver); do case "$PRE" in *" $p "*) ;; *) sudo -n kill -9 "$p" 2>/dev/null;; esac; done
-kill $SWAYPID 2>/dev/null; sleep 1; kill -9 $SWAYPID 2>/dev/null
+kill $SWAYPID 2>/dev/null; sleep 1; kill -9 $SWAYPID 2>/dev/null; rm -rf "$RUN"
 [ -n "$color" ] || color=none
 far=${color#*;}; big=${far#*;}; far=${far%%;*}; color=${color%%;*}
 # a tiled view larger than the 400x308 buffer must be filled too: the pixel near its far corner has the same colour

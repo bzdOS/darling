@@ -10,7 +10,10 @@
 # are stopped (by pid).
 SRC="${DARLING_SRC_DIR:?}"; BD="${DARLING_BUILD_DIR:?}"; OD="${DARLING_OVERLAY:?}"; WAIT="${1:-90}"
 export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/usr/sbin"
-SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=font-families-probe-macho; W="$BD/font-families-probe"; mkdir -p "$W"
+SDK_FLAT="$BD/bundle-principal-class-test/sdk-flat"; T=font-families-probe-macho
+W=$(mktemp -d "$BD/font-families-probe.XXXXXX") || { echo "FATAL: mktemp workdir failed for font-families-probe" >&2; exit 1; }
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM HUP
 F0="FONT-FAMILIES-VERDICT fail threw=n count=-1 imp=?"
 [ -d "$SDK_FLAT/usr/include" ] || { echo "$F0 [no flattened SDK]"; exit 1; }
 clang -target x86_64-apple-macos10.12 -nostdinc -D__DARWIN_ONLY_UNIX_CONFORMANCE=1 -O1 -w \
@@ -24,7 +27,7 @@ ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 -syslibroot "$OD" -Z -
 	"$OD/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" "$OD/usr/lib/libobjc.A.dylib" \
 	"$OD/usr/lib/libicucore.A.dylib" "$OD/usr/lib/libSystem.B.dylib" 2>"$W/link.err" \
 	|| { echo "$F0 [build: $(tail -1 "$W/link.err")]"; exit 1; }
-LOG="$BD/font-families-probe.log"
+LOG="$BD/font-families-probe-$(date +%m%d-%H%M%S).log"
 PRE=" $(pgrep -x darlingserver | tr '\n' ' ') "
 . "$(dirname "$0")/probe-launch.sh"
 probe_launch "$LOG" "$WAIT" "FAMILIES-DONE\|FATAL signal\|only defined for abstract class\|uncaught exception" sudo timeout -k 5 "$WAIT" env "DARLING_SRC_DIR=$SRC" "DARLING_OVERLAY=$OD" "DARLING_BUILD_DIR=$BD" "DARLING_TEST_BINARY=$T" \
