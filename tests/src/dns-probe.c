@@ -12,12 +12,16 @@ extern int notify_register_mach_port(const char *, unsigned *, int, int *);
 extern int notify_cancel(int);
 struct kev { unsigned long ident; short filter; unsigned short flags; unsigned fflags; long data; void *udata; };
 extern int kevent(int, const struct kev *, int, struct kev *, int, const void *);
+extern const char *dns_configuration_notify_key(void);
 static int bad;
 static void res(const char *n, int ok, int info) { printf("DNSW %s %s (%d)\n", n, ok ? "ok" : "FAIL", info); fflush(0); if (!ok) bad++; }
 int main(void)
 {
+	const char *key = dns_configuration_notify_key();
+	printf("DNSW key=%s\n", key ? key : "(null)");
+	res("dns_configuration_notify_key", key != 0, 0);
 	int fd = -1, tok = -1;
-	int st = notify_register_file_descriptor("com.apple.system.SystemConfiguration.dns_configuration", &fd, 0, &tok);
+	int st = notify_register_file_descriptor(key ? key : "com.apple.system.SystemConfiguration.dns_configuration", &fd, 0, &tok);
 	res("notify_register_file_descriptor", st == 0 && fd >= 0, st);
 	unsigned port = 0; int tok2 = -1;
 	st = notify_register_mach_port("com.apple.system.SystemConfiguration.dns_configuration", &port, 0, &tok2);

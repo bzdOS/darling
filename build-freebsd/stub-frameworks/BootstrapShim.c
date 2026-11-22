@@ -220,3 +220,16 @@ static int shim_kevent_call(int kq, const struct shim_kevent *cl, int nch, struc
 __attribute__((used)) static const struct interpose_tuple kevent_interposers[] __attribute__((section("__DATA,__interpose"))) = {
 	{ (const void *)shim_kevent_call, (const void *)kevent },
 };
+
+/* dnsinfo: libsystem_configuration's dns_configuration_notify_key() is a stub that returns NULL, and Chrome
+ * (net/dns/dns_config_watcher_mac.cc) gives up on the DNS config watch ("DNS config watch failed to start") when the
+ * key is NULL. The real answer is a fixed key name; the stub's NULL is replaced by it. */
+extern const char *dns_configuration_notify_key(void);
+static const char *shim_dns_configuration_notify_key(void)
+{
+	const char *k = dns_configuration_notify_key();
+	return k ? k : "com.apple.system.SystemConfiguration.dns_configuration";
+}
+__attribute__((used)) static const struct interpose_tuple dnsinfo_interposers[] __attribute__((section("__DATA,__interpose"))) = {
+	{ (const void *)shim_dns_configuration_notify_key, (const void *)dns_configuration_notify_key },
+};
