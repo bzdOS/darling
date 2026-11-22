@@ -1,6 +1,9 @@
 #!/bin/sh
 # chrome-log-triage.sh LOG - one summary line per Chrome run log.
-#   TRIAGE <tag> rc=<wrapper rc> wl_connect=0/1 surface=0/1 toplevel=0/1 last=<...> crash=<image+off sym>
+#   TRIAGE <tag> rc=<wrapper rc> wl_connect=0/1 surface=0/1 toplevel=0/1 last=<...> crash=<image+off sym> \
+#          GUEST-EXIT=<status>/<t>s macho=<n> unimpl=<n> windows=<w>
+# rc    : the harness exit code; 124 is only the harness timeout, never the verdict of the run
+# verdict: GUEST-EXIT status/t, chrome-macho AppKit-stage lines, unimplemented count, SNAP windows (chrome-run-verdict.sh)
 # last  : last non-traplog line, plus the dominant guest syscall numbers of the final 3000 lines
 # crash : first FATAL signal block: signal, rip image+offset (from the in-log fatal stack), top frames
 # Exit 0 on success (log readable).
@@ -22,5 +25,10 @@ if [ -n "$fl" ]; then
 else
   crash="none(no-fatal-handler-output;killed-before-handler)"
 fi
-echo "TRIAGE $tag rc=${rc:-?} wl_connect=$wl surface=$sf toplevel=$tl last=<${lastl}|sys:${sys}> crash=$crash"
+# START_CHROME_TRIAGE_VERDICT
+# Contract: the verdict fields come from the log (chrome-run-verdict.sh) and are reported whatever rc is;
+# a readable log always yields one verdict group, so the triage line never depends on the wrapper rc.
+v=$(sh "$(dirname "$0")/chrome-run-verdict.sh" "$L")
+# END_CHROME_TRIAGE_VERDICT
+echo "TRIAGE $tag rc=${rc:-?} wl_connect=$wl surface=$sf toplevel=$tl last=<${lastl}|sys:${sys}> crash=$crash $v"
 exit 0
