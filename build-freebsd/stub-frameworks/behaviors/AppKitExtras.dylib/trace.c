@@ -60,6 +60,20 @@ static const char *cname(id o)
     return o ? class_getName(object_getClass(o)) : "nil";
 }
 
+
+extern Class objc_getMetaClass(const char *name);
+extern IMP class_getMethodImplementation(Class cls, SEL name);
+static int tr_on;
+static void tr_after_setframe(id self);
+#define MI(o, sel) class_getMethodImplementation(object_getClass(o), S(sel))
+static void tr_arm_window(id w)
+{
+    if (!w || tr_on || strstr(cname(w), "Panel"))
+        return;
+    tr_on = 1;
+    tr("getter trace on after first non-panel window %p %s\n", w, cname(w));
+}
+
 static IMP o_init, o_init_screen, o_mkf, o_of, o_ofr, o_oo, o_ow, o_mkw, o_mmw, o_sf, o_sfa, o_scs, o_close;
 
 static id w_init(id self, SEL cmd, TrRect r, unsigned long style, unsigned long backing, signed char defer)
@@ -69,6 +83,7 @@ static id w_init(id self, SEL cmd, TrRect r, unsigned long style, unsigned long 
        r.y, r.w, r.h, style, backing, defer);
     res = ((id (*)(id, SEL, TrRect, unsigned long, unsigned long, signed char))o_init)(self, cmd, r, style, backing, defer);
     tr("NSWindow %p %s initWithContentRect returned %p\n", self, cname(self), res);
+    tr_arm_window(res);
     return res;
 }
 
@@ -81,6 +96,7 @@ static id w_init_screen(id self, SEL cmd, TrRect r, unsigned long style, unsigne
     res = ((id (*)(id, SEL, TrRect, unsigned long, unsigned long, signed char, id))o_init_screen)(self, cmd, r, style,
                                                                                                    backing, defer, screen);
     tr("NSWindow %p %s initWithContentRect:screen: returned %p\n", self, cname(self), res);
+    tr_arm_window(res);
     return res;
 }
 
@@ -119,6 +135,7 @@ static void w_sf(id self, SEL cmd, TrRect r, signed char display)
     tr("NSWindow %p %s setFrame:{%g,%g,%g,%g} display:%d\n", self, cname(self), r.x, r.y, r.w, r.h, display);
     ((void (*)(id, SEL, TrRect, signed char))o_sf)(self, cmd, r, display);
     tr("NSWindow %p setFrame:display: done\n", self);
+    tr_after_setframe(self);
 }
 
 static void w_sfa(id self, SEL cmd, TrRect r, signed char display, signed char animate)
@@ -127,6 +144,7 @@ static void w_sfa(id self, SEL cmd, TrRect r, signed char display, signed char a
        animate);
     ((void (*)(id, SEL, TrRect, signed char, signed char))o_sfa)(self, cmd, r, display, animate);
     tr("NSWindow %p setFrame:display:animate: done\n", self);
+    tr_after_setframe(self);
 }
 
 static void w_scs(id self, SEL cmd, double w, double h)
@@ -134,6 +152,181 @@ static void w_scs(id self, SEL cmd, double w, double h)
     tr("NSWindow %p %s setContentSize:{%g,%g}\n", self, cname(self), w, h);
     ((void (*)(id, SEL, double, double))o_scs)(self, cmd, w, h);
     tr("NSWindow %p setContentSize: done\n", self);
+}
+
+
+/* ---- getters printed after the first non-panel window init (at most TR_GET_MAX lines) ---- */
+#define TR_GET_MAX 400
+static int tr_on;
+static unsigned long tr_gets;
+static id tr_cv;
+
+static int gl_ok(void)
+{
+    unsigned long n;
+    if (!tr_on)
+        return 0;
+    n = __sync_add_and_fetch(&tr_gets, 1);
+    if (n == TR_GET_MAX + 1)
+        tr("getter trace: %d lines reached, further getters not printed\n", TR_GET_MAX);
+    return n <= TR_GET_MAX;
+}
+#define MK_RECT(r) ((r).w == 0 || (r).h == 0 ? "  <<<EMPTY-RECT>>>" : "")
+#define MK_ID(v) ((v) ? "" : "  <<<NIL>>>")
+#define MK_NUM(v) ((v) ? "" : "  <<<ZERO>>>")
+
+#define G_RECT(fn, CLS, sel)                                                                           \
+    static IMP o_##fn;                                                                                 \
+    static TrRect fn(id self, SEL cmd)                                                                 \
+    {                                                                                                  \
+        TrRect r = ((TrRect(*)(id, SEL))o_##fn)(self, cmd);                                            \
+        if (gl_ok())                                                                                   \
+            tr(CLS " %p " sel " -> {%g,%g,%g,%g}%s\n", self, r.x, r.y, r.w, r.h, MK_RECT(r));         \
+        return r;                                                                                      \
+    }
+#define G_RECT1(fn, CLS, sel)                                                                          \
+    static IMP o_##fn;                                                                                 \
+    static TrRect fn(id self, SEL cmd, TrRect a)                                                       \
+    {                                                                                                  \
+        TrRect r = ((TrRect(*)(id, SEL, TrRect))o_##fn)(self, cmd, a);                                 \
+        if (gl_ok())                                                                                   \
+            tr(CLS " %p " sel "{%g,%g,%g,%g} -> {%g,%g,%g,%g}%s\n", self, a.x, a.y, a.w, a.h, r.x,     \
+               r.y, r.w, r.h, MK_RECT(r));                                                             \
+        return r;                                                                                      \
+    }
+#define G_ID(fn, CLS, sel)                                                                             \
+    static IMP o_##fn;                                                                                 \
+    static id fn(id self, SEL cmd)                                                                     \
+    {                                                                                                  \
+        id r = ((id(*)(id, SEL))o_##fn)(self, cmd);                                                    \
+        if (gl_ok())                                                                                   \
+            tr(CLS " %p " sel " -> %p (%s)%s\n", self, r, cname(r), MK_ID(r));                         \
+        return r;                                                                                      \
+    }
+#define G_UL(fn, CLS, sel)                                                                             \
+    static IMP o_##fn;                                                                                 \
+    static unsigned long fn(id self, SEL cmd)                                                          \
+    {                                                                                                  \
+        unsigned long r = ((unsigned long (*)(id, SEL))o_##fn)(self, cmd);                             \
+        if (gl_ok())                                                                                   \
+            tr(CLS " %p " sel " -> 0x%lx (%lu)%s\n", self, r, r, MK_NUM(r));                           \
+        return r;                                                                                      \
+    }
+#define G_BOOL(fn, CLS, sel)                                                                           \
+    static IMP o_##fn;                                                                                 \
+    static signed char fn(id self, SEL cmd)                                                            \
+    {                                                                                                  \
+        signed char r = ((signed char (*)(id, SEL))o_##fn)(self, cmd);                                 \
+        if (gl_ok())                                                                                   \
+            tr(CLS " %p " sel " -> %d%s\n", self, r, MK_NUM(r));                                       \
+        return r;                                                                                      \
+    }
+#define G_DBL(fn, CLS, sel)                                                                            \
+    static IMP o_##fn;                                                                                 \
+    static double fn(id self, SEL cmd)                                                                 \
+    {                                                                                                  \
+        double r = ((double (*)(id, SEL))o_##fn)(self, cmd);                                           \
+        if (gl_ok())                                                                                   \
+            tr(CLS " %p " sel " -> %g%s\n", self, r, MK_NUM(r != 0.0));                                \
+        return r;                                                                                      \
+    }
+
+G_RECT(g_frame, "NSWindow", "frame")
+G_RECT1(g_crff, "NSWindow", "contentRectForFrameRect:")
+G_RECT1(g_frfc, "NSWindow", "frameRectForContentRect:")
+G_RECT(g_clr, "NSWindow", "contentLayoutRect")
+G_ID(g_screen, "NSWindow", "screen")
+G_DBL(g_wbsf, "NSWindow", "backingScaleFactor")
+G_UL(g_wnum, "NSWindow", "windowNumber")
+G_BOOL(g_vis, "NSWindow", "isVisible")
+G_UL(g_smask, "NSWindow", "styleMask")
+G_UL(g_occ, "NSWindow", "occlusionState")
+G_RECT1(g_c2s, "NSWindow", "convertRectToScreen:")
+G_RECT1(g_c2b, "NSWindow", "convertRectToBacking:")
+G_RECT1(g_cfs, "NSWindow", "convertRectFromScreen:")
+G_RECT(g_sfr, "NSScreen", "frame")
+G_RECT(g_svf, "NSScreen", "visibleFrame")
+G_DBL(g_sbsf, "NSScreen", "backingScaleFactor")
+G_ID(g_screens, "+NSScreen", "screens")
+G_ID(g_mainscr, "+NSScreen", "mainScreen")
+
+/* contentView: also remembers the view so that the NSView getters print for it only */
+static IMP o_cview;
+static id g_cview(id self, SEL cmd)
+{
+    id r = ((id(*)(id, SEL))o_cview)(self, cmd);
+    if (r)
+        tr_cv = r;
+    if (gl_ok())
+        tr("NSWindow %p contentView -> %p (%s)%s\n", self, r, cname(r), MK_ID(r));
+    return r;
+}
+
+/* NSView getters are called all the time: only the window's contentView is printed */
+#define V_FILTER(fn, CLS, sel)                                                                         \
+    static IMP ov_##fn;                                                                                \
+    static TrRect v_##fn(id self, SEL cmd)                                                             \
+    {                                                                                                  \
+        TrRect r = ((TrRect(*)(id, SEL))ov_##fn)(self, cmd);                                           \
+        if (self == tr_cv && gl_ok())                                                                  \
+            tr("NSView %p(contentView) " sel " -> {%g,%g,%g,%g}%s\n", self, r.x, r.y, r.w, r.h,        \
+               MK_RECT(r));                                                                            \
+        return r;                                                                                      \
+    }
+V_FILTER(frame, "NSView", "frame")
+V_FILTER(bounds, "NSView", "bounds")
+static IMP ov_window;
+static id v_window(id self, SEL cmd)
+{
+    id r = ((id(*)(id, SEL))ov_window)(self, cmd);
+    if (self == tr_cv && gl_ok())
+        tr("NSView %p(contentView) window -> %p (%s)%s\n", self, r, cname(r), MK_ID(r));
+    return r;
+}
+
+
+/* after setFrame: query the getters a client is likely to check (they print through their hooks) */
+static void tr_after_setframe(id self)
+{
+    static int busy;
+    id scr;
+    TrRect z = { 0, 0, 100, 100 };
+    if (!tr_on || busy)
+        return;
+    busy = 1;
+    tr("--- post-setFrame probe of %p %s ---\n", self, cname(self));
+    TrRect fr = ((TrRect(*)(id, SEL))MI(self, "frame"))(self, S("frame"));
+#define R0(o, n) ((TrRect(*)(id, SEL))MI(o, n))(o, S(n))
+#define R1(o, n, a) ((TrRect(*)(id, SEL, TrRect))MI(o, n))(o, S(n), a)
+    R1(self, "contentRectForFrameRect:", fr);
+    R1(self, "frameRectForContentRect:", fr);
+    R0(self, "contentLayoutRect");
+    scr = ((id(*)(id, SEL))MI(self, "screen"))(self, S("screen"));
+    ((double (*)(id, SEL))MI(self, "backingScaleFactor"))(self, S("backingScaleFactor"));
+    ((id(*)(id, SEL))MI(self, "contentView"))(self, S("contentView"));
+    ((unsigned long (*)(id, SEL))MI(self, "windowNumber"))(self, S("windowNumber"));
+    ((signed char (*)(id, SEL))MI(self, "isVisible"))(self, S("isVisible"));
+    ((unsigned long (*)(id, SEL))MI(self, "styleMask"))(self, S("styleMask"));
+    ((unsigned long (*)(id, SEL))MI(self, "occlusionState"))(self, S("occlusionState"));
+    R1(self, "convertRectToScreen:", z);
+    R1(self, "convertRectToBacking:", z);
+    if (tr_cv) {
+        R0(tr_cv, "frame");
+        R0(tr_cv, "bounds");
+        ((id(*)(id, SEL))MI(tr_cv, "window"))(tr_cv, S("window"));
+    }
+    {
+        id ns = (id)objc_getClass("NSScreen");
+        ((id(*)(id, SEL))MI(ns, "screens"))(ns, S("screens"));
+        ((id(*)(id, SEL))MI(ns, "mainScreen"))(ns, S("mainScreen"));
+    }
+    if (scr) {
+        R0(scr, "frame");
+        R0(scr, "visibleFrame");
+        ((double (*)(id, SEL))MI(scr, "backingScaleFactor"))(scr, S("backingScaleFactor"));
+    }
+    tr("--- end probe ---\n");
+    busy = 0;
 }
 
 static void hook_sel(Class c, const char *sel, IMP repl, IMP *orig)
@@ -168,6 +361,36 @@ static void try_window(void)
     hook_sel(c, "setFrame:display:animate:", (IMP)w_sfa, &o_sfa);
     hook_sel(c, "setContentSize:", (IMP)w_scs, &o_scs);
     hook_sel(c, "close", (IMP)w_close, &o_close);
+    hook_sel(c, "frame", (IMP)g_frame, &o_g_frame);
+    hook_sel(c, "contentRectForFrameRect:", (IMP)g_crff, &o_g_crff);
+    hook_sel(c, "frameRectForContentRect:", (IMP)g_frfc, &o_g_frfc);
+    hook_sel(c, "contentLayoutRect", (IMP)g_clr, &o_g_clr);
+    hook_sel(c, "screen", (IMP)g_screen, &o_g_screen);
+    hook_sel(c, "backingScaleFactor", (IMP)g_wbsf, &o_g_wbsf);
+    hook_sel(c, "contentView", (IMP)g_cview, &o_cview);
+    hook_sel(c, "windowNumber", (IMP)g_wnum, &o_g_wnum);
+    hook_sel(c, "isVisible", (IMP)g_vis, &o_g_vis);
+    hook_sel(c, "styleMask", (IMP)g_smask, &o_g_smask);
+    hook_sel(c, "occlusionState", (IMP)g_occ, &o_g_occ);
+    hook_sel(c, "convertRectToScreen:", (IMP)g_c2s, &o_g_c2s);
+    hook_sel(c, "convertRectToBacking:", (IMP)g_c2b, &o_g_c2b);
+    hook_sel(c, "convertRectFromScreen:", (IMP)g_cfs, &o_g_cfs);
+    c = objc_getClass("NSScreen");
+    if (c) {
+        hook_sel(c, "frame", (IMP)g_sfr, &o_g_sfr);
+        hook_sel(c, "visibleFrame", (IMP)g_svf, &o_g_svf);
+        hook_sel(c, "backingScaleFactor", (IMP)g_sbsf, &o_g_sbsf);
+        hook_sel(objc_getMetaClass("NSScreen"), "screens", (IMP)g_screens, &o_g_screens);
+        hook_sel(objc_getMetaClass("NSScreen"), "mainScreen", (IMP)g_mainscr, &o_g_mainscr);
+    } else
+        tr("NSScreen class not found\n");
+    c = objc_getClass("NSView");
+    if (c) {
+        hook_sel(c, "frame", (IMP)v_frame, &ov_frame);
+        hook_sel(c, "bounds", (IMP)v_bounds, &ov_bounds);
+        hook_sel(c, "window", (IMP)v_window, &ov_window);
+    }
+    c = objc_getClass("NSWindow");
     tr_win_done = 1;
     tr("NSWindow hooks installed\n");
 }
