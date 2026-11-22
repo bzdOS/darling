@@ -61,6 +61,13 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 					echo "-- procstat -kk"; /usr/local/bin/sudo -n procstat -kk "$gp"
 					echo "-- ps -H"; ps -H -o pid,tid,state,wchan,comm -p "$gp"
 				done
+				# the darlingserver itself: where its threads sit (a hung main loop) and which sockets it holds (the listener)
+				for sp in $(pgrep -f "dserver/darlingserver"); do
+					echo "== darlingserver pid $sp"; ps -o pid,state,wchan,command -p "$sp"
+					echo "-- procstat -t"; /usr/local/bin/sudo -n procstat -t "$sp"
+					echo "-- procstat -kk"; /usr/local/bin/sudo -n procstat -kk "$sp"
+					echo "-- fstat"; /usr/local/bin/sudo -n fstat -p "$sp" | grep -i 'sock\|pipe\| 0 \| 1 \| 2 ' | head -40
+				done
 			} > "$SNAP" 2>&1
 		fi
 	done ) &
