@@ -55,7 +55,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		[ -f "$LOG" ] || continue
 		# the server process disappearing while the guest is still alive (the -111 failures: clients get ECONNREFUSED because the
 		# server is gone): note it at once, with the listener path, before the timeout kill tears everything down
-		[ -n "$_sp" ] || _sp=$(pgrep -f "dserver/darlingserver" | head -1)
+		[ -n "$_sp" ] || _sp=$(sed -n 's/^\[launch\] DSERVER pid=\([0-9]*\).*/\1/p' "$LOG" | head -1)
 		if [ -n "$_sp" ] && [ ! -e "$GONE" ] && ! ps -p "$_sp" >/dev/null 2>&1 && [ -n "$(pgrep -f "$PB")" ]; then
 			{
 				echo "# darlingserver pid $_sp is gone while the guest is alive, at $(date +%s)"
@@ -75,11 +75,12 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 					echo "-- ps -H"; ps -H -o pid,tid,state,wchan,comm -p "$gp"
 				done
 				# the darlingserver itself: where its threads sit (a hung main loop) and which sockets it holds (the listener)
-				_sps=$(pgrep -f "dserver/darlingserver")
+				_sps=$(sed -n 's/^\[launch\] DSERVER pid=\([0-9]*\).*/\1/p' "$LOG" | head -1)
+				[ -n "$_sps" ] && ! ps -p "$_sps" >/dev/null 2>&1 && _sps=""
 				[ -n "$_sps" ] || echo "== darlingserver process not found (exited before the snapshot)"
 				_sock=$(sed -n 's/^darlingserver socket ready: //p' "$LOG" | head -1)
 				[ -n "$_sock" ] && { echo "-- listener path $_sock"; ls -l "$_sock" 2>&1; }
-				for sp in $(pgrep -f "dserver/darlingserver"); do
+				for sp in $_sps; do
 					echo "== darlingserver pid $sp"; ps -o pid,state,wchan,command -p "$sp"
 					echo "-- procstat -t"; /usr/local/bin/sudo -n procstat -t "$sp"
 					echo "-- procstat -kk"; /usr/local/bin/sudo -n procstat -kk "$sp"
