@@ -31,6 +31,11 @@ PREFLIGHT_DISK_MSW_STOP = 200
 # full-rate DIAG resume ring in darlingserver (entries of 32 bytes; 0 = off). 200000 = 6.4 MB, about 18 s of the
 # ~11000/s single-tid resume storm seen in fix52. Saved per run as <run>-diag-ring.log.
 DSERVER_DIAG_RING = 200000
+# Diagnostics only, off by default (set them in the server / probe environment, not here):
+#   DSERVER_SIGWATCHDOG=1   darlingserver re-sends a thread_suspend signal that did not reach the guest handler (25/100/400 ms backoff);
+#                           the probe flag is PROBE_SIGWATCHDOG=1. The memory-access shim bug it covered is fixed, so the default is no watchdog.
+#   DARLING_SIG65_COUNT=1   mldr prints the entries of the signal 65/66 trampoline and, at process exit, the Step 56 SIGILL duplicate count
+#                           ([sigill-dup] dups=N, summarized by the probe as SIGILL-DUP=N).
 
 [keepone]
 # top-level build/ file globs that are never candidates

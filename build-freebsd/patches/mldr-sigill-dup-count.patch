@@ -1,0 +1,45 @@
+diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
+--- a/src/startup/mldr/freebsd_syscall_trap.c
++++ b/src/startup/mldr/freebsd_syscall_trap.c
+@@ -4342,6 +4342,31 @@
+ static struct mldr_h1rec mldr_h1[64];
+ static unsigned long mldr_h1_seq;
+ 
++/* Step 56 duplicates: SIGILL deliveries of a trap that was already emulated (resumed without touching the context). The count is written at
++ * process exit with write(2), without stdio, when DARLING_SIG65_COUNT is set (the same switch as the signal 65 trampoline counter); the
++ * probe turns it into the SIGILL-DUP=N item of its summary. mldr_exit_report_hook is called by mldr_sig65_report (mldr-sig65-unblock-count.patch). */
++volatile unsigned long mldr_sigill_dups = 0;
++void
++mldr_exit_report_hook(void)
++{
++    char buf[64];
++    char *p = buf;
++    char *e;
++    char tmp[24];
++    char *lo;
++    static const char tag[] = "[sigill-dup] dups=";
++    if (getenv("DARLING_SIG65_COUNT") == NULL)
++        return;
++    memcpy(p, tag, sizeof(tag) - 1);
++    p += sizeof(tag) - 1;
++    e = tmp + sizeof(tmp);
++    lo = mldr_fmt_dec(e, (long)__atomic_load_n(&mldr_sigill_dups, __ATOMIC_RELAXED));
++    while (lo < e)
++        *p++ = *lo++;
++    *p++ = '\n';
++    (void)!write(2, buf, (size_t)(p - buf));
++}
++
+ static void
+ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
+ {
+@@ -4376,8 +4401,7 @@
+     if (info->si_addr != NULL && (uintptr_t)info->si_addr != (uintptr_t)mc->mc_rip) {
+         for (int i = 0; i < _mldr_ud2_site_count; i++) {
+             if (_mldr_ud2_sites[i] == (uintptr_t)info->si_addr) {
+-                static volatile unsigned long dups;
+-                unsigned long n = ++dups;
++                unsigned long n = __atomic_add_fetch(&mldr_sigill_dups, 1, __ATOMIC_RELAXED);
+                 if (mldr_trap_log_enabled)
+                     mldr_tlogx("SIGILL DUPLICATE-RESUME", pc, (long)n);
+                 return;

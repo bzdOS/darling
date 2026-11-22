@@ -28,6 +28,8 @@ P=${1:?}; N=${2:?}; T=${3:-${PROBE_TIMEOUT:-240}}; SU=${4:-3000}; SP=${5:-300}; 
 PB=${PROBE_BINARY:-sig-reentry-probe-macho}; SL=${PROBE_SERVER_LOG:-$CHROME_SR_SERVER_LOG}
 # The suspend-signal watchdog of the server is off by default; PROBE_SIGWATCHDOG=1 turns it on (DSERVER_SIGWATCHDOG=1 in the server environment).
 [ -n "$PROBE_SIGWATCHDOG" ] && PROBE_EXTRA_ENV="$PROBE_EXTRA_ENV DSERVER_SIGWATCHDOG=1"
+# counters of mldr (signal 65 trampoline entries, Step 56 SIGILL duplicates) are printed when DARLING_SIG65_COUNT is set; the probe sets it unless PROBE_NO_COUNTERS=1
+[ -z "$PROBE_NO_COUNTERS" ] && PROBE_EXTRA_ENV="$PROBE_EXTRA_ENV DARLING_SIG65_COUNT=1"
 # The diag ring is always on with at least 4M entries (a hang that lasts tens of seconds wraps a smaller ring and loses the
 # start of the stuck thread: kind D, planck-1517). An explicit DSERVER_DIAG_RING in PROBE_EXTRA_ENV below 4194304 is raised.
 case " $PROBE_EXTRA_ENV " in
@@ -162,6 +164,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		echo "$P-$i rc=$rc ${d}s/${T}s $v [${sig:-none}]$ev"
 		grep -a "^RING-COUNTS" "$LOG" | head -1
 		grep -a "^SUSPEND-BALANCE" "$LOG" | head -1
+		echo "SIGILL-DUP=$(sed -n 's/^\[sigill-dup\] dups=//p' "$LOG" | tail -1)"
 		grep -a "^SIG-CYCLES" "$LOG" | head -1
 		grep -a "^MEMACCESS-" "$LOG" | head -2
 		grep -a "^PUSH-REPLY-ACK" "$LOG" | head -1
