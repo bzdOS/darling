@@ -340,16 +340,43 @@ done
 if [ "$sd" = 0 ]; then echo "STAGED-DRIFT pass files=0"; else echo "STAGED-DRIFT fail files=$sd in:$sdf"; echo "STAGECHK FAIL staged-drift=FAIL"; stage_fail; fi
 # darling.toml vs its generated files (gen-from-schema.py --check): one line SCHEMA-DRIFT pass|FAIL; FAIL fails the gate.
 python3 "$HERE/gen-from-schema.py" --check --out "$DARLING_BUILD_DIR" || { echo "STAGECHK FAIL schema-drift=FAIL"; stage_fail; }
-# One tree, one final build, nothing grows: keep-one-check.sh --clean-sockets first removes stale mldr sockets (dead pid, unheld, >5 min; line KEEP-ONE sockets ...), the check itself is read-only. Reported as keepone=<verdict>;
-# it fails the gate only with STAGE_GATE_KEEPONE=1 (default 1 in the full gate, STAGE_GATE_FULL=1; set STAGE_GATE_KEEPONE=0 to opt out; line: KEEP-ONE verdict=pass|fail ...; --list names the candidates).
+# One tree, one final build, nothing grows: keep-one-check.sh --clean-sockets first removes stale mldr sockets (dead pid, unheld, >5 min; line KEEP-ONE sockets ...), the check itself is read-only.
+# keepone is reported as exactly three outcomes (decision 22.11 19:14; the gate never applies, only --clean-sockets):
+#   pass             KEEP-ONE verdict=pass.
+#   fail-apply-ok    the check fails, total <= max, and every candidate is a path --apply is allowed to delete
+#                    (keep-one-check.sh --apply-check rc 0). A previous run's leftovers, not a broken tree: the gate
+#                    goes on and exits 0. NOT a silent pass: the line says keepone=fail-apply-ok.
+#   FAIL             total > max, or a candidate --apply would refuse (--apply-check rc 4). Only this one is red and
+#                    fails the gate.
+# STAGE_GATE_KEEPONE=0 opts out of the verdict entirely (keepone=skip); the default in the full gate is 1.
 ko=skip
 if [ -f "$HERE/keep-one-check.sh" ]; then
 	sh "$HERE/keep-one-check.sh" --clean-sockets 2>&1 | tail -1
 	kol=$(sh "$HERE/keep-one-check.sh" 2>/dev/null | tail -1)
-	case "$kol" in "KEEP-ONE verdict=pass"*) ko=pass;; *) ko=fail;; esac
-	if [ "$ko" = fail ] && [ "${STAGE_GATE_KEEPONE:-0}" = 1 ]; then
-		echo "STAGECHK FAIL keepone=FAIL ($kol)"; stage_fail
-	fi
+	# start keepone_verdict
+	# START_KEEPONE_VERDICT
+	# Contract: kol is the one KEEP-ONE verdict line; sets ko=pass|fail-apply-ok|FAIL and prints the STAGECHK FAIL line
+	# only for FAIL, so an unremovable or over-limit tree is the one red outcome.
+	ko_out() { # verdict-line
+		case "$1" in "KEEP-ONE verdict=pass"*) ko=pass; return 0;; esac
+		case "$1" in
+		"KEEP-ONE verdict=fail"*)
+			# over=1 is the check's own total>max boolean (read it, do not re-derive from the rounded "12.9G")
+			case "$1" in *" over=1") ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; total exceeds max, cleanup cannot fix it)"; return 0;; esac
+			case "$1" in *" over=0") ;; *) ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; no over= field)"; return 0;; esac
+			if sh "$HERE/keep-one-check.sh" --apply-check >/dev/null 2>&1; then
+				ko=fail-apply-ok
+			else
+				ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; --apply-check refused a candidate, cleanup cannot remove it)"
+			fi
+			;;
+		*) ko=FAIL; echo "STAGECHK FAIL keepone=FAIL ($1; no KEEP-ONE verdict line)";;
+		esac
+	}
+	# END_KEEPONE_VERDICT
+	ko_out "$kol"
+	if [ "$ko" = FAIL ] && [ "${STAGE_GATE_KEEPONE:-0}" = 1 ]; then stage_fail; fi
+	if [ "$ko" = FAIL ] && [ "${STAGE_GATE_KEEPONE:-0}" != 1 ]; then ko="FAIL(skip)"; fi
 fi
 # Restage group (own staging each, see restage_group): the shared staging is over, the probes get their default refresh back.
 unset STAGE_GATE_KEEP_STAGED

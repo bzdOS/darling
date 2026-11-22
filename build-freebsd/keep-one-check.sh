@@ -7,6 +7,11 @@
 #                                    realpath is inside <root>/build or <root>/backup; any other path: refuse, delete nothing, rc 4.
 #                                    Skipped (rc 3, "KEEP-ONE apply skipped: ...") while <root>/build/.darling-run.lock is held
 #                                    or a darlingserver/mldr process is alive. rc 2 on bad usage.
+#        keep-one-check.sh --apply-check  validates the --list paths with the same rules as --apply but deletes nothing;
+#                                    prints "KEEP-ONE apply-check ok paths=N" (rc 0) or "... refused n=K" (rc 4). For a gate
+#                                    that must never apply: it tells "cleanup possible" from "cleanup refused" without doing it.
+# The candidate set does not depend on the caller's CWD: every keep-list pattern is matched by case, never by the shell's
+# own pathname expansion (from build-freebsd/ the globs hit the probe sources and 12 phantom dirs appeared, 22.11).
 # Env: KEEPONE_ROOT (default: parent of DARLING_BUILD_DIR; one of the two is required)  KEEPONE_MAX_GB (default 14)
 #      KEEPONE_ALLOW  extra build/ dir names (space separated globs) that are not experiment dirs
 #      KEEPONE_ALLOW_FILES  extra top-level build/ file globs never candidates; a glob matching suspend-<kind>-<stamp>.log or .dump
@@ -46,7 +51,7 @@ FOREIGN="${KEEPONE_FOREIGN:-alt2-r}"; AGE="${KEEPONE_MIN_AGE_MIN:-120}"
 MODE=check; CLEAN=0
 for _a in "$@"; do
 	case "$_a" in
-	--list) MODE=list;; --apply) MODE=apply;; --clean-sockets) CLEAN=1;;
+	--list) MODE=list;; --apply) MODE=apply;; --apply-check) MODE=applycheck;; --clean-sockets) CLEAN=1;;
 	*) echo "KEEP-ONE verdict=fail unknown-arg $_a"; exit 2;;
 	esac
 done
@@ -260,38 +265,44 @@ if [ -d "$B" ]; then
 fi
 
 # ---- 3. experiment dirs ----
+# KEEP_DIRS is a list of patterns matched by case, so pathname expansion must be off while it is split: from
+# build-freebsd/ the patterns hit the probe sources (font-metrics-probe* -> font-metrics-probe.sh), the literal patterns
+# vanished and 12 keep-listed build/ dirs were reported as experiment dirs (22.11).
 if [ -d "$B" ]; then
 	for d in $(cd "$B" && ls -p -A | grep / | tr -d /); do
 		keep=0
-		for g in $KEEP_DIRS; do
-			case "$d" in $g) keep=1; break;; esac
-		done
+		set -f; for g in $KEEP_DIRS; do case "$d" in $g) keep=1; break;; esac; done; set +f
 		[ $keep = 1 ] && continue
 		printf '%s\tdir\t%s\n' "$(( $(timeout 60 du -sk "$B/./$d" 2>/dev/null | cut -f1) * 1024 ))" "$B/$d"
 	done >>"$T"
 fi
 
 # ---- 5. stray build dirs outside <root>/build ----
+# STRAY is a list of directory paths: globbing is off while it is split, and only the per-entry listing below globs.
 STRAY="${KEEPONE_STRAY_BUILD-/var/darling-build /tmp/darling-build}"
 RBX=$(realpath "$B" 2>/dev/null)
-for sd in $STRAY; do
+set -f; for sd in $STRAY; do set +f
 	[ -d "$sd" ] || continue
 	[ "$(realpath "$sd")" = "$RBX" ] && continue
 	[ -n "$(find "$sd" -mmin -10 -print 2>/dev/null | head -1)" ] && continue
 	for e in $(cd "$sd" && ls -A); do
 		printf '%s\tstray\t%s\n' "$(( $(timeout 60 du -sk "$sd/$e" 2>/dev/null | cut -f1) * 1024 ))" "$sd/$e"
 	done >>"$T"
-done
+	set -f
+done; set +f
 
 # ---- 6. scratch files of a diagnosis ----
+# SCRB is a pattern list applied inside $B. The shell must not expand the patterns against the caller's CWD before the
+# loop (the same trap as KEEP_DIRS: from build-freebsd/ fix*.py hit real files); each pattern is expanded only as "$B"/<pattern>.
 SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py *-series-[0-9]*.out}"
 SCRT="${KEEPONE_SCRATCH_TMP-/tmp/fixcond-*.py /tmp/claude-*.txt}"
-for g in $SCRB; do
+set -f; for g in $SCRB; do set +f
 	for f in "$B"/$g; do
 		[ -f "$f" ] || continue
 		printf '%s\tscratch\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
 	done
-done >>"$T"
+	set -f
+done >>"$T"; set +f
 for f in $SCRT; do
 	[ -f "$f" ] || continue
 	printf '%s\ttmpscratch\t%s\n' "$(stat -f %z "$f" 2>/dev/null || echo 0)" "$f"
@@ -335,47 +346,67 @@ fi
 
 if [ "$MODE" = list ]; then cut -f3 "$T"; exit 0; fi
 
-# ---- --apply: delete exactly what --list prints, nothing outside <root>/build and <root>/backup ----
-if [ "$MODE" = apply ]; then
-	for _p in darlingserver mldr; do
-		pgrep -x "$_p" >/dev/null 2>&1 && { echo "KEEP-ONE apply skipped: live process $_p"; exit 3; }
-	done
+# START_APPLY_VALIDATE
+# Contract: validate_apply sets APPLY_BAD to the number of --list paths that --apply must refuse, and prints one
+# "KEEP-ONE apply refused: ..." line per such path to stderr. It deletes nothing; --apply and --apply-check share it so
+# "may be deleted" means exactly the same thing in both.
+validate_apply() {
 	RB=$(realpath "$B" 2>/dev/null); RK=$(realpath "$BK" 2>/dev/null)
-	bad=0
+	APPLY_BAD=0
 	while IFS="$(printf '\t')" read -r _sz _ty _path; do
 		_rp=$(realpath "$_path" 2>/dev/null)
 		if [ "$_ty" = tmpscratch ]; then
 			_ok=0; set -f; for g in $SCRT; do set +f; case "$_rp" in $g) _ok=1;; esac; set -f; done; set +f
 			[ $_ok = 1 ] && [ ! -L "$_path" ] && continue
-			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, not a scratch file" >&2; continue
+			APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, not a scratch file" >&2; continue
 		fi
 		if [ "$_ty" = srcorig ]; then
 			_rs=$(realpath "$SRCT" 2>/dev/null)
 			case "$_rp" in "$_rs"/*.orig) if [ -n "$_rs" ] && [ ! -L "$_path" ] && ! git -C "$(dirname "$_rp")" ls-files --error-unmatch "$(basename "$_rp")" >/dev/null 2>&1; then continue; fi;; esac
-			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked .orig under $SRCT" >&2; continue
+			APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked .orig under $SRCT" >&2; continue
 		fi
 		if [ "$_ty" = srctxt ]; then
 			_rs=$(realpath "$SRCT" 2>/dev/null); _n=$(basename "$_rp")
 			case "$_rp" in "$_rs"/*.txt) if [ -n "$_rs" ] && [ "$(dirname "$_rp")" = "$_rs" ] && [ ! -L "$_path" ] && case " $KEEPONE_SRC_TXT_KEEP " in *" $_n "*) false;; *) true;; esac && [ -n "$(git -C "$_rs" status --porcelain -- "$_n" 2>/dev/null | grep '^??')" ]; then continue; fi;; esac
-			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked top-level .txt in $SRCT" >&2; continue
+			APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is not an untracked top-level .txt in $SRCT" >&2; continue
 		fi
 		if [ "$_ty" = patchstray ]; then
 			_rd=$(realpath "$PD" 2>/dev/null); _n=$(basename "$_rp")
 			case "$_rp" in "$_rd"/*) if [ -n "$_rd" ] && [ "$(dirname "$_rp")" = "$_rd" ] && [ ! -L "$_path" ] && [ "$_n" != series ] && ! grep -v "^#" "$_rd/series" | grep -qwF "$_n" && ! git -C "$_rd" ls-files --error-unmatch "$_n" >/dev/null 2>&1; then continue; fi;; esac
-			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is listed in series, tracked, or outside $PD" >&2; continue
+			APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path ($_rp) is listed in series, tracked, or outside $PD" >&2; continue
 		fi
 		if [ "$_ty" = stray ]; then
 			_ok=0; for sd in $STRAY; do _rs=$(realpath "$sd" 2>/dev/null); case "$_rp" in "$_rs"/*) [ -n "$_rs" ] && _ok=1;; esac; done
 			[ $_ok = 1 ] && continue
-			bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, outside the stray build dirs" >&2; continue
+			APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, outside the stray build dirs" >&2; continue
 		fi
 		case "$_rp" in
-		""|"$RB"|"$RK") bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path (realpath '${_rp}')" >&2;;
+		""|"$RB"|"$RK") APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path (realpath '${_rp}')" >&2;;
 		"$RB"/*|"$RK"/*) ;;
-		*) bad=$((bad+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, outside $RB and $RK" >&2;;
+		*) APPLY_BAD=$((APPLY_BAD+1)); echo "KEEP-ONE apply refused: $_path resolves to $_rp, outside $RB and $RK" >&2;;
 		esac
 	done <"$T"
-	if [ $bad -gt 0 ]; then echo "KEEP-ONE apply refused: $bad path(s) outside allowed prefixes, nothing deleted"; exit 4; fi
+}
+# END_APPLY_VALIDATE
+
+# START_APPLY_CHECK
+# Contract: --apply-check deletes nothing and prints one line: "KEEP-ONE apply-check ok paths=N" with rc 0 when every
+# listed candidate is a path --apply is allowed to delete, or "KEEP-ONE apply-check refused n=K paths=N" with rc 4.
+if [ "$MODE" = applycheck ]; then
+	validate_apply
+	_nc=$(awk 'END{print NR+0}' "$T")
+	if [ $APPLY_BAD -gt 0 ]; then echo "KEEP-ONE apply-check refused n=$APPLY_BAD paths=$_nc"; exit 4; fi
+	echo "KEEP-ONE apply-check ok paths=$_nc"; exit 0
+fi
+# END_APPLY_CHECK
+
+# ---- --apply: delete exactly what --list prints, nothing outside <root>/build and <root>/backup ----
+if [ "$MODE" = apply ]; then
+	for _p in darlingserver mldr; do
+		pgrep -x "$_p" >/dev/null 2>&1 && { echo "KEEP-ONE apply skipped: live process $_p"; exit 3; }
+	done
+	validate_apply
+	if [ $APPLY_BAD -gt 0 ]; then echo "KEEP-ONE apply refused: $APPLY_BAD path(s) outside allowed prefixes, nothing deleted"; exit 4; fi
 	fail=0; n=0
 	while IFS="$(printf '\t')" read -r _sz _ty _path; do
 		rm -rf "$_path" 2>/dev/null || sudo -n rm -rf "$_path" 2>/dev/null
@@ -394,5 +425,5 @@ np=$(grep -c "	probe	" "$T"); nsb=$(grep -c "	stray	" "$T"); nsc=$(grep -c -e "s
 cb=$(awk -F'\t' '$2!="probe" {s+=$1} END{print s+0}' "$T")
 gb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1048576}')
 v=pass; { [ "$ns" -gt 0 ] || [ "$nl" -gt 0 ] || [ "$nd" -gt 0 ] || [ "$nb" -gt 0 ] || [ "$nsb" -gt 0 ] || [ "$nsc" -gt 0 ] || [ $over = 1 ]; } && v=fail
-echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np stray_builds=$nsb scratch_files=$nsc"
+echo "KEEP-ONE verdict=$v series=${KEEP1:-none},${KEEP2:-none} stale_logs=$nl experiment_dirs=$nd backup_dups=$nb stale_sockets=$ns candidate_bytes=$cb total=${gb}G max=${MAXG}G probe_logs=$np stray_builds=$nsb scratch_files=$nsc over=$over"
 [ $v = pass ]
