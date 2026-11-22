@@ -129,6 +129,8 @@ extern int notify_register_dispatch(const char *, int *, void *, void *);
 extern int notify_register_check(const char *, int *);
 extern int notify_register_plain(const char *, int *);
 extern int notify_register_signal(const char *, int, int *);
+extern int notify_register_file_descriptor(const char *, int *, int, int *);
+extern int notify_register_mach_port(const char *, mach_port_t *, int, int *);
 extern int notify_check(int, int *);
 extern int notify_get_state(int, unsigned long long *);
 extern int notify_set_state(int, unsigned long long);
@@ -152,6 +154,31 @@ static int shim_notify_register_plain(const char *n, int *out)
 { int r = notify_register_plain(n, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
 static int shim_notify_register_signal(const char *n, int sig, int *out)
 { int r = notify_register_signal(n, sig, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+#define NOTIFY_REUSE 1
+/* fd flavour: a pipe's read end stands for the notification descriptor (nothing is ever written to it). */
+static int shim_notify_register_file_descriptor(const char *n, int *fd, int flags, int *out)
+{
+	int r = notify_register_file_descriptor(n, fd, flags, out);
+	if (r != NTFY_NOT_FOUND || !n || !fd || !out) return r;
+	if (!(flags & NOTIFY_REUSE)) {
+		int p[2];
+		if (pipe(p)) return r;
+		*fd = p[0];
+	}
+	return fake_register(out);
+}
+static int shim_notify_register_mach_port(const char *n, mach_port_t *port, int flags, int *out)
+{
+	int r = notify_register_mach_port(n, port, flags, out);
+	if (r != NTFY_NOT_FOUND || !n || !port || !out) return r;
+	if (!(flags & NOTIFY_REUSE)) {
+		mach_port_t p;
+		if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p)) return r;
+		mach_port_insert_right(mach_task_self(), p, p, MACH_MSG_TYPE_MAKE_SEND);
+		*port = p;
+	}
+	return fake_register(out);
+}
 static int shim_notify_check(int t, int *c)
 { if (!IS_FAKE_TOKEN(t)) return notify_check(t, c); if (!c) return NTFY_NULL_INPUT; *c = 0; return NTFY_OK; }
 static int shim_notify_get_state(int t, unsigned long long *s)
@@ -170,5 +197,26 @@ __attribute__((used)) static const struct interpose_tuple notify_interposers[] _
 	INTERPOSE(notify_register_dispatch), INTERPOSE(notify_register_check), INTERPOSE(notify_register_plain),
 	INTERPOSE(notify_register_signal), INTERPOSE(notify_check), INTERPOSE(notify_get_state), INTERPOSE(notify_set_state),
 	INTERPOSE(notify_cancel), INTERPOSE(notify_suspend), INTERPOSE(notify_resume), INTERPOSE(notify_is_valid_token),
-	INTERPOSE(notify_post),
+	INTERPOSE(notify_post), INTERPOSE(notify_register_file_descriptor), INTERPOSE(notify_register_mach_port),
+};
+
+/* kevent(2) without vnode watches. The guest kqueue implements EVFILT_VNODE through Linux inotify, which the host
+ * does not have behind the syscall layer, so registering a vnode watch fails (Chrome: DNS hosts watch failed to start,
+ * a kqueue watch of /etc/hosts). The real registration is tried first; a vnode add or delete that the real call
+ * refuses is accepted instead, as a watch on which nothing ever happens. Every other change goes to the real call. */
+struct shim_kevent { unsigned long ident; short filter; unsigned short flags; unsigned fflags; long data; void *udata; };
+extern int kevent(int, const struct shim_kevent *, int, struct shim_kevent *, int, const void *);
+#define SHIM_EVFILT_VNODE (-4)
+static int shim_kevent_call(int kq, const struct shim_kevent *cl, int nch, struct shim_kevent *el, int nev, const void *ts)
+{
+	int i, any = 0;
+	for (i = 0; i < nch; i++) if (cl[i].filter == SHIM_EVFILT_VNODE) any = 1;
+	if (!any) return kevent(kq, cl, nch, el, nev, ts);
+	for (i = 0; i < nch; i++) {
+		if (kevent(kq, &cl[i], 1, 0, 0, 0) < 0 && cl[i].filter != SHIM_EVFILT_VNODE) return -1;
+	}
+	return nev > 0 ? kevent(kq, 0, 0, el, nev, ts) : 0;
+}
+__attribute__((used)) static const struct interpose_tuple kevent_interposers[] __attribute__((section("__DATA,__interpose"))) = {
+	{ (const void *)shim_kevent_call, (const void *)kevent },
 };
