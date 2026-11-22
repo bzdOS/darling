@@ -35,7 +35,7 @@ if [ "$1" = "--series" ]; then
 		esac
 	done <"$_ef"
 	_rf="${DARLING_BUILD_DIR:?}/run-$_sn.env"
-	[ -f "$_rf" ] || { echo "SERIES-ABORT reason=series no $_rf (run gen-from-schema.py)"; exit 1; }
+	[ -f "$_rf" ] || { echo "SERIES-ABORT reason=series no $_rf (run gen-from-schema.py --in-tree)"; exit 1; }
 	SERIES_PREFIX=; SERIES_RUNS=; SERIES_TIMEOUT=
 	while IFS= read -r _l; do
 		_k=${_l%%=*}; _v=${_l#*=}; _v=${_v#\'}; _v=${_v%\'}

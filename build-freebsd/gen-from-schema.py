@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """gen-from-schema.py - darling.toml -> generated env files (stdlib only, python >= 3.11 for tomllib).
 
-usage: gen-from-schema.py [--out DIR]           validate darling.toml against darling.schema.json, write the files
+usage: gen-from-schema.py [--out DIR]           validate darling.toml against darling.schema.json, write ALL files into DIR only
+       gen-from-schema.py --in-tree [--out DIR] same, but stub_data_names.py goes into the source tree (next to this
+                                                script, overwrites the tracked file; warning on stderr), not into DIR
        gen-from-schema.py --check [--out DIR]   one line: SCHEMA-DRIFT pass files=N | SCHEMA-DRIFT FAIL <why>; exit 1 on FAIL
        gen-from-schema.py --emit keepone        print keepone.env to stdout (keep-one-check.sh fallback when not generated)
 Files (in DIR, default: env DARLING_BUILD_DIR, else [env].DARLING_BUILD_DIR of the toml), and stub_data_names.py
-(from [stubs], next to this script, committed; stub_data_rules.DATA_NAMES comes from it):
+(from [stubs]; tracked next to this script, stub_data_rules.DATA_NAMES comes from it). Without --in-tree it is written
+into DIR like the others; --check always compares the tree copy against it (read-only):
   darling.env, keepone.env, run-<NAME>.env per [run.series.<NAME>].
 Every file carries the sha256 of darling.toml, so an edit of the toml without regeneration is drift, as is a missing,
 changed or orphaned (run-*.env without a toml entry) file. The validator is a minimal JSON Schema subset:
@@ -121,12 +124,14 @@ def render_tree(data, sha):
 
 
 def main(argv):
-    mode, outdir, emit = "gen", None, None
+    mode, outdir, emit, in_tree = "gen", None, None, False
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--check":
             mode = "check"
+        elif a == "--in-tree":
+            in_tree = True
         elif a == "--out" and i + 1 < len(argv):
             i += 1; outdir = argv[i]
         elif a == "--emit" and i + 1 < len(argv) and argv[i + 1] == "keepone":
@@ -150,7 +155,8 @@ def main(argv):
         sys.stdout.write(files["keepone.env"]); return 0
     outdir = outdir or os.environ.get("DARLING_BUILD_DIR") or data["env"]["DARLING_BUILD_DIR"]
     paths = {os.path.join(outdir, n): t for n, t in files.items()}
-    paths.update({os.path.join(HERE, n): t for n, t in tree.items()})
+    tdir = HERE if (in_tree or mode == "check") else outdir
+    paths.update({os.path.join(tdir, n): t for n, t in tree.items()})
     if mode == "check":
         bad = []
         for p, txt in paths.items():
@@ -163,14 +169,17 @@ def main(argv):
             if re.fullmatch(r"run-.+\.env", n) and n not in files:
                 bad.append(f"orphan:{n}")
         if bad:
-            print("SCHEMA-DRIFT FAIL " + " ".join(bad) + " (run gen-from-schema.py)"); return 1
+            print("SCHEMA-DRIFT FAIL " + " ".join(bad) + " (run gen-from-schema.py --in-tree)"); return 1
         print(f"SCHEMA-DRIFT pass files={len(paths)}"); return 0
+    os.makedirs(outdir, exist_ok=True)
     for p, txt in paths.items():
+        if os.path.dirname(p) == HERE:
+            print(f"WARNING: --in-tree: writing source tree file {p}", file=sys.stderr)
         tmp = p + ".tmp"
         with open(tmp, "w") as f:
             f.write(txt)
         os.replace(tmp, p)
-    print(f"GEN ok files={len(paths)} dir={outdir} tree={','.join(tree)}")
+    print(f"GEN ok files={len(paths)} dir={outdir} tree={','.join(tree)}@{tdir}")
     return 0
 
 
