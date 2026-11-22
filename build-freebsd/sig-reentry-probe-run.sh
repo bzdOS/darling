@@ -62,6 +62,10 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 					echo "-- ps -H"; ps -H -o pid,tid,state,wchan,comm -p "$gp"
 				done
 				# the darlingserver itself: where its threads sit (a hung main loop) and which sockets it holds (the listener)
+				_sps=$(pgrep -f "dserver/darlingserver")
+				[ -n "$_sps" ] || echo "== darlingserver process not found (exited before the snapshot)"
+				_sock=$(sed -n 's/^darlingserver socket ready: //p' "$LOG" | head -1)
+				[ -n "$_sock" ] && { echo "-- listener path $_sock"; ls -l "$_sock" 2>&1; }
 				for sp in $(pgrep -f "dserver/darlingserver"); do
 					echo "== darlingserver pid $sp"; ps -o pid,state,wchan,command -p "$sp"
 					echo "-- procstat -t"; /usr/local/bin/sudo -n procstat -t "$sp"
