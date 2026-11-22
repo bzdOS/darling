@@ -1,16 +1,18 @@
 diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
 --- a/src/startup/mldr/freebsd_syscall_trap.c
 +++ b/src/startup/mldr/freebsd_syscall_trap.c
-@@ -4342,6 +4342,31 @@
+@@ -4342,6 +4342,45 @@
  static struct mldr_h1rec mldr_h1[64];
  static unsigned long mldr_h1_seq;
  
 +/* Step 56 duplicates: SIGILL deliveries of a trap that was already emulated (resumed without touching the context). The count is written at
 + * process exit with write(2), without stdio, when DARLING_SIG65_COUNT is set (the same switch as the signal 65 trampoline counter); the
-+ * probe turns it into the SIGILL-DUP=N item of its summary. mldr_exit_report_hook is called by mldr_sig65_report (mldr-sig65-unblock-count.patch). */
++ * probe turns it into the SIGILL-DUP=N item of its summary. The report runs from mldr_sig65_report (the exit syscall paths, via
++ * mldr_exit_report_hook of mldr-sig65-unblock-count.patch) and from atexit (the guest process normally leaves through exit()). */
 +volatile unsigned long mldr_sigill_dups = 0;
-+void
-+mldr_exit_report_hook(void)
++static volatile int mldr_sigill_dups_reported = 0;
++static void
++mldr_sigill_dup_write_report(void)
 +{
 +    char buf[64];
 +    char *p = buf;
@@ -19,6 +21,8 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +    char *lo;
 +    static const char tag[] = "[sigill-dup] dups=";
 +    if (getenv("DARLING_SIG65_COUNT") == NULL)
++        return;
++    if (__atomic_exchange_n(&mldr_sigill_dups_reported, 1, __ATOMIC_RELAXED))
 +        return;
 +    memcpy(p, tag, sizeof(tag) - 1);
 +    p += sizeof(tag) - 1;
@@ -29,11 +33,21 @@ diff -ru a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_sy
 +    *p++ = '\n';
 +    (void)!write(2, buf, (size_t)(p - buf));
 +}
++void
++mldr_exit_report_hook(void)
++{
++    mldr_sigill_dup_write_report();
++}
++__attribute__((constructor)) static void
++mldr_sigill_dup_register_atexit(void)
++{
++    atexit(mldr_sigill_dup_write_report);
++}
 +
  static void
  sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
  {
-@@ -4376,8 +4401,7 @@
+@@ -4376,8 +4415,7 @@
      if (info->si_addr != NULL && (uintptr_t)info->si_addr != (uintptr_t)mc->mc_rip) {
          for (int i = 0; i < _mldr_ud2_site_count; i++) {
              if (_mldr_ud2_sites[i] == (uintptr_t)info->si_addr) {
