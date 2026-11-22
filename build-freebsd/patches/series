@@ -91,3 +91,5 @@ xnu xnu-stub-files.patch
 ../.. mldr-linux-sysinfo.patch
 # mldr-sigill-dup-count.patch: count of Step 56 duplicate SIGILL deliveries (dups in sigill_handler_inner), written at process exit with write(2) when DARLING_SIG65_COUNT is set; layered on top of mldr-traplog-nostdio-rest and mldr-linux-sysinfo, hooks into the exit report of mldr-sig65-unblock-count.patch.
 ../.. mldr-sigill-dup-count.patch
+# mldr-sigill-dup-hist.patch: Step 56 residual-path diagnostics, printed at exit next to the dup count when DARLING_SIG65_COUNT is set: histogram of (si_addr - rip, sigill_handler nested on the thread, signal 65+ handler in progress, real-time signal pending) over the first 256 duplicates; fixed static array, no stdio/locks/malloc in the handler. On top of mldr-sigill-dup-count.patch.
+../.. mldr-sigill-dup-hist.patch
