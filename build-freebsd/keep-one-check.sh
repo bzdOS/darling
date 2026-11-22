@@ -139,7 +139,7 @@ owner() {
 OPEN=" $(timeout 60 fstat -f "$B" 2>/dev/null | awk 'NR>1 && $6 ~ /^[0-9]+$/ {print $6}' | sort -u | tr '\n' ' ')"
 
 # probe runner logs and traces (run-*-probe.sh): <kind>-MMDD-HHMMSS.log, -ktrace.out and -ring.bin (diag ring); handled in 1d only
-is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out|-ring\.bin|-dserver\.txt|-dserver-full\.txt|-dserver-head\.txt|-procstat\.txt)$'; }
+is_probe() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]{4}-[0-9]{6}(\.log|-ktrace\.out|-ring\.bin|-dserver\.txt|-dserver-full\.txt|-dserver-head\.txt|-procstat\.txt|-srvgone\.txt|-server-stderr\.txt)$'; }
 # Old sig-reentry-probe-run.sh naming (before <kind>-MMDD-HHMMSS): <prefix><run>-<i>.log and
 # <prefix><run>-<i>-dserver[-head].txt, for the runner prefixes used on this tree. All of them are probe candidates.
 PROBE_OLD_PREFIXES="cancelrpc abold abnew cnt sigre"
@@ -222,6 +222,8 @@ if [ -d "$B" ]; then
 		*-dserver-head.txt) _st=${f%-dserver-head.txt};;
 		*-dserver.txt) _st=${f%-dserver.txt};;
 		*-procstat.txt) _st=${f%-procstat.txt};;
+		*-srvgone.txt) _st=${f%-srvgone.txt};;
+		*-server-stderr.txt) _st=${f%-server-stderr.txt};;
 		*) _st=${f%.log};; esac
 		case " $_dec " in
 		*" $_st=keep "*) _k=1;;
@@ -231,7 +233,7 @@ if [ -d "$B" ]; then
 			case " $_keepstems " in
 			*" $_st "*) _k=1;;
 			*)
-				if [ -f "$B/$_st-dserver.txt" ] || [ -f "$B/$_st-procstat.txt" ]; then
+				if [ -f "$B/$_st-dserver.txt" ] || [ -f "$B/$_st-procstat.txt" ] || [ -f "$B/$_st-srvgone.txt" ] || [ -f "$B/$_st-server-stderr.txt" ]; then
 					_fn=$((_fn+1)); if [ $_fn -le "$_failkeep" ]; then _k=1; else _k=0; fi
 				else
 					case " $_seen " in

@@ -48,13 +48,26 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	# PREFIX-<stamp>-procstat.txt, once. It shows whether the whole process is stopped (SIGSTOP, task_suspend hitting the wrong thread) or
 	# where each thread sits (kernel wait channel, sigsuspend). Nothing is written when the log never goes quiet.
 	SNAP="$DARLING_BUILD_DIR/$P-$STAMP-procstat.txt"
-	( while :; do
-		sleep 5
+	GONE="$DARLING_BUILD_DIR/$P-$STAMP-srvgone.txt"
+	( _sp=
+	  while :; do
+		sleep 2
 		[ -f "$LOG" ] || continue
-		lm=$(stat -f %m "$LOG" 2>/dev/null) || continue
-		if [ $(( $(date +%s) - lm )) -ge "${PROBE_SNAP_S:-30}" ] && [ ! -e "$SNAP" ]; then
+		# the server process disappearing while the guest is still alive (the -111 failures: clients get ECONNREFUSED because the
+		# server is gone): note it at once, with the listener path, before the timeout kill tears everything down
+		[ -n "$_sp" ] || _sp=$(pgrep -f "dserver/darlingserver" | head -1)
+		if [ -n "$_sp" ] && [ ! -e "$GONE" ] && ! ps -p "$_sp" >/dev/null 2>&1 && [ -n "$(pgrep -f "$PB")" ]; then
 			{
-				echo "# snapshot at $(date +%s), log quiet for >= ${PROBE_SNAP_S:-30} s"
+				echo "# darlingserver pid $_sp is gone while the guest is alive, at $(date +%s)"
+				_sock=$(sed -n 's/^darlingserver socket ready: //p' "$LOG" | head -1)
+				[ -n "$_sock" ] && { echo "-- listener path $_sock"; ls -l "$_sock" 2>&1; }
+				echo "-- last 20 lines of the run log"; tail -n 20 "$LOG"
+			} > "$GONE" 2>&1
+		fi
+		lm=$(stat -f %m "$LOG" 2>/dev/null) || continue
+		if [ $(( $(date +%s) - lm )) -ge "${PROBE_SNAP_S:-15}" ] && [ ! -e "$SNAP" ]; then
+			{
+				echo "# snapshot at $(date +%s), log quiet for >= ${PROBE_SNAP_S:-15} s"
 				for gp in $(pgrep -f "$PB"); do
 					echo "== pid $gp"; ps -o pid,state,wchan,command -p "$gp"
 					echo "-- procstat -t"; /usr/local/bin/sudo -n procstat -t "$gp"
@@ -92,6 +105,11 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 	        /^suspend round|^suspender done/ { t=$NF; sub("t=","",t); if (t>ts) ts=t }
 	        END { exit !(st && ts>st) }' "$LOG"; then echo "WORKER-STUCK" >> "$LOG"; wst=$((wst+1)); fi
 	case "$rc" in 0) r0=$((r0+1));; 3) r3=$((r3+1));; 124) r124=$((r124+1));; 137) r137=$((r137+1));; *) rx=$((rx+1));; esac
+	# The server's stderr is inherited by the run log: on a failed run keep its own lines (exit messages, lifetime pipe) next to it
+	if [ "$rc" != 0 ]; then
+		grep -a '^darlingserver\|Server exited\|lifetime pipe\|^\[dserver\|^dserver' "$LOG" > "$DARLING_BUILD_DIR/$P-$STAMP-server-stderr.txt" 2>/dev/null
+		[ -s "$DARLING_BUILD_DIR/$P-$STAMP-server-stderr.txt" ] || echo "(no server stderr lines in the run log)" > "$DARLING_BUILD_DIR/$P-$STAMP-server-stderr.txt"
+	fi
 	# server log only for a failed run (rc != 0): a passing run's log is never written, so it costs no disk.
 	# PROBE_SERVER_LOG_HEAD=1: also the first 100 MB (start of a suspend/resume loop the tail has lost); the whole log from the start is always saved as -dserver-full.txt (cap PROBE_SERVER_LOG_MAX)
 	if [ -n "$SL" ] && [ "$rc" != 0 ]; then
