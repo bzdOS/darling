@@ -137,6 +137,9 @@ static void shim_trace(const char *fmt, long a, long b, long c, const char *s)
  * A token or name the real library accepted is passed through untouched. */
 #define NTFY_OK 0
 #define NTFY_NOT_FOUND 9
+#define NTFY_FAILED 1000000
+/* no notification server: libnotify answers SERVER_NOT_FOUND (9) or FAILED (1000000) depending on where the lookup stops */
+#define NO_SERVER(r) ((r) == NTFY_NOT_FOUND || (r) == NTFY_FAILED)
 #define NTFY_NULL_INPUT 10
 #define FAKE_TOKEN_BASE 0x7a000000
 #define IS_FAKE_TOKEN(t) ((((unsigned)(t)) & 0xff000000u) == FAKE_TOKEN_BASE)
@@ -162,20 +165,20 @@ static int fake_register(int *out)
 	return NTFY_OK;
 }
 static int shim_notify_register_dispatch(const char *n, int *out, void *q, void *b)
-{ int r = notify_register_dispatch(n, out, q, b); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+{ int r = notify_register_dispatch(n, out, q, b); return NO_SERVER(r) && n ? fake_register(out) : r; }
 static int shim_notify_register_check(const char *n, int *out)
-{ int r = notify_register_check(n, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+{ int r = notify_register_check(n, out); return NO_SERVER(r) && n ? fake_register(out) : r; }
 static int shim_notify_register_plain(const char *n, int *out)
-{ int r = notify_register_plain(n, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+{ int r = notify_register_plain(n, out); return NO_SERVER(r) && n ? fake_register(out) : r; }
 static int shim_notify_register_signal(const char *n, int sig, int *out)
-{ int r = notify_register_signal(n, sig, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+{ int r = notify_register_signal(n, sig, out); return NO_SERVER(r) && n ? fake_register(out) : r; }
 #define NOTIFY_REUSE 1
 /* fd flavour: a pipe's read end stands for the notification descriptor (nothing is ever written to it). */
 static int shim_notify_register_file_descriptor(const char *n, int *fd, int flags, int *out)
 {
 	int r = notify_register_file_descriptor(n, fd, flags, out);
 	shim_trace("SHIM-TRACE notify_register_file_descriptor real=%ld flags=%ld name=%.0s%s\n", r, flags, 0, n);
-	if (r != NTFY_NOT_FOUND || !n || !fd || !out) return r;
+	if (!NO_SERVER(r) || !n || !fd || !out) return r;
 	if (!(flags & NOTIFY_REUSE)) {
 		int p[2];
 		if (pipe(p)) return r;
@@ -186,7 +189,7 @@ static int shim_notify_register_file_descriptor(const char *n, int *fd, int flag
 static int shim_notify_register_mach_port(const char *n, mach_port_t *port, int flags, int *out)
 {
 	int r = notify_register_mach_port(n, port, flags, out);
-	if (r != NTFY_NOT_FOUND || !n || !port || !out) return r;
+	if (!NO_SERVER(r) || !n || !port || !out) return r;
 	if (!(flags & NOTIFY_REUSE)) {
 		mach_port_t p;
 		if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p)) return r;
@@ -206,7 +209,7 @@ static int shim_notify_suspend(int t) { return IS_FAKE_TOKEN(t) ? NTFY_OK : noti
 static int shim_notify_resume(int t) { return IS_FAKE_TOKEN(t) ? NTFY_OK : notify_resume(t); }
 static _Bool shim_notify_is_valid_token(int t) { return IS_FAKE_TOKEN(t) ? 1 : notify_is_valid_token(t); }
 static uint32_t shim_notify_post(const char *n)
-{ uint32_t r = notify_post(n); return r == NTFY_NOT_FOUND ? NTFY_OK : r; }
+{ uint32_t r = notify_post(n); return NO_SERVER(r) ? NTFY_OK : r; }
 struct interpose_tuple { const void *replacement; const void *replacee; };
 #define INTERPOSE(f) { (const void *)shim_##f, (const void *)f }
 __attribute__((used)) static const struct interpose_tuple notify_interposers[] __attribute__((section("__DATA,__interpose"))) = {
@@ -256,10 +259,23 @@ struct shim_kevent64 { unsigned long long ident; short filter; unsigned short fl
 extern int kevent64(int, const struct shim_kevent64 *, int, struct shim_kevent64 *, int, unsigned, const void *);
 static int shim_kevent64_call(int kq, const struct shim_kevent64 *cl, int nch, struct shim_kevent64 *el, int nev, unsigned fl, const void *ts)
 {
-	int r = kevent64(kq, cl, nch, el, nev, fl, ts);
-	if (nch > 0 && cl && getenv("DARLING_SHIM_TRACE") && (r < 0 || (cl[0].flags & 1)))
-		shim_trace("SHIM-TRACE kevent64 nch=%ld filter=%ld ret=%ld %.0s\n", nch, cl[0].filter, r, 0);
-	return r;
+	int i, any = 0, r;
+	for (i = 0; i < nch; i++) if (cl[i].filter == SHIM_EVFILT_VNODE) any = 1;
+	if (!any) {
+		r = kevent64(kq, cl, nch, el, nev, fl, ts);
+		if (nch > 0 && cl && getenv("DARLING_SHIM_TRACE") && (r < 0 || (cl[0].flags & 1)))
+			shim_trace("SHIM-TRACE kevent64 nch=%ld filter=%ld ret=%ld %.0s\n", nch, cl[0].filter, r, 0);
+		return r;
+	}
+	/* vnode watches, as in shim_kevent_call: a refused vnode add or delete is accepted as a watch that never fires */
+	for (i = 0; i < nch; i++) {
+		r = kevent64(kq, &cl[i], 1, 0, 0, 0, 0);
+		if (cl[i].filter == SHIM_EVFILT_VNODE)
+			shim_trace("SHIM-TRACE kevent64 vnode real=%ld %.0s%.0s%.0s\n", r, 0, 0, 0);
+		else if (r < 0)
+			return -1;
+	}
+	return nev > 0 ? kevent64(kq, 0, 0, el, nev, fl, ts) : 0;
 }
 __attribute__((used)) static const struct interpose_tuple kevent64_interposers[] __attribute__((section("__DATA,__interpose"))) = {
 	{ (const void *)shim_kevent64_call, (const void *)kevent64 },

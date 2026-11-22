@@ -12,6 +12,8 @@ extern int notify_register_mach_port(const char *, unsigned *, int, int *);
 extern int notify_cancel(int);
 struct kev { unsigned long ident; short filter; unsigned short flags; unsigned fflags; long data; void *udata; };
 extern int kevent(int, const struct kev *, int, struct kev *, int, const void *);
+struct kev64 { unsigned long long ident; short filter; unsigned short flags; unsigned fflags; long long data; unsigned long long udata; unsigned long long ext[2]; };
+extern int kevent64(int, const struct kev64 *, int, struct kev64 *, int, unsigned, const void *);
 extern const char *dns_configuration_notify_key(void);
 extern void *dlopen(const char *, int);
 extern void *dlsym(void *, const char *);
@@ -55,6 +57,11 @@ int main(void)
 	struct kev ev = { (unsigned long)f, -4 /* EVFILT_VNODE */, 0x0001 | 0x0020 /* EV_ADD|EV_CLEAR */, 0x1|0x2|0x4|0x8|0x10|0x20|0x40 , 0, 0 };
 	int r = kevent(kq, &ev, 1, 0, 0, 0);
 	res("kevent-vnode", r >= 0, *__error());
+	{
+		struct kev64 e64 = { (unsigned long long)f, -4, 0x0001 | 0x0020, 0x1|0x2|0x4|0x8|0x10|0x20|0x40, 0, 0, { 0, 0 } };
+		int r64 = kevent64(kq, &e64, 1, 0, 0, 0, 0);
+		res("kevent64-vnode", r64 >= 0, *__error());
+	}
 	printf("DNSW DONE fail=%d\n", bad); fflush(0);
 	return bad != 0;
 }
