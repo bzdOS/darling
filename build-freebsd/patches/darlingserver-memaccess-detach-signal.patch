@@ -9,18 +9,19 @@ diff -ru a/src/process.cpp b/src/process.cpp
  #endif
  
  static DarlingServer::Log processLog("process");
-@@ -359,6 +360,10 @@
+@@ -359,6 +360,11 @@
  		}
  		return false;
  	}
 +	// signal the PT_ATTACH stop reported instead of SIGSTOP (see below); handed back to the thread at PT_DETACH
 +	int detachSignal = 0;
 +	struct timespec windowStart;
++	bool windowStatusStopped = false;
 +	clock_gettime(CLOCK_MONOTONIC, &windowStart);
  	{
  		int status;
  		if (waitpid(targetPid, &status, 0) < 0) {
-@@ -378,6 +383,15 @@
+@@ -378,6 +384,16 @@
  			}
  			return false;
  		}
@@ -29,6 +30,7 @@ diff -ru a/src/process.cpp b/src/process.cpp
 +		// then names it instead of SIGSTOP. PT_DETACH with signal 0 would cancel it (td_xsig = 0): the signal was lost
 +		// (about 3 % of the suspend signals, always while the server copied memory for the thread's last call, e.g. the port name
 +		// of mach_port_allocate). Hand it back at detach so the thread takes it.
++		windowStatusStopped = WIFSTOPPED(status);
 +		if (WIFSTOPPED(status) && WSTOPSIG(status) != SIGSTOP) {
 +			detachSignal = WSTOPSIG(status);
 +			::dsdiagRingEvent(14, -1, -1, (5ull << 56) | (uint64_t)detachSignal);
@@ -36,11 +38,15 @@ diff -ru a/src/process.cpp b/src/process.cpp
  	}
  #else
  	const pid_t targetPid = id();
-@@ -387,7 +401,17 @@
+@@ -387,7 +403,21 @@
  	int ioErrno = errno;
  
  #ifdef DARLING_FREEBSD
 -	if (ptrace(PT_DETACH, targetPid, (caddr_t)1, 0) == -1) {
++	::dsdiagRingEvent(14, -1, -1, (7ull << 56) | 1); // attach window completed (counter)
++	if (!windowStatusStopped) {
++		::dsdiagRingEvent(14, -1, -1, (7ull << 56) | 2); // detach with signal 0 although the wait status was not a stop (anomaly counter, expected 0)
++	}
 +	{
 +		// attach window length (after PT_ATTACH, wait for the stop, PT_IO, PT_DETACH): ring kind 14 sub 6, only windows over 1 ms:
 +		// n = 6<<56 | usec; a signal sent to a guest thread inside the window reaches it only after the window
@@ -55,3 +61,4 @@ diff -ru a/src/process.cpp b/src/process.cpp
  		processMemoryAccessLog.error()
  			<< "Failed to PT_DETACH from process "
  			<< targetPid
+Only in b/src: process.cpp.pre7

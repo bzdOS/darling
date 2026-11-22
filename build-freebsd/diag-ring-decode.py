@@ -32,6 +32,7 @@ ci = {}
 cyc = []
 lat = []
 saved_sig = []
+attach_cnt = {}
 win_us = []
 lstate = []
 ob = []
@@ -40,6 +41,8 @@ for i in range(first, nxt):
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
     kc[kind] = kc.get(kind, 0) + 1
+    if kind == 14 and (n >> 56) == 7:
+        attach_cnt[n & 0xFF] = attach_cnt.get(n & 0xFF, 0) + 1   # 1 = attach window completed, 2 = PT_DETACH with signal 0 although the wait status was not a stop
     if kind == 14 and (n >> 56) == 6:
         win_us.append(n & ((1 << 56) - 1))
     if kind == 14 and (n >> 56) == 5:
@@ -140,6 +143,7 @@ if counts or hang:
 if counts or hang:
     wl = sorted(win_us)
     out.write("MEMACCESS-WINDOWS over 1 ms: %d (median %d us, p90 %d us, max %d us)\n" % (len(wl), wl[len(wl)//2] if wl else 0, wl[int(len(wl)*0.9)] if wl else 0, wl[-1] if wl else 0))
+    out.write("MEMACCESS-ATTACH windows=%d handed_back_sub5=%d (sig 65: %d) detach_sig0_anomaly=%d\n" % (attach_cnt.get(1, 0), len(saved_sig), sum(1 for x in saved_sig if x == 65), attach_cnt.get(2, 0)))
     out.write("MEMACCESS-SIGNAL-SAVED handed back at detach=%d (sig 65: %d)\n" % (len(saved_sig), sum(1 for x in saved_sig if x == 65)))
 if (counts or hang) and lstate:
     # target thread state when the first re-send was needed (a lost original): signal 65 pending / blocked / caught / ignored in the
