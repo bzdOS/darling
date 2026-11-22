@@ -32,6 +32,7 @@ ci = {}
 cyc = []
 lat = []
 saved_sig = []
+win_us = []
 lstate = []
 ob = []
 for i in range(first, nxt):
@@ -39,6 +40,8 @@ for i in range(first, nxt):
     kind = (nk >> 28) & 0xF
     nstid = nk & 0x0FFFFFFF
     kc[kind] = kc.get(kind, 0) + 1
+    if kind == 14 and (n >> 56) == 6:
+        win_us.append(n & ((1 << 56) - 1))
     if kind == 14 and (n >> 56) == 5:
         saved_sig.append(n & 0xFF)   # signal handed back at PT_DETACH of the memory-access shim
     if kind == 14 and (n >> 56) == 4:
@@ -135,6 +138,8 @@ def cycle_summary():
 if counts or hang:
     out.write(cycle_summary() + "\n")
 if counts or hang:
+    wl = sorted(win_us)
+    out.write("MEMACCESS-WINDOWS over 1 ms: %d (median %d us, p90 %d us, max %d us)\n" % (len(wl), wl[len(wl)//2] if wl else 0, wl[int(len(wl)*0.9)] if wl else 0, wl[-1] if wl else 0))
     out.write("MEMACCESS-SIGNAL-SAVED handed back at detach=%d (sig 65: %d)\n" % (len(saved_sig), sum(1 for x in saved_sig if x == 65)))
 if (counts or hang) and lstate:
     # target thread state when the first re-send was needed (a lost original): signal 65 pending / blocked / caught / ignored in the

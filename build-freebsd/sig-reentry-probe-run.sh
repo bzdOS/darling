@@ -131,7 +131,7 @@ while [ $valid -lt "$N" ] && [ $i -le $((N*3)) ]; do
 		grep -a "^RING-COUNTS" "$LOG" | head -1
 		grep -a "^SUSPEND-BALANCE" "$LOG" | head -1
 		grep -a "^SIG-CYCLES" "$LOG" | head -1
-		grep -a "^MEMACCESS-SIGNAL-SAVED" "$LOG" | head -1
+		grep -a "^MEMACCESS-" "$LOG" | head -2
 		grep -a "^SIG-LOSS-STATE" "$LOG" | head -6
 		grep -a "^OUTBOX" "$LOG" | head -1
 		grep -a "^HANG-CLASS" "$LOG" | head -8

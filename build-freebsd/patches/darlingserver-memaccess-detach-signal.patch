@@ -9,16 +9,18 @@ diff -ru a/src/process.cpp b/src/process.cpp
  #endif
  
  static DarlingServer::Log processLog("process");
-@@ -359,6 +360,8 @@
+@@ -359,6 +360,10 @@
  		}
  		return false;
  	}
 +	// signal the PT_ATTACH stop reported instead of SIGSTOP (see below); handed back to the thread at PT_DETACH
 +	int detachSignal = 0;
++	struct timespec windowStart;
++	clock_gettime(CLOCK_MONOTONIC, &windowStart);
  	{
  		int status;
  		if (waitpid(targetPid, &status, 0) < 0) {
-@@ -378,6 +381,15 @@
+@@ -378,6 +383,15 @@
  			}
  			return false;
  		}
@@ -34,11 +36,21 @@ diff -ru a/src/process.cpp b/src/process.cpp
  	}
  #else
  	const pid_t targetPid = id();
-@@ -387,7 +399,7 @@
+@@ -387,7 +401,17 @@
  	int ioErrno = errno;
  
  #ifdef DARLING_FREEBSD
 -	if (ptrace(PT_DETACH, targetPid, (caddr_t)1, 0) == -1) {
++	{
++		// attach window length (after PT_ATTACH, wait for the stop, PT_IO, PT_DETACH): ring kind 14 sub 6, only windows over 1 ms:
++		// n = 6<<56 | usec; a signal sent to a guest thread inside the window reaches it only after the window
++		struct timespec windowEnd;
++		clock_gettime(CLOCK_MONOTONIC, &windowEnd);
++		long long us = ((long long)windowEnd.tv_sec - windowStart.tv_sec) * 1000000 + (windowEnd.tv_nsec - windowStart.tv_nsec) / 1000;
++		if (us > 1000) {
++			::dsdiagRingEvent(14, -1, -1, (6ull << 56) | (uint64_t)us);
++		}
++	}
 +	if (ptrace(PT_DETACH, targetPid, (caddr_t)1, detachSignal) == -1) {
  		processMemoryAccessLog.error()
  			<< "Failed to PT_DETACH from process "
