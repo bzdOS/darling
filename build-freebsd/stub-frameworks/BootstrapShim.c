@@ -112,3 +112,63 @@ __attribute__((constructor)) static void bootstrap_shim_init(void)
 	pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
 	pthread_create(&th, &at, serve, 0);
 }
+
+/* notify(3) without a notification server. libnotify looks up com.apple.system.notification_center through
+ * bootstrap and answers NOTIFY_STATUS_SERVER_NOT_FOUND (9) when nothing serves it (no launchd, no notifyd here);
+ * Chrome's ThermalStateObserverMac logged "unable to register to power notifications. Result: 9".
+ * The registration calls are interposed (dyld applies the __DATA,__interpose table of an inserted image to every
+ * image): the real call runs first; only when it says SERVER_NOT_FOUND an inert registration succeeds, with a token
+ * from a private range (0x7a000000..) that the follow-up calls recognise. No notification is ever delivered.
+ * A token or name the real library accepted is passed through untouched. */
+#define NTFY_OK 0
+#define NTFY_NOT_FOUND 9
+#define NTFY_NULL_INPUT 10
+#define FAKE_TOKEN_BASE 0x7a000000
+#define IS_FAKE_TOKEN(t) ((((unsigned)(t)) & 0xff000000u) == FAKE_TOKEN_BASE)
+extern int notify_register_dispatch(const char *, int *, void *, void *);
+extern int notify_register_check(const char *, int *);
+extern int notify_register_plain(const char *, int *);
+extern int notify_register_signal(const char *, int, int *);
+extern int notify_check(int, int *);
+extern int notify_get_state(int, unsigned long long *);
+extern int notify_set_state(int, unsigned long long);
+extern int notify_cancel(int);
+extern int notify_suspend(int);
+extern int notify_resume(int);
+extern uint32_t notify_post(const char *);
+extern _Bool notify_is_valid_token(int);
+static int fake_token_next;
+static int fake_register(int *out)
+{
+	if (!out) return NTFY_NULL_INPUT;
+	*out = FAKE_TOKEN_BASE + (__sync_fetch_and_add(&fake_token_next, 1) & 0xffffff);
+	return NTFY_OK;
+}
+static int shim_notify_register_dispatch(const char *n, int *out, void *q, void *b)
+{ int r = notify_register_dispatch(n, out, q, b); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+static int shim_notify_register_check(const char *n, int *out)
+{ int r = notify_register_check(n, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+static int shim_notify_register_plain(const char *n, int *out)
+{ int r = notify_register_plain(n, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+static int shim_notify_register_signal(const char *n, int sig, int *out)
+{ int r = notify_register_signal(n, sig, out); return r == NTFY_NOT_FOUND && n ? fake_register(out) : r; }
+static int shim_notify_check(int t, int *c)
+{ if (!IS_FAKE_TOKEN(t)) return notify_check(t, c); if (!c) return NTFY_NULL_INPUT; *c = 0; return NTFY_OK; }
+static int shim_notify_get_state(int t, unsigned long long *s)
+{ if (!IS_FAKE_TOKEN(t)) return notify_get_state(t, s); if (!s) return NTFY_NULL_INPUT; *s = 0; return NTFY_OK; }
+static int shim_notify_set_state(int t, unsigned long long s)
+{ return IS_FAKE_TOKEN(t) ? NTFY_OK : notify_set_state(t, s); }
+static int shim_notify_cancel(int t) { return IS_FAKE_TOKEN(t) ? NTFY_OK : notify_cancel(t); }
+static int shim_notify_suspend(int t) { return IS_FAKE_TOKEN(t) ? NTFY_OK : notify_suspend(t); }
+static int shim_notify_resume(int t) { return IS_FAKE_TOKEN(t) ? NTFY_OK : notify_resume(t); }
+static _Bool shim_notify_is_valid_token(int t) { return IS_FAKE_TOKEN(t) ? 1 : notify_is_valid_token(t); }
+static uint32_t shim_notify_post(const char *n)
+{ uint32_t r = notify_post(n); return r == NTFY_NOT_FOUND ? NTFY_OK : r; }
+struct interpose_tuple { const void *replacement; const void *replacee; };
+#define INTERPOSE(f) { (const void *)shim_##f, (const void *)f }
+__attribute__((used)) static const struct interpose_tuple notify_interposers[] __attribute__((section("__DATA,__interpose"))) = {
+	INTERPOSE(notify_register_dispatch), INTERPOSE(notify_register_check), INTERPOSE(notify_register_plain),
+	INTERPOSE(notify_register_signal), INTERPOSE(notify_check), INTERPOSE(notify_get_state), INTERPOSE(notify_set_state),
+	INTERPOSE(notify_cancel), INTERPOSE(notify_suspend), INTERPOSE(notify_resume), INTERPOSE(notify_is_valid_token),
+	INTERPOSE(notify_post),
+};
