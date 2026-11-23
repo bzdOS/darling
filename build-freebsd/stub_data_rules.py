@@ -85,7 +85,48 @@ STRING_CONST = re.compile(
     r"|^__kLSOpen[A-Za-z]")
 NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$|^_AVSpeechUtterance|^_kIOMainPortDefault$|^_UTType[A-Z]")
 
-# {name: (text, source)}; source is cocotron-code, sdk-doc-from-memory or (absent from the table) symbol-name.
+# {name: (asm lines emitting the object body, source)} — real documented SDK values
+# of non-string data constants. A stub that keeps them zero-filled hands the consumer
+# NULL/0 (a nil UTType is survivable, a 0.0 speech rate is not the documented 0.5).
+# Struct layout notes: CMTime is {int64 value, int32 timescale, uint32 flags, int64 epoch}
+# (CoreMedia/CMTime.h); CATransform3D is 16 doubles in m11..m44 order, identity has 1.0 on
+# the diagonal (QuartzCore/CATransform3D.h). kCMTimeZero = {0, 1, Valid, 0} and
+# kCMTimeInvalid = {0, 0, Valid|Indefinite, 0} per the SDK headers. Numeric singles are
+# the documented scalars: kCLLocationAccuracyBest -1.0 / HundredMeters 100.0 (doubles),
+# AVSpeechUtteranceDefaultSpeechRate 0.5f / MaximumSpeechRate 1.0f,
+# NSURLSessionTaskPriorityHigh 1.0f, GCHapticDurationInfinite +Inf (double).
+# Contract: data_asm emits these bytes instead of zero fill; the census then no longer
+# lists the name (object_is_zero reads up to 64 bytes, every value here is non-zero
+# inside them). Names that cannot be static bytes (isa-bound singletons, opaque objects,
+# function pointers, predefined dictionaries) stay zero with the reason in the commit.
+# START_NON_STRING_VALUES
+NON_STRING_VALUES = {
+    "_kCMTimeZero": (["    .quad 0", "    .long 1", "    .long 1", "    .quad 0"],
+                     "sdk-doc"),
+    "_kCMTimeInvalid": (["    .quad 0", "    .long 0", "    .long 17", "    .quad 0"],
+                        "sdk-doc"),
+    "_CATransform3DIdentity": (["    .double 1.0", "    .double 0.0", "    .double 0.0",
+                                "    .double 0.0", "    .double 0.0", "    .double 1.0",
+                                "    .double 0.0", "    .double 0.0", "    .double 0.0",
+                                "    .double 0.0", "    .double 1.0", "    .double 0.0",
+                                "    .double 0.0", "    .double 0.0", "    .double 0.0",
+                                "    .double 1.0"],
+                               "sdk-doc"),
+    "_kCLLocationAccuracyBest": (["    .quad 0xBFF0000000000000"], "sdk-doc"),
+    "_kCLLocationAccuracyHundredMeters": (["    .quad 0x4059000000000000"], "sdk-doc"),
+    "_AVSpeechUtteranceDefaultSpeechRate": (["    .long 0x3F000000"], "sdk-doc"),
+    "_AVSpeechUtteranceMaximumSpeechRate": (["    .long 0x3F800000"], "sdk-doc"),
+    "_NSURLSessionTaskPriorityHigh": (["    .long 0x3F800000"], "sdk-doc"),
+    "_GCHapticDurationInfinite": (["    .quad 0x7FF0000000000000"], "sdk-doc"),
+}
+# END_NON_STRING_VALUES
+
+
+def is_non_string_const(name):
+    """a non-string data constant with a real documented SDK value in NON_STRING_VALUES"""
+    return name in NON_STRING_VALUES
+
+
 # Text of a string constant whose value is not its name. Priority: the cocotron definition
 # (src/external/cocotron: only the CATransaction key is defined there, and its text is the name
 # without the underscore, the same as the default), then the macOS value from the SDK headers or
@@ -182,9 +223,14 @@ def is_injected_data_shadow(name):
     return bool(INJECTED_DATA_SHADOW.match(name))
 
 
+# Contract: data_asm emits NON_STRING_VALUES bytes for a listed non-string constant
+# instead of zero fill (the name counts as retyped, so a stub that already carries it
+# is rebuilt); every other name keeps the old zero-filled or CFString emission.
+# START_DATA_ASM_NON_STRING
 def data_asm(name, size=DATA_SIZE, strings=False):
     """Assembly for one exported data object: zero filled, or for a string constant a pointer to a
-    constant CFString (text = string_value(name)). The CFString isa is
+    constant CFString (text = string_value(name)), or for a listed non-string constant its real
+    documented SDK bytes. The CFString isa is
     ___CFConstantStringClassReference; the image must be linked against CF_INSTALL (-needed_library)
     so the isa is a two-level bind (strings=True); anything else keeps zero filled objects."""
     if strings and is_string_const(name):
@@ -197,8 +243,13 @@ def data_asm(name, size=DATA_SIZE, strings=False):
                 "    .quad L_s_%s" % lab, "    .quad %d" % len(text),
                 ".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":",
                 "    .quad L_cf_%s" % lab, ".space %d, 0" % (size - 8)]
+    if strings and is_non_string_const(name):
+        body, _src = NON_STRING_VALUES[name]
+        return ([".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":"] +
+                body)
     return [".section __DATA,__data", ".globl " + name, ".p2align 4", name + ":",
             ".space %d, 0" % size]
+# END_DATA_ASM_NON_STRING
 
 
 # Per-class additions to the template (classes_m): ivars and methods appended verbatim,

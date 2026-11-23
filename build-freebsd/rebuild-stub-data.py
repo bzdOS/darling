@@ -216,8 +216,10 @@ def main():
         fix = [n for n in ex if n in drop or (ex[n] == ("__TEXT", "__text") and
                (R.is_known_data(n) or n in datalist))]
         # a string constant exported as a zero filled object is rebuilt as a pointer to a CFString
-        fix += [n for n in datas if R.is_string_const(n) and n not in fix and
-                ex[n][0].startswith("__DATA") and n not in drop]
+        # a listed non-string constant is rebuilt with its real documented SDK bytes (data_asm);
+        # both count as retyped even when the current object is already data
+        fix += [n for n in datas if (R.is_string_const(n) or R.is_non_string_const(n)) and
+                n not in fix and ex[n][0].startswith("__DATA") and n not in drop]
         if not fix and not behaviors and not shadow:
             print("unchanged %s" % os.path.relpath(path, ov))
             continue
