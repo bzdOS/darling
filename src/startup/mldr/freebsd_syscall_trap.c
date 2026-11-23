@@ -114,6 +114,7 @@
 #include <stdio.h>
 #include <stdlib.h> /* getenv — MLDR_LOG_MAPPINGS, see mldr_log_exec_mapping */
 #include <sys/user.h> /* struct kinfo_file — F_KINFO in mldr_log_exec_mapping */
+#include <libutil.h> /* kinfo_getvmmap — SIGTRAP map dump */
 #include <string.h>
 #include <fcntl.h> /* AT_FDCWD / AT_SYMLINK_NOFOLLOW — #198 stat/lstat via fstatat */
 #include <sys/stat.h> /* native struct stat — #198 stat/fstat/lstat translation */
@@ -4963,6 +4964,47 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
             (unsigned long long)(uintptr_t)info->si_addr,
             (unsigned)at[0], (unsigned)(prev & 0xff),
             prev_ok ? "" : "(unreadable)", descr);
+        {
+            int cnt = 0;
+            struct kinfo_vmentry *v = kinfo_getvmmap(getpid(), &cnt);
+            if (!v) {
+                TRAPLOG("[darling-mldr] vmmap: kinfo_getvmmap failed\n");
+            } else {
+                const uintptr_t addrs[] = { 0x226605, 0x225bd1, 0x22dbec, site };
+                for (size_t ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++) {
+                    uintptr_t a = addrs[ai];
+                    int found = 0;
+                    for (int i = 0; i < cnt; i++) {
+                        uintptr_t s = (uintptr_t)v[i].kve_start;
+                        uintptr_t e = (uintptr_t)v[i].kve_end;
+                        if (a < s || a >= e)
+                            continue;
+                        char perms[5] = {0};
+                        perms[0] = (v[i].kve_protection & KVME_PROT_READ) ? 'r' : '-';
+                        perms[1] = (v[i].kve_protection & KVME_PROT_WRITE) ? 'w' : '-';
+                        perms[2] = (v[i].kve_protection & KVME_PROT_EXEC) ? 'x' : '-';
+                        perms[3] = (v[i].kve_flags & KVME_FLAG_COW) ? 'p' : '-';
+                        const char *tp = v[i].kve_path[0] ? v[i].kve_path : "anon";
+                        if (v[i].kve_path[0])
+                            TRAPLOG("[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s %s off=0x%llx\n",
+                                (unsigned long long)a, (unsigned long long)s,
+                                (unsigned long long)s, (unsigned long long)e,
+                                perms, tp, (unsigned long long)v[i].kve_offset);
+                        else
+                            TRAPLOG("[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s anon off=0x%llx\n",
+                                (unsigned long long)a, (unsigned long long)s,
+                                (unsigned long long)s, (unsigned long long)e,
+                                perms, (unsigned long long)v[i].kve_offset);
+                        found = 1;
+                        break;
+                    }
+                    if (!found)
+                        TRAPLOG("[darling-mldr] vmmap: 0x%llx not found in %d entries\n",
+                            (unsigned long long)a, cnt);
+                }
+                free(v);
+            }
+        }
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
         sigaction(signo, &sa_dfl, NULL);
         raise(signo);

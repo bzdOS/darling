@@ -20,6 +20,11 @@
 
 #include <signal.h>
 #include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/user.h>
+#include <libutil.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -399,6 +404,47 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
                 if (fp[0] <= bp)
                     break;
                 bp = fp[0];
+            }
+        }
+        {
+            int cnt = 0;
+            struct kinfo_vmentry *v = kinfo_getvmmap(getpid(), &cnt);
+            if (!v) {
+                fprintf(stderr, "[darling-mldr] vmmap: kinfo_getvmmap failed\n");
+            } else {
+                const uintptr_t addrs[] = { 0x226605, 0x225bd1, 0x22dbec, (uintptr_t)rip };
+                for (size_t ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++) {
+                    uintptr_t a = addrs[ai];
+                    int found = 0;
+                    for (int i = 0; i < cnt; i++) {
+                        uintptr_t s = (uintptr_t)v[i].kve_start;
+                        uintptr_t e = (uintptr_t)v[i].kve_end;
+                        if (a < s || a >= e)
+                            continue;
+                        char perms[5] = {0};
+                        perms[0] = (v[i].kve_protection & KVME_PROT_READ) ? 'r' : '-';
+                        perms[1] = (v[i].kve_protection & KVME_PROT_WRITE) ? 'w' : '-';
+                        perms[2] = (v[i].kve_protection & KVME_PROT_EXEC) ? 'x' : '-';
+                        perms[3] = (v[i].kve_flags & KVME_FLAG_COW) ? 'p' : '-';
+                        const char *tp = v[i].kve_path[0] ? v[i].kve_path : "anon";
+                        if (v[i].kve_path[0])
+                            fprintf(stderr, "[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s %s off=0x%llx\n",
+                                (unsigned long long)a, (unsigned long long)s,
+                                (unsigned long long)s, (unsigned long long)e,
+                                perms, tp, (unsigned long long)v[i].kve_offset);
+                        else
+                            fprintf(stderr, "[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s anon off=0x%llx\n",
+                                (unsigned long long)a, (unsigned long long)s,
+                                (unsigned long long)s, (unsigned long long)e,
+                                perms, (unsigned long long)v[i].kve_offset);
+                        found = 1;
+                        break;
+                    }
+                    if (!found)
+                        fprintf(stderr, "[darling-mldr] vmmap: 0x%llx not found in %d entries\n",
+                            (unsigned long long)a, cnt);
+                }
+                free(v);
             }
         }
         fflush(stderr);
