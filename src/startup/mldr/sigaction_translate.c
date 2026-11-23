@@ -17,6 +17,7 @@
 #include "freebsd_syscall_trap.h"
 #include "linux_siginfo.h"
 #include "linux_ucontext.h"
+#include "trap_log.h"
 
 #include <signal.h>
 #include <sys/syscall.h>
@@ -359,10 +360,22 @@ sat_guest_call_run(void *p)
     c->handler(c->signo, c->info, c->uctx);
 }
 
+/* Entries of the guest handler trampoline for the real-time signals 65/66 (thread_suspend, S2C), per process. The server
+ * counts the suspend signals it sends (diag ring kind 5); a difference means the host lost a signal. Printed at exit_group. */
+volatile unsigned long mldr_sig65_tramp_count = 0;
+
 static void
 sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
                              void *native_uctx)
 {
+    if (native_signo >= 65) {
+        unsigned long c = __atomic_add_fetch(&mldr_sig65_tramp_count, 1, __ATOMIC_RELAXED);
+        static int sig65_print = -1;   /* DARLING_SIG65_COUNT=1 prints every entry (the process may leave without an exit hook we see) */
+        if (sig65_print < 0)
+            sig65_print = getenv("DARLING_SIG65_COUNT") != NULL;
+        if (sig65_print)
+            dprintf(2, "[sig65-count] tramp=%lu\n", c);
+    }
     int linux_signo = sat_freebsd_signo_to_linux(native_signo);
     int slot = sat_slot(linux_signo);
     if (slot < 0)
@@ -385,7 +398,7 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
         long long rip = (long long)uc->uc_mcontext.mc_rip;
         int si_code = native_info->si_code;
         void *si_addr = native_info->si_addr;
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest"
             " handler=%p (linux_signo=%d) rip=0x%llx si_code=%d si_addr=%p\n",
             handler, linux_signo, rip, si_code, si_addr);
@@ -395,12 +408,12 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
         {
             unsigned long long bp = (unsigned long long)uc->uc_mcontext.mc_rbp;
             unsigned long long sp0 = (unsigned long long)uc->uc_mcontext.mc_rsp;
-            fprintf(stderr, "[darling-mldr] SIGTRAP-AUDIT-CHAIN: rsp=0x%llx rbp=0x%llx\n", sp0, bp);
+            TRAPLOG("[darling-mldr] SIGTRAP-AUDIT-CHAIN: rsp=0x%llx rbp=0x%llx\n", sp0, bp);
             for (int depth = 0; depth < 16; depth++) {
                 if (bp == 0 || (bp & 7) || bp < sp0 || bp - sp0 > (1ull << 20))
                     break;
                 unsigned long long *fp = (unsigned long long *)bp;
-                fprintf(stderr, "[darling-mldr] SIGTRAP-AUDIT-CHAIN: #%d ret=0x%llx\n", depth, fp[1]);
+                TRAPLOG("[darling-mldr] SIGTRAP-AUDIT-CHAIN: #%d ret=0x%llx\n", depth, fp[1]);
                 if (fp[0] <= bp)
                     break;
                 bp = fp[0];
@@ -410,7 +423,7 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
             int cnt = 0;
             struct kinfo_vmentry *v = kinfo_getvmmap(getpid(), &cnt);
             if (!v) {
-                fprintf(stderr, "[darling-mldr] vmmap: kinfo_getvmmap failed\n");
+                TRAPLOG("[darling-mldr] vmmap: kinfo_getvmmap failed\n");
             } else {
                 const uintptr_t addrs[] = { 0x226605, 0x225bd1, 0x22dbec, (uintptr_t)rip };
                 for (size_t ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++) {
@@ -428,12 +441,12 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
                         perms[3] = (v[i].kve_flags & KVME_FLAG_COW) ? 'p' : '-';
                         const char *tp = v[i].kve_path[0] ? v[i].kve_path : "anon";
                         if (v[i].kve_path[0])
-                            fprintf(stderr, "[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s %s off=0x%llx\n",
+                            TRAPLOG("[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s %s off=0x%llx\n",
                                 (unsigned long long)a, (unsigned long long)s,
                                 (unsigned long long)s, (unsigned long long)e,
                                 perms, tp, (unsigned long long)v[i].kve_offset);
                         else
-                            fprintf(stderr, "[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s anon off=0x%llx\n",
+                            TRAPLOG("[darling-mldr] vmmap: 0x%llx covers 0x%llx: %llx-%llx %s anon off=0x%llx\n",
                                 (unsigned long long)a, (unsigned long long)s,
                                 (unsigned long long)s, (unsigned long long)e,
                                 perms, (unsigned long long)v[i].kve_offset);
@@ -441,13 +454,12 @@ sat_guest_handler_trampoline(int native_signo, siginfo_t *native_info,
                         break;
                     }
                     if (!found)
-                        fprintf(stderr, "[darling-mldr] vmmap: 0x%llx not found in %d entries\n",
+                        TRAPLOG("[darling-mldr] vmmap: 0x%llx not found in %d entries\n",
                             (unsigned long long)a, cnt);
                 }
                 free(v);
             }
         }
-        fflush(stderr);
     }
 
     /* Every guest syscall reaches mldr as SIGILL (raw-syscall ud2) or SIGSYS.

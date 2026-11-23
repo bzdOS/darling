@@ -62,6 +62,7 @@
 #include <unistd.h>
 
 #include "crash_dump.h"
+#include "trap_log.h"
 
 /* Top of the x86_64 user address space on both hosts this runs on (Linux and
  * FreeBSD both use 0x0000800000000000). A stack pointer above it is not a
@@ -257,15 +258,13 @@ mldr_dump_guarded_stack(const char *label, uintptr_t start, unsigned words)
 {
     unsigned i;
 
-    fprintf(stderr, "  %s=0x%016llx:\n", label,
+    TRAPLOG("  %s=0x%016llx:\n", label,
             (unsigned long long)start);
-    fflush(stderr); /* before the walk, not after it — see the file header */
 
     if (start == 0 || start >= MLDR_STACK_MAX_ADDR) {
-        fprintf(stderr,
+        TRAPLOG(
                 "    (refusing to walk: 0x%016llx is not a user-space"
                 " address)\n", (unsigned long long)start);
-        fflush(stderr);
         return;
     }
 
@@ -275,15 +274,14 @@ mldr_dump_guarded_stack(const char *label, uintptr_t start, unsigned words)
         volatile uint64_t word = 0;
 
         if (addr >= MLDR_STACK_MAX_ADDR) {
-            fprintf(stderr, "  [gstack+%4llu] (past the end of user space)\n",
+            TRAPLOG("  [gstack+%4llu] (past the end of user space)\n",
                     off);
             continue;
         }
         if (mldr_dump_read_guarded(addr, &word))
-            fprintf(stderr, "  [gstack+%4llu] 0x%016llx\n", off,
+            TRAPLOG("  [gstack+%4llu] 0x%016llx\n", off,
                     (unsigned long long)word);
         else
-            fprintf(stderr, "  [gstack+%4llu] (unreadable)\n", off);
+            TRAPLOG("  [gstack+%4llu] (unreadable)\n", off);
     }
-    fflush(stderr);
 }

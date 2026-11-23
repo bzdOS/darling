@@ -23,6 +23,8 @@
 #include <unistd.h>  /* write */
 #include <sys/types.h>
 #include <sys/thr.h> /* thr_self */
+#include <stdarg.h>
+#include <stdio.h>   /* vsnprintf only */
 
 /* 1 when DARLING_TRAP_LOG was set at trap setup; handler-safe to read. */
 extern int mldr_trap_log_enabled;
@@ -245,5 +247,26 @@ mldr_tlogn(const char *tag, const char *s, long a, long b)
 	if (n > 0)
 		(void)!write(2, buf, (size_t)n);
 }
+
+/* TRAPLOG(fmt, ...): handler-safe replacement for fprintf(stderr, ...). Formats with vsnprintf into a stack buffer and
+ * emits it with one write(2): no stdio FILE lock, no malloc, no buffering. Use it (not fprintf) in signal, trap and
+ * suspend/resume paths; a thread suspended while holding the stderr FILE lock would block every other logging thread. */
+static inline __attribute__((format(printf, 1, 2))) void
+mldr_tl_printf(const char *fmt, ...)
+{
+	char b[1024];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(b, sizeof(b), fmt, ap);
+	va_end(ap);
+	if (n <= 0)
+		return;
+	if (n >= (int)sizeof(b))
+		n = (int)sizeof(b) - 1;
+	(void)!write(2, b, (size_t)n);
+}
+#define TRAPLOG(...) mldr_tl_printf(__VA_ARGS__)
 
 #endif /* MLDR_TRAP_LOG_H */

@@ -542,20 +542,6 @@ mldr_call_guest_handler(uintptr_t intr_rsp, int sa_onstack, void (*fn)(void *), 
     fn(arg);
 }
 
-extern volatile unsigned long mldr_sig65_tramp_count;
-/* Entries of the guest handler trampoline for signals 65/66, printed when the process exits (compare with ring kind 5). */
-/* Other counters hook into the exit report through this weak function (mldr-sigill-dup-count.patch defines it). */
-extern void mldr_exit_report_hook(void) __attribute__((weak));
-static void
-mldr_sig65_report(void)
-{
-    if (mldr_exit_report_hook)
-        mldr_exit_report_hook();
-    unsigned long n65 = __atomic_load_n(&mldr_sig65_tramp_count, __ATOMIC_RELAXED);
-    if (n65 && getenv("DARLING_SIG65_COUNT"))
-        dprintf(2, "[sig65-count] tramp=%lu\n", n65);
-}
-
 /* ── open(2) flag translation ──────────────────────────────────────────────── */
 
 /*
@@ -969,7 +955,6 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
 
     /* ── process lifecycle ──────────────────────────────────────────── */
     case MACOS_SYS_exit:
-        mldr_sig65_report();
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
         __builtin_unreachable();
 
@@ -3676,11 +3661,9 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
     }
 
     case LINUX_SYS_exit:
-        mldr_sig65_report();
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
         __builtin_unreachable();
     case LINUX_SYS_exit_group:
-        mldr_sig65_report();
         /* FreeBSD has no process-group exit_group; _exit(2) is the closest
          * single-thread-process equivalent dyld's bootstrap needs. */
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
@@ -5274,11 +5257,6 @@ setup_macos_syscall_trap(void)
         sigaddset(&trapset, SIGSYS);
         sigaddset(&trapset, SIGSEGV);
         sigaddset(&trapset, SIGBUS);
-        /* The guest's sigexc_setup2 meant to unblock the real-time signals 65/66 (thread_suspend, S2C) but its 8-byte
-         * mask cannot name them (1ull << 64 is bit 0, SIGHUP): a process that inherits them blocked would never see a
-         * suspend signal. Unblock them here, where the mask is native. */
-        sigaddset(&trapset, 65);
-        sigaddset(&trapset, 66);
         if (sigprocmask(SIG_UNBLOCK, &trapset, &oldset) == 0) {
             int was = sigismember(&oldset, SIGILL) || sigismember(&oldset, SIGSYS)
                 || sigismember(&oldset, SIGSEGV) || sigismember(&oldset, SIGBUS);

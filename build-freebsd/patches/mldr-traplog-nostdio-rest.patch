@@ -1,55 +1,6 @@
-diff -ruN a/src/startup/mldr/crash_dump.c b/src/startup/mldr/crash_dump.c
---- a/src/startup/mldr/crash_dump.c	2026-11-22 01:42:36.487747000 +0000
-+++ b/src/startup/mldr/crash_dump.c	2026-11-22 01:44:17.773221000 +0000
-@@ -62,6 +62,7 @@
- #include <unistd.h>
- 
- #include "crash_dump.h"
-+#include "trap_log.h"
- 
- /* Top of the x86_64 user address space on both hosts this runs on (Linux and
-  * FreeBSD both use 0x0000800000000000). A stack pointer above it is not a
-@@ -257,15 +258,13 @@
- {
-     unsigned i;
- 
--    fprintf(stderr, "  %s=0x%016llx:\n", label,
-+    TRAPLOG("  %s=0x%016llx:\n", label,
-             (unsigned long long)start);
--    fflush(stderr); /* before the walk, not after it — see the file header */
- 
-     if (start == 0 || start >= MLDR_STACK_MAX_ADDR) {
--        fprintf(stderr,
-+        TRAPLOG(
-                 "    (refusing to walk: 0x%016llx is not a user-space"
-                 " address)\n", (unsigned long long)start);
--        fflush(stderr);
-         return;
-     }
- 
-@@ -275,15 +274,14 @@
-         volatile uint64_t word = 0;
- 
-         if (addr >= MLDR_STACK_MAX_ADDR) {
--            fprintf(stderr, "  [gstack+%4llu] (past the end of user space)\n",
-+            TRAPLOG("  [gstack+%4llu] (past the end of user space)\n",
-                     off);
-             continue;
-         }
-         if (mldr_dump_read_guarded(addr, &word))
--            fprintf(stderr, "  [gstack+%4llu] 0x%016llx\n", off,
-+            TRAPLOG("  [gstack+%4llu] 0x%016llx\n", off,
-                     (unsigned long long)word);
-         else
--            fprintf(stderr, "  [gstack+%4llu] (unreadable)\n", off);
-+            TRAPLOG("  [gstack+%4llu] (unreadable)\n", off);
-     }
--    fflush(stderr);
- }
-diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_syscall_trap.c
---- a/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:42:36.487540000 +0000
-+++ b/src/startup/mldr/freebsd_syscall_trap.c	2026-11-22 01:44:17.772805000 +0000
-@@ -1083,7 +1083,7 @@
+--- a/src/startup/mldr/freebsd_syscall_trap.c
++++ b/src/startup/mldr/freebsd_syscall_trap.c
+@@ -1091,7 +1091,7 @@
          return freebsd_raw_syscall(SYS_sigprocmask, a1, a2, a3, 0, 0, 0);
  
      default:
@@ -58,7 +9,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] unhandled macOS BSD syscall %u (0x%x) — ENOSYS\n",
              macos_nr, macos_nr);
          return -ENOSYS;
-@@ -1123,7 +1123,7 @@
+@@ -1131,7 +1131,7 @@
      case MACH_TRAP_task_self_trap:
          ret = dserver_rpc_task_self_trap(&port_name);
          if (ret < 0) {
@@ -67,7 +18,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] mach_trap: task_self_trap RPC failed: %d\n", ret);
              return (long)ret; /* negative errno */
          }
-@@ -1132,7 +1132,7 @@
+@@ -1140,7 +1140,7 @@
      case MACH_TRAP_host_self_trap:
          ret = dserver_rpc_host_self_trap(&port_name);
          if (ret < 0) {
@@ -76,7 +27,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] mach_trap: host_self_trap RPC failed: %d\n", ret);
              return (long)ret;
          }
-@@ -1141,7 +1141,7 @@
+@@ -1149,7 +1149,7 @@
      case MACH_TRAP_thread_self_trap:
          ret = dserver_rpc_thread_self_trap(&port_name);
          if (ret < 0) {
@@ -85,7 +36,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] mach_trap: thread_self_trap RPC failed: %d\n", ret);
              return (long)ret;
          }
-@@ -1150,7 +1150,7 @@
+@@ -1158,7 +1158,7 @@
      case MACH_TRAP_mach_reply_port:
          ret = dserver_rpc_mach_reply_port(&port_name);
          if (ret < 0) {
@@ -94,7 +45,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] mach_trap: mach_reply_port RPC failed: %d\n", ret);
              return (long)ret;
          }
-@@ -1175,7 +1175,7 @@
+@@ -1183,7 +1183,7 @@
              (void*)stack_arg1        /* rcv_msg from caller's stack */
          );
          if (ret < 0) {
@@ -103,7 +54,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] mach_trap: mach_msg_trap RPC failed: %d\n", ret);
              return (long)ret;
          }
-@@ -1196,14 +1196,14 @@
+@@ -1204,14 +1204,14 @@
              (void*)a1                /* rcv_msg: default to msg (stack+16 TODO) */
          );
          if (ret < 0) {
@@ -120,7 +71,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] mach_trap: unhandled Mach trap %d — ENOSYS\n",
              trap_nr);
          return -ENOSYS;
-@@ -1776,7 +1776,7 @@
+@@ -1784,7 +1784,7 @@
           * rbp and the caller's return address is one slot up. */
          int retslot = (trap->emulate == 3) ? 1 : 0;
  
@@ -129,7 +80,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] hit #%ld %s rdi=0x%llx rsi=0x%llx rdx=0x%llx rax=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
              trap->hits, trap->label, (unsigned long long)mc->mc_rdi,
              (unsigned long long)mc->mc_rsi,
-@@ -1787,29 +1787,28 @@
+@@ -1795,29 +1795,28 @@
          /* Control #110: the return chain, as in #77 — raw stack words plus every
           * slot resolving into a known image, so a back-jump cycle inside one
           * function can be told from a re-entrant call by its frames. */
@@ -165,7 +116,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              (unsigned long long)mc->mc_rdi, (unsigned long long)mc->mc_rsi,
              (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx,
              (unsigned long long)mc->mc_rax);
-@@ -1844,7 +1843,7 @@
+@@ -1852,7 +1851,7 @@
  
                  for (int k = 0; k < 3; k++)
                      (void)mldr_dump_read_guarded((uintptr_t)base + 8u * k, &sw[k]);
@@ -174,7 +125,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                          (unsigned long long)base, (unsigned long long)sw[0],
                          (unsigned long long)sw[1], (unsigned long long)sw[2]);
                  base = sw[0];
-@@ -1858,23 +1857,23 @@
+@@ -1866,23 +1865,23 @@
                  sb[n] = ((char)w >= 0x20 && (char)w < 0x7f) ? (char)w : '?';
              }
              sb[n] = 0;
@@ -204,7 +155,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              (unsigned long)tsd_tid);
  
      /* __cxa_throw(void *exc, std::type_info *tinfo, void (*dest)(void*)) —
-@@ -1884,14 +1883,14 @@
+@@ -1892,14 +1891,14 @@
              (const char *const *)(uintptr_t)(mc->mc_rsi + 8);
  
          if (*namep != NULL)
@@ -221,7 +172,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              mldr_describe_addr(sp[0], buf, sizeof(buf)));
  
      /* Control #112: dump the bytes at the trap site and, for a lazy stub's
-@@ -1912,10 +1911,10 @@
+@@ -1920,10 +1919,10 @@
              code[i] = (uint8_t)w;
          }
          if (ok) {
@@ -235,7 +186,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              if (code[0] == 0xff && code[1] == 0x25) {
                  int32_t d = 0;
                  uintptr_t ptr;
-@@ -1924,29 +1923,28 @@
+@@ -1932,29 +1931,28 @@
                  memcpy(&d, code + 2, 4);
                  ptr = (uintptr_t)mc->mc_rip + 6 + (intptr_t)d;
                  if (mldr_dump_read_guarded(ptr, &tgt))
@@ -269,7 +220,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
  }
  
  /*
-@@ -1995,7 +1993,7 @@
+@@ -2003,7 +2001,7 @@
      if (log_enabled < 0)
          log_enabled = (getenv("MLDR_LOG_MAPPINGS") != NULL);
      if (log_enabled)
@@ -278,7 +229,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  executable ? "exec" : "data", base, size, fd, path);
  
      const char *name = mldr_basename(path);
-@@ -2499,11 +2497,10 @@
+@@ -2576,11 +2574,10 @@
                  }
                  memcpy(orig_ctl, big_ctl, outlen);
                  if (mldr_trap_log_enabled && outlen >= 20) {
@@ -291,7 +242,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  }
              }
              mh->msg_control = orig_ctl;
-@@ -2727,17 +2724,16 @@
+@@ -2804,17 +2801,16 @@
          if (log_epoll < 0)
              log_epoll = (getenv("MLDR_LOG_EPOLL") != NULL);
          if (log_epoll) {
@@ -311,7 +262,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          }
  
          for (long i = 0; i < n; i++) {
-@@ -2989,7 +2985,7 @@
+@@ -3066,7 +3062,7 @@
           * delay. Fail loudly rather than return a plausible-looking zero that
           * a caller would read as "timer disarmed".
           */
@@ -320,7 +271,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] timerfd_gettime is not implemented (kqueue exposes"
              " no residual delay) — ENOSYS\n");
          return -ENOSYS;
-@@ -3071,7 +3067,7 @@
+@@ -3148,7 +3144,7 @@
              /* REQUEUE/CMP_REQUEUE/WAKE_OP/priority-inheritance ops have no
               * _umtx_op equivalent that preserves their semantics. Fail loudly
               * rather than silently mistranslating a lock handoff. */
@@ -329,7 +280,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] futex op %d (raw 0x%lx) unimplemented"
                  " — ENOSYS\n", futex_op, (unsigned long)a2);
              return -ENOSYS;
-@@ -3116,7 +3112,7 @@
+@@ -3193,7 +3189,7 @@
           * per-thread wd), clean bytes mean it is at or below the host
           * call. */
          const unsigned char *sb = (const unsigned char *)(long)a2;
@@ -338,7 +289,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[gsw-bisect] connect fd=%ld len=%ld bytes=%02x %02x %02x %02x\n",
                  (long)a1, (long)a3,
                  ((long)a3 >= 1 && sb != NULL) ? sb[0] : 0,
-@@ -3141,7 +3137,7 @@
+@@ -3218,7 +3214,7 @@
           * paper (linux_family = 2 for AF_INET), so a run must show what
           * actually arrives. */
          const unsigned char *sb = (const unsigned char *)(long)a2;
@@ -347,7 +298,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[gsw-bisect] bind fd=%ld len=%ld bytes=%02x %02x %02x %02x\n",
                  (long)a1, (long)a3,
                  ((long)a3 >= 1 && sb != NULL) ? sb[0] : 0,
-@@ -3362,8 +3358,7 @@
+@@ -3441,8 +3437,7 @@
           * Anything else is EINVAL, which callers of prctl already handle,
           * rather than ENOSYS. */
          if (mldr_trap_log_enabled) {
@@ -357,7 +308,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          }
          switch (a1) {
          case 1:  /* PR_SET_PDEATHSIG */
-@@ -3429,11 +3424,10 @@
+@@ -3508,11 +3503,10 @@
              void *newh = (a2 != NULL) ? *(void **)a2 : (void *)0;
              char cb[256];
              mldr_describe_addr((uintptr_t)__builtin_return_address(0), cb, sizeof(cb));
@@ -370,7 +321,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          }
          if (mldr_trap_log_enabled && (int)a1 >= 32) {
              /* real-time signal audit (DARLING_TRAP_LOG): who registers a
-@@ -3443,10 +3437,9 @@
+@@ -3522,10 +3516,9 @@
                                              (void *)a3, (size_t)a4);
              char cb[256];
              mldr_describe_addr((uintptr_t)__builtin_return_address(0), cb, sizeof(cb));
@@ -382,7 +333,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              return rr;
          }
          return mldr_sys_rt_sigaction((int)a1, (const void *)a2,
-@@ -3621,7 +3614,7 @@
+@@ -3698,7 +3691,7 @@
              /* Can only happen if a future ud2-patched signature ever routes
               * arch_prctl through sigill_handler, which doesn't have a
               * matching mcontext-patch story yet. */
@@ -391,7 +342,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] arch_prctl: no mcontext available for op"
                  " 0x%lx — ENOSYS\n", a1);
              return -ENOSYS;
-@@ -3639,7 +3632,7 @@
+@@ -3716,7 +3709,7 @@
              *(long *)a2 = mc->mc_gsbase;
              return 0;
          }
@@ -400,7 +351,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] arch_prctl: unhandled op 0x%lx — ENOSYS\n", a1);
          return -ENOSYS;
  
-@@ -3665,7 +3658,7 @@
+@@ -3742,7 +3735,7 @@
       *             callers need to be steered to mmap(MAP_ANON) instead. */
      default:
      unhandled:
@@ -409,7 +360,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] unhandled Linux syscall %u — ENOSYS\n", linux_nr);
  #if defined(__x86_64__)
          /* Control #64: name the guest site of each unhandled raw syscall, so
-@@ -3676,7 +3669,7 @@
+@@ -3753,7 +3746,7 @@
              if (mc != NULL && mldr_raw_site_logged < 32) {
                  char site[256];
                  mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
@@ -418,7 +369,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                      "[darling-mldr]   at %s rip=0x%llx rax=0x%llx\n",
                      site, (unsigned long long)mc->mc_rip,
                      (unsigned long long)mc->mc_rax);
-@@ -4001,14 +3994,14 @@
+@@ -4078,14 +4071,14 @@
  
      if (raw_eax == 0) {
          /* Could not recover — dump 16 bytes before rip for diagnosis */
@@ -436,7 +387,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          if (mldr_trap_log_enabled && mldr_trap_log_handlers)
              mldr_tlog("SIGSYS RE-RAISE(recover-fail)", (long)mc->mc_rip, 0);
          struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
-@@ -4069,7 +4062,7 @@
+@@ -4146,7 +4139,7 @@
          linux_abi_retval = true;
      } else {
          /* Unknown syscall class — log and re-raise as default signal */
@@ -445,7 +396,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] SIGSYS: unhandled syscall class 0x%02x (raw_eax=0x%08x)"
              " at rip=0x%llx\n",
              (raw_eax >> 24) & 0xff, raw_eax,
-@@ -4152,7 +4145,7 @@
+@@ -4229,7 +4222,7 @@
          ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6, stack_arg1);
      } else {
          /* Unknown syscall class — log and re-raise as default signal */
@@ -454,7 +405,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] SIGSYS(aarch64): unhandled class 0x%02x"
              " (x16=0x%08x) at elr=0x%llx\n",
              (raw_x16 >> 24) & 0xff, raw_x16,
-@@ -4332,19 +4325,19 @@
+@@ -4631,19 +4624,19 @@
              mldr_tlogx("SIGILL-FAULT rip", pc, (long)mc->mc_rax);
              /* who raised it: a #UD has si_code ILL_*, a signal sent by another
               * thread or process has SI_USER/SI_LWP and a pid */
@@ -477,7 +428,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] SIGILL-FAULT h1: prev tid=%ld seq=%lu uctx=%p info=%p rip_in=%p rip_out=%p rax_out=0x%lx |"
                  " now seq=%lu uctx=%p info=%p rip=%p rsp=%p sigmask0=0x%x\n",
                  h1prev.tid, h1prev.seq, (void *)h1prev.uctx, (void *)h1prev.info, (void *)h1prev.rip_in,
-@@ -4425,7 +4418,7 @@
+@@ -4724,7 +4717,7 @@
                      mc->mc_rip = tgt;
                      return;
                  }
@@ -486,7 +437,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                      "[darling-mldr] resume: stack below rsp unreadable,"
                      " dying honestly\n");
              } else if (t->resume && t->emulate == 2) {
-@@ -4442,7 +4435,7 @@
+@@ -4741,7 +4734,7 @@
                      mc->mc_rip = t->addr + 2;
                      return;
                  }
@@ -495,7 +446,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                      "[darling-mldr] resume: lock word unreadable,"
                      " dying honestly\n");
              } else {
-@@ -4476,7 +4469,7 @@
+@@ -4775,7 +4768,7 @@
          if (!is_ours) {
              char site[256];
              mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
@@ -504,7 +455,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                  "[darling-mldr] genuine SIGILL (ud2, not a patched trampoline)"
                  " at %s rip=0x%llx rax=0x%llx\n",
                  site, (unsigned long long)mc->mc_rip,
-@@ -4494,7 +4487,7 @@
+@@ -4793,7 +4786,7 @@
                  int ok[4];
                  for (int i = 0; i < 4; i++)
                      ok[i] = mldr_dump_read_guarded(lp + (uintptr_t)(8 * i), &w[i]);
@@ -513,7 +464,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                      "[darling-mldr] lock word @0x%llx:"
                      " %016llx %016llx %016llx %016llx (ok=%d%d%d%d rdi=0x%llx)\n",
                      (unsigned long long)lp,
-@@ -4503,7 +4496,6 @@
+@@ -4802,7 +4795,6 @@
                      ok[0], ok[1], ok[2], ok[3],
                      (unsigned long long)mc->mc_rdi);
              }
@@ -521,7 +472,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              /* Control #71/#72: name the re-entry. Print the host thread id
               * (thr_self, which is also what the guest gettid() returns — see
               * LINUX_SYS_gettid above) next to the guest pid, and walk the
-@@ -4512,7 +4504,7 @@
+@@ -4811,7 +4803,7 @@
              {
                  long host_tid = 0;
                  freebsd_raw_syscall(SYS_thr_self, (long)&host_tid, 0, 0, 0, 0, 0);
@@ -530,7 +481,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
                      "[darling-mldr] reentry: host_tid=%ld guest_pid=%ld rsp=0x%llx\n",
                      host_tid, (long)getpid(), (unsigned long long)mc->mc_rsp);
              }
-@@ -4527,11 +4519,10 @@
+@@ -4826,11 +4818,10 @@
                          continue;
                      mldr_describe_addr((uintptr_t)w, ws, sizeof(ws));
                      if (strstr(ws, "<unknown>") == NULL)
@@ -543,7 +494,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              crash_debug_handler(signo, info, uctx);
              return;
          }
-@@ -4591,10 +4582,9 @@
+@@ -4891,10 +4882,9 @@
  
      /* Control #148 step 26: this handler being reached means mldr's own
       * SIGTRAP disposition won at delivery time. */
@@ -555,7 +506,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
  
      if (at[0] == 0xcc && strstr(descr, "+0x64d020") != NULL) {
          uint64_t ret = 0;
-@@ -4608,7 +4598,7 @@
+@@ -4908,7 +4898,7 @@
              mldr_describe_addr((uintptr_t)ret, caller, sizeof(caller));
          else
              snprintf(caller, sizeof(caller), "<unreadable>");
@@ -564,7 +515,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] stub-entry: int3 hit #%d at %s (site=0x%llx)"
              " rsp=0x%llx [rsp]=0x%llx %s\n",
              hit, descr, (unsigned long long)site,
-@@ -4620,12 +4610,11 @@
+@@ -4920,12 +4910,11 @@
                  uint64_t w = 0;
                  int ok = mldr_dump_read_guarded(
                      (uintptr_t)mc->mc_rsp + (uintptr_t)(8 * i), &w);
@@ -578,7 +529,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          /* Emulate the overwritten `pushq %rbp` (original first byte 0x55)
           * and resume past the int3, so the next entry traps again. */
          {
-@@ -4637,10 +4626,9 @@
+@@ -4937,10 +4926,9 @@
                  mc->mc_rip = site + 1;
                  return;
              }
@@ -590,7 +541,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          }
      }
      /* Not our site (or cannot resume): honest death. */
-@@ -4651,7 +4639,7 @@
+@@ -4951,7 +4939,7 @@
           * byte before it is the last byte of the preceding instruction. */
          uint64_t prev = 0;
          int prev_ok = mldr_dump_read_guarded((uintptr_t)(site - 1), &prev);
@@ -599,15 +550,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] sigtrap NOT-OUR-SITE: rip=0x%016llx si_code=%d"
              " si_addr=0x%016llx byte[rip-1]=0x%02x byte[rip-2]=0x%02x%s"
              " site=%s\n",
-@@ -4659,7 +4647,6 @@
-             (unsigned long long)(uintptr_t)info->si_addr,
-             (unsigned)at[0], (unsigned)(prev & 0xff),
-             prev_ok ? "" : "(unreadable)", descr);
--        fflush(stderr);
-         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
-         sigaction(signo, &sa_dfl, NULL);
-         raise(signo);
-@@ -4698,7 +4685,7 @@
+@@ -5038,7 +5026,7 @@
          freebsd_raw_syscall(SYS_write, 2, (long)mk, (long)(sizeof(mk) - 1), 0, 0, 0);
      }
  
@@ -616,7 +559,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
          "[darling-mldr] FATAL signal %d (code=%d) at addr=%p\n"
          /* survive-window slice: name the sender — si_pid is the killer for
           * SI_QUEUE/SI_USER signals, si_value carries the queued payload. */
-@@ -4721,14 +4708,13 @@
+@@ -5061,14 +5049,13 @@
          (unsigned long long)mc->mc_r10, (unsigned long long)mc->mc_r11,
          (unsigned long long)mc->mc_r12, (unsigned long long)mc->mc_r13,
          (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
@@ -632,7 +575,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
              "[darling-mldr] fatal stack: signal=%d rip=0x%llx addr=%p\n"
              "[darling-mldr]   at %s rip=0x%llx\n",
              signo, (unsigned long long)mc->mc_rip, info->si_addr, site,
-@@ -4739,13 +4725,12 @@
+@@ -5079,13 +5066,12 @@
                  !mldr_dump_read_guarded(fp + 8, &ret) || ret == 0)
                  break;
              mldr_describe_addr((uintptr_t)ret, site, sizeof(site));
@@ -647,7 +590,7 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
      }
  
      /* DIAG (Chrome dyld-init crash hunt): backtrace_symbols on the live stack
-@@ -4753,14 +4738,9 @@
+@@ -5093,14 +5079,9 @@
      {
          void *frames[32];
          int n = backtrace(frames, 32);
@@ -665,83 +608,3 @@ diff -ruN a/src/startup/mldr/freebsd_syscall_trap.c b/src/startup/mldr/freebsd_s
      }
  
      /* DEBUG: dump the GUEST stack at rsp (backtrace(3) on FreeBSD only walks
-diff -ruN a/src/startup/mldr/sigaction_translate.c b/src/startup/mldr/sigaction_translate.c
---- a/src/startup/mldr/sigaction_translate.c	2026-11-22 01:42:36.487722000 +0000
-+++ b/src/startup/mldr/sigaction_translate.c	2026-11-22 01:44:17.773018000 +0000
-@@ -17,6 +17,7 @@
- #include "freebsd_syscall_trap.h"
- #include "linux_siginfo.h"
- #include "linux_ucontext.h"
-+#include "trap_log.h"
- 
- #include <signal.h>
- #include <sys/syscall.h>
-@@ -392,7 +393,7 @@
-         long long rip = (long long)uc->uc_mcontext.mc_rip;
-         int si_code = native_info->si_code;
-         void *si_addr = native_info->si_addr;
--        fprintf(stderr,
-+        TRAPLOG(
-             "[darling-mldr] SIGTRAP-AUDIT-DELIVER: native SIGTRAP -> guest"
-             " handler=%p (linux_signo=%d) rip=0x%llx si_code=%d si_addr=%p\n",
-             handler, linux_signo, rip, si_code, si_addr);
-@@ -402,18 +403,17 @@
-         {
-             unsigned long long bp = (unsigned long long)uc->uc_mcontext.mc_rbp;
-             unsigned long long sp0 = (unsigned long long)uc->uc_mcontext.mc_rsp;
--            fprintf(stderr, "[darling-mldr] SIGTRAP-AUDIT-CHAIN: rsp=0x%llx rbp=0x%llx\n", sp0, bp);
-+            TRAPLOG("[darling-mldr] SIGTRAP-AUDIT-CHAIN: rsp=0x%llx rbp=0x%llx\n", sp0, bp);
-             for (int depth = 0; depth < 16; depth++) {
-                 if (bp == 0 || (bp & 7) || bp < sp0 || bp - sp0 > (1ull << 20))
-                     break;
-                 unsigned long long *fp = (unsigned long long *)bp;
--                fprintf(stderr, "[darling-mldr] SIGTRAP-AUDIT-CHAIN: #%d ret=0x%llx\n", depth, fp[1]);
-+                TRAPLOG("[darling-mldr] SIGTRAP-AUDIT-CHAIN: #%d ret=0x%llx\n", depth, fp[1]);
-                 if (fp[0] <= bp)
-                     break;
-                 bp = fp[0];
-             }
-         }
--        fflush(stderr);
-     }
- 
-     /* Every guest syscall reaches mldr as SIGILL (raw-syscall ud2) or SIGSYS.
-diff -ruN a/src/startup/mldr/trap_log.h b/src/startup/mldr/trap_log.h
---- a/src/startup/mldr/trap_log.h	2026-11-22 01:42:36.487791000 +0000
-+++ b/src/startup/mldr/trap_log.h	2026-11-22 01:44:17.772881000 +0000
-@@ -23,6 +23,8 @@
- #include <unistd.h>  /* write */
- #include <sys/types.h>
- #include <sys/thr.h> /* thr_self */
-+#include <stdarg.h>
-+#include <stdio.h>   /* vsnprintf only */
- 
- /* 1 when DARLING_TRAP_LOG was set at trap setup; handler-safe to read. */
- extern int mldr_trap_log_enabled;
-@@ -245,5 +247,26 @@
- 	if (n > 0)
- 		(void)!write(2, buf, (size_t)n);
- }
-+
-+/* TRAPLOG(fmt, ...): handler-safe replacement for fprintf(stderr, ...). Formats with vsnprintf into a stack buffer and
-+ * emits it with one write(2): no stdio FILE lock, no malloc, no buffering. Use it (not fprintf) in signal, trap and
-+ * suspend/resume paths; a thread suspended while holding the stderr FILE lock would block every other logging thread. */
-+static inline __attribute__((format(printf, 1, 2))) void
-+mldr_tl_printf(const char *fmt, ...)
-+{
-+	char b[1024];
-+	va_list ap;
-+	int n;
-+
-+	va_start(ap, fmt);
-+	n = vsnprintf(b, sizeof(b), fmt, ap);
-+	va_end(ap);
-+	if (n <= 0)
-+		return;
-+	if (n >= (int)sizeof(b))
-+		n = (int)sizeof(b) - 1;
-+	(void)!write(2, b, (size_t)n);
-+}
-+#define TRAPLOG(...) mldr_tl_printf(__VA_ARGS__)
- 
- #endif /* MLDR_TRAP_LOG_H */
