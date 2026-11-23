@@ -71,7 +71,7 @@ Range check against dyld-trace images: lowest traced image base is `0x825ee2000`
   }
   ```
 - `$SRC/src/startup/mldr/freebsd_syscall_trap.c:3965-4025` `mldr_patch_linux_raw_syscalls` rewrites matching trampoline signatures to `ud2`, logs patch/no-match, restores `PROT_READ|PROT_EXEC`. It only patches existing mapped pages; it does **not** allocate a new executable page.
-- `$SRC/src/startup/mldr/freebsd_syscall_trap.c:1595-1705` `mldr_arm_trap_at` makes targeted pages temporarily RWX to plant `ud2` traps for diagnostics (env-controlled); also no new executable allocation.
+- `$SRC/src/startup/mldr/freebsd_syscall_trap.c:1581-1702` `MLDR_TRAP_AT`/`MLDR_TRAP_RESUME_AT` (`mldr_plant_traps`, envs 1590-1592, arm cycle from 1595, "armed" log 1688) makes targeted pages temporarily RWX to plant `ud2` traps for diagnostics (env-controlled); also no new executable allocation.
 
 ### dyld/mldr anonymous executable allocations
 
