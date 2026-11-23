@@ -147,7 +147,15 @@ int timerfd_create(int clockid, int flags) {
     s->write_fd = pfd[1];
     s->cancelled = 0;
     pthread_mutex_init(&s->mu, NULL);
-    pthread_cond_init(&s->cv, NULL);
+    /* The deadline _tfd_thread waits for is a CLOCK_MONOTONIC time (timerfd_create is only ever
+     * asked for CLOCK_MONOTONIC), so the condvar has to time out on that clock. With the default
+     * attributes it timed out on CLOCK_REALTIME, against which any monotonic deadline (days of
+     * uptime) lies decades in the past: every arm fired at once and the server spun on its timer. */
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&s->cv, &ca);
+    pthread_condattr_destroy(&ca);
     pthread_create(&s->thread, NULL, _tfd_thread, s);
     if (pfd[0] < BSDOS_TFD_MAX)
         _tfd_state[pfd[0]] = s;
