@@ -94,7 +94,7 @@ NOT_STRING = re.compile(r"(CallBacks|Callbacks|Callback)$|^_AVSpeechUtterance|^_
 # kCMTimeInvalid = {0, 0, Valid|Indefinite, 0} per the SDK headers. Numeric singles are
 # the documented scalars: kCLLocationAccuracyBest -1.0 / HundredMeters 100.0 (doubles),
 # AVSpeechUtteranceDefaultSpeechRate 0.5f / MaximumSpeechRate 1.0f,
-# NSURLSessionTaskPriorityHigh 1.0f, GCHapticDurationInfinite +Inf (double).
+# NSURLSessionTaskPriorityHigh 0.75f (NSURLSession.h), GCHapticDurationInfinite +Inf (float).
 # Contract: data_asm emits these bytes instead of zero fill; the census then no longer
 # lists the name (object_is_zero reads up to 64 bytes, every value here is non-zero
 # inside them). Names that cannot be static bytes (isa-bound singletons, opaque objects,
@@ -116,8 +116,8 @@ NON_STRING_VALUES = {
     "_kCLLocationAccuracyHundredMeters": (["    .quad 0x4059000000000000"], "sdk-doc"),
     "_AVSpeechUtteranceDefaultSpeechRate": (["    .long 0x3F000000"], "sdk-doc"),
     "_AVSpeechUtteranceMaximumSpeechRate": (["    .long 0x3F800000"], "sdk-doc"),
-    "_NSURLSessionTaskPriorityHigh": (["    .long 0x3F800000"], "sdk-doc"),
-    "_GCHapticDurationInfinite": (["    .quad 0x7FF0000000000000"], "sdk-doc"),
+    "_NSURLSessionTaskPriorityHigh": (["    .long 0x3F400000"], "sdk-doc"),
+    "_GCHapticDurationInfinite": (["    .long 0x7F800000"], "sdk-doc"),
 }
 # END_NON_STRING_VALUES
 
