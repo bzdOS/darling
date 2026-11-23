@@ -393,8 +393,6 @@ cp "${STAGED_OVERLAY}/System/Library/Frameworks/CoreGraphics.framework/Versions/
 echo "=== [3/4] Stub frameworks (CoreData, QuartzCore) ==="
 # AppKit source references CoreData and QuartzCore classes. The real frameworks
 # have never been ported; build minimal stub dylibs so AppKit can link.
-STUBS="${SRC}/src/freebsd-shims/stub-frameworks"
-clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -w -O0 -c "${STUBS}/CoreData/CoreData.m" -o "${BUILD}/CoreData-stub.o"
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/CoreData.framework/Versions/A"
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/CoreData.framework/Versions/A/CoreData \
@@ -403,7 +401,6 @@ ld64.lld ${LD_FLAGS} -dylib \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation" \
 	"${STAGED_OVERLAY}/usr/lib/libobjc.A.dylib" "${STAGED_OVERLAY}/usr/lib/libSystem.B.dylib"
-clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -I${COCOTRON}/CoreText/include -w -O0 -c "${STUBS}/QuartzCore/QuartzCore.m" -o "${BUILD}/QuartzCore-stub.o"
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A"
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore \
@@ -420,7 +417,6 @@ mkdir -p "${OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A"
 cp "${STAGED_OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore" \
 	"${OVERLAY}/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore"
 
-clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -I${COCOTRON}/CoreGraphics/include -I${COCOTRON}/CoreText/include -w -O0 -c "${STUBS}/CoreText/CoreText.m" -o "${BUILD}/CoreText-stub.o"
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/CoreText.framework/Versions/A"
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/CoreText.framework/Versions/A/CoreText \
@@ -440,7 +436,6 @@ mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions
 cp "${OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO" \
 	"${STAGED_OVERLAY}/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO"
 
-clang ${CLANG_BASE} ${SDK_SYSTEM_INCLUDES} ${SDK_INCLUDES} -I${SRC}/src/freebsd-shims/missing-headers -w -O0 -c "${STUBS}/LaunchServices/LaunchServices.m" -o "${BUILD}/LaunchServices-stub.o"
 mkdir -p "${STAGED_OVERLAY}/System/Library/Frameworks/LaunchServices.framework/Versions/A"
 ld64.lld ${LD_FLAGS} -dylib \
 	-install_name /System/Library/Frameworks/LaunchServices.framework/Versions/A/LaunchServices \
