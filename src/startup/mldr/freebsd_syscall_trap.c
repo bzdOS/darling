@@ -124,6 +124,7 @@
 #include <sys/event.h> /* kqueue — epoll_create1 stand-in, see LINUX_SYS_epoll_create1 */
 #include <sys/umtx.h> /* _umtx_op — futex translation, see LINUX_SYS_futex */
 #include <sys/mount.h> /* native struct statfs — statfs/fstatfs translation */
+#include <sys/sysctl.h> /* CTL_HW/CTL_VM mibs, struct loadavg — sysinfo(2) */
 #include <bsdos_linux_xlate.h> /* the one host<->guest constant table: errno, signals, mmap/msync flags */
 #include "sigaction_translate.h" /* mldr_sys_rt_sigaction — see LINUX_SYS_rt_sigaction */
 #include "trap_log.h"            /* exit-caller logging slice — write(2) markers */
@@ -186,6 +187,7 @@ int mldr_trap_log_handlers = 1;
 #define MACOS_SYS_mmap         197
 #define MACOS_SYS_getpgrp       81
 #define MACOS_SYS_setpgid       82
+#define MACOS_SYS_wait4          7
 #define MACOS_SYS_getppid       39
 #define MACOS_SYS_sigprocmask   48
 #define MACOS_SYS_sysctl       202
@@ -229,6 +231,7 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_dup           32
 #define LINUX_SYS_dup2          33
 #define LINUX_SYS_getpid        39
+#define LINUX_SYS_getppid      110
 /* 7 = poll on x86-64. The guest's poll(395) reaches the overlay's
  * sys_pselect_nocancel, which forwards here; a run showed exactly two
  * "unhandled Linux syscall 7" lines — the probe's main and spawned poll
@@ -302,6 +305,7 @@ int mldr_trap_log_handlers = 1;
 #define LINUX_SYS_getcpu       309
 #define LINUX_SYS_sched_yield   24
 #define LINUX_SYS_uname         63
+#define LINUX_SYS_sysinfo       99
 #define LINUX_SYS_prctl        157
 #define LINUX_SYS_getrandom    318
 
@@ -537,6 +541,20 @@ mldr_call_guest_handler(uintptr_t intr_rsp, int sa_onstack, void (*fn)(void *), 
     fn(arg);
 }
 
+extern volatile unsigned long mldr_sig65_tramp_count;
+/* Entries of the guest handler trampoline for signals 65/66, printed when the process exits (compare with ring kind 5). */
+/* Other counters hook into the exit report through this weak function (mldr-sigill-dup-count.patch defines it). */
+extern void mldr_exit_report_hook(void) __attribute__((weak));
+static void
+mldr_sig65_report(void)
+{
+    if (mldr_exit_report_hook)
+        mldr_exit_report_hook();
+    unsigned long n65 = __atomic_load_n(&mldr_sig65_tramp_count, __ATOMIC_RELAXED);
+    if (n65 && getenv("DARLING_SIG65_COUNT"))
+        dprintf(2, "[sig65-count] tramp=%lu\n", n65);
+}
+
 /* ── open(2) flag translation ──────────────────────────────────────────────── */
 
 /*
@@ -553,6 +571,22 @@ mldr_call_guest_handler(uintptr_t intr_rsp, int sa_onstack, void (*fn)(void *), 
  * output:   the corresponding FreeBSD flag word.
  * sideEffects: none.
  */
+
+/* Lock-free trap-log lines. fprintf(stderr, ...) from the trap handlers takes the FILE lock of stderr; a thread suspended by the
+ * suspend signal while it holds that lock (the signal runs the guest handler nested inside the trap, which parks in thread_suspended)
+ * blocks every other thread that logs, among them the suspender that has to send thread_resume: a deadlock (host state of a hung run:
+ * suspender and watchdog in do_lock_umutex, worker in recvmsg). These lines are built with the converters of trap_log.h into a stack
+ * buffer and emitted with one write(2). */
+struct mldr_tlb { char b[320]; int n; };
+static void mldr_tlb_s(struct mldr_tlb *t, const char *s) { while (*s && t->n < 300) t->b[t->n++] = *s++; }
+static void mldr_tlb_d(struct mldr_tlb *t, long v) {
+    char tmp[24];
+    char *e = tmp + sizeof(tmp);
+    char *lo = mldr_fmt_dec(e, v);
+    while (lo < e && t->n < 300) t->b[t->n++] = *lo++;
+}
+static void mldr_tlb_mem(struct mldr_tlb *t, const char *m, int len) { for (int i = 0; i < len && t->n < 300; i++) t->b[t->n++] = m[i]; }
+static void mldr_tlb_emit(struct mldr_tlb *t) { t->b[t->n++] = '\n'; (void)!write(2, t->b, (size_t)t->n); }
 
 /* sockaddr bridge for bind(2) and connect(2). The guest hands over a Linux
  * layout address (2-byte family, then the payload); FreeBSD wants a 1-byte
@@ -787,8 +821,6 @@ linux_setxattr(long path, long name, long value, long size, long flags)
     if (flags & 3) {
         long have = freebsd_raw_syscall(SYS_extattr_get_file, path, EXTATTR_NAMESPACE_USER, name, 0, 0, 0);
         if ((flags & 1) && have >= 0)
-#include "linux_ifioctl.h" /* Linux SIOCGIF* -> host ifreq ioctls (sysctl NET_RT_IFLIST); needs freebsd_raw_syscall */
-
             return -17;     /* EEXIST */
         if ((flags & 2) && have < 0)
             return xattr_errno_to_linux(have);
@@ -796,6 +828,11 @@ linux_setxattr(long path, long name, long value, long size, long flags)
     long r = freebsd_raw_syscall(SYS_extattr_set_file, path, EXTATTR_NAMESPACE_USER, name, value, size, 0);
     return r < 0 ? xattr_errno_to_linux(r) : 0;
 }
+
+/* Guest-visible parent pid for MACOS_SYS_getppid. Host SYS_getppid is not a
+ * Darwin guest pid (probe: child ppid=-1, expected parent pid). For forked
+ * children inside one mldr, parent is the forking process's guest pid. */
+static pid_t g_mldr_guest_ppid = -1;
 
 /*
  * purpose:  Host fork(2) for the guest's plain-fork forms (Linux clone(SIGCHLD, 0), fork, vfork).
@@ -805,13 +842,17 @@ linux_setxattr(long path, long name, long value, long size, long flags)
  *           snprintf). mldr registers no pthread_atfork handlers, and fork is async-signal-safe
  *           (POSIX), so calling it here, inside the SIGSYS/SIGILL handler, is allowed.
  * output:   0 in the child, the child's pid in the parent, or -errno (FreeBSD errno).
- * sideEffects: creates a process (only the calling thread is copied).
+ * sideEffects: creates a process (only the calling thread is copied); updates
+ *           g_mldr_guest_ppid in the child to the parent's guest pid.
  */
 static long
 mldr_host_fork(void)
 {
+    pid_t parent_pid = getpid();
     pid_t p = fork();
 
+    if (p == 0)
+        g_mldr_guest_ppid = parent_pid;
     return p < 0 ? -(long)errno : (long)p;
 }
 
@@ -927,16 +968,19 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
 
     /* ── process lifecycle ──────────────────────────────────────────── */
     case MACOS_SYS_exit:
+        mldr_sig65_report();
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
         __builtin_unreachable();
 
     case MACOS_SYS_fork:
-        return freebsd_raw_syscall(SYS_fork, 0, 0, 0, 0, 0, 0);
+        return mldr_host_fork();
 
     case MACOS_SYS_getpid:
         return freebsd_raw_syscall(SYS_getpid, 0, 0, 0, 0, 0, 0);
 
     case MACOS_SYS_getppid:
+        if (g_mldr_guest_ppid > 0)
+            return (long)g_mldr_guest_ppid;
         return freebsd_raw_syscall(SYS_getppid, 0, 0, 0, 0, 0, 0);
 
     case MACOS_SYS_getuid:
@@ -950,6 +994,9 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
 
     case MACOS_SYS_setpgid:
         return freebsd_raw_syscall(SYS_setpgid, a1, a2, 0, 0, 0, 0);
+
+    case MACOS_SYS_wait4:
+        return freebsd_raw_syscall(SYS_wait4, a1, a2, a3, a4, 0, 0);
 
     /* ── file descriptors ───────────────────────────────────────────── */
     case MACOS_SYS_read:
@@ -1058,7 +1105,7 @@ dispatch_macos_bsd_syscall(unsigned int macos_nr,
         return freebsd_raw_syscall(SYS_sigprocmask, a1, a2, a3, 0, 0, 0);
 
     default:
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] unhandled macOS BSD syscall %u (0x%x) — ENOSYS\n",
             macos_nr, macos_nr);
         return -ENOSYS;
@@ -1098,7 +1145,7 @@ dispatch_mach_trap(int trap_nr,
     case MACH_TRAP_task_self_trap:
         ret = dserver_rpc_task_self_trap(&port_name);
         if (ret < 0) {
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] mach_trap: task_self_trap RPC failed: %d\n", ret);
             return (long)ret; /* negative errno */
         }
@@ -1107,7 +1154,7 @@ dispatch_mach_trap(int trap_nr,
     case MACH_TRAP_host_self_trap:
         ret = dserver_rpc_host_self_trap(&port_name);
         if (ret < 0) {
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] mach_trap: host_self_trap RPC failed: %d\n", ret);
             return (long)ret;
         }
@@ -1116,7 +1163,7 @@ dispatch_mach_trap(int trap_nr,
     case MACH_TRAP_thread_self_trap:
         ret = dserver_rpc_thread_self_trap(&port_name);
         if (ret < 0) {
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] mach_trap: thread_self_trap RPC failed: %d\n", ret);
             return (long)ret;
         }
@@ -1125,7 +1172,7 @@ dispatch_mach_trap(int trap_nr,
     case MACH_TRAP_mach_reply_port:
         ret = dserver_rpc_mach_reply_port(&port_name);
         if (ret < 0) {
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] mach_trap: mach_reply_port RPC failed: %d\n", ret);
             return (long)ret;
         }
@@ -1150,7 +1197,7 @@ dispatch_mach_trap(int trap_nr,
             (void*)stack_arg1        /* rcv_msg from caller's stack */
         );
         if (ret < 0) {
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] mach_trap: mach_msg_trap RPC failed: %d\n", ret);
             return (long)ret;
         }
@@ -1171,14 +1218,14 @@ dispatch_mach_trap(int trap_nr,
             (void*)a1                /* rcv_msg: default to msg (stack+16 TODO) */
         );
         if (ret < 0) {
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] mach_trap: mach_msg_overwrite RPC failed: %d\n", ret);
             return (long)ret;
         }
         return 0;
 
     default:
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] mach_trap: unhandled Mach trap %d — ENOSYS\n",
             trap_nr);
         return -ENOSYS;
@@ -1751,7 +1798,7 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
          * rbp and the caller's return address is one slot up. */
         int retslot = (trap->emulate == 3) ? 1 : 0;
 
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] hit #%ld %s rdi=0x%llx rsi=0x%llx rdx=0x%llx rax=0x%llx tid=0x%lx tsd=0x%lx from %s %s\n",
             trap->hits, trap->label, (unsigned long long)mc->mc_rdi,
             (unsigned long long)mc->mc_rsi,
@@ -1762,29 +1809,28 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
         /* Control #110: the return chain, as in #77 — raw stack words plus every
          * slot resolving into a known image, so a back-jump cycle inside one
          * function can be told from a re-entrant call by its frames. */
-        fprintf(stderr, "  [rsp]");
+        TRAPLOG("  [rsp]");
         for (int i = 0; i < 6; i++)
-            fprintf(stderr, " %llx", (unsigned long long)sp[i]);
-        fprintf(stderr, "\n");
+            TRAPLOG(" %llx", (unsigned long long)sp[i]);
+        TRAPLOG("\n");
         for (int i = 0; i < 24; i++) {
             uintptr_t slot = sp[i];
 
             for (int j = 0; j < _mldr_image_count; j++) {
                 if (slot >= _mldr_images[j].base
                     && slot < _mldr_images[j].base + _mldr_images[j].size) {
-                    fprintf(stderr, "  [rsp+%3d] %s\n", i * 8,
+                    TRAPLOG("  [rsp+%3d] %s\n", i * 8,
                             mldr_describe_addr(slot, buf, sizeof(buf)));
                     break;
                 }
             }
         }
-        fflush(stderr);
         return;
     }
 
-    fprintf(stderr, "\n[darling-mldr] === MLDR_TRAP_AT hit #%ld: %s ===\n",
+    TRAPLOG("\n[darling-mldr] === MLDR_TRAP_AT hit #%ld: %s ===\n",
             trap->hits, trap->label);
-    fprintf(stderr, "  rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx rax=0x%llx\n",
+    TRAPLOG("  rdi=0x%llx rsi=0x%llx rdx=0x%llx rcx=0x%llx rax=0x%llx\n",
             (unsigned long long)mc->mc_rdi, (unsigned long long)mc->mc_rsi,
             (unsigned long long)mc->mc_rdx, (unsigned long long)mc->mc_rcx,
             (unsigned long long)mc->mc_rax);
@@ -1819,7 +1865,7 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
 
                 for (int k = 0; k < 3; k++)
                     (void)mldr_dump_read_guarded((uintptr_t)base + 8u * k, &sw[k]);
-                fprintf(stderr, "  MLDR_TRAP_STR struct @0x%llx: %016llx %016llx %016llx\n",
+                TRAPLOG("  MLDR_TRAP_STR struct @0x%llx: %016llx %016llx %016llx\n",
                         (unsigned long long)base, (unsigned long long)sw[0],
                         (unsigned long long)sw[1], (unsigned long long)sw[2]);
                 base = sw[0];
@@ -1833,23 +1879,23 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
                 sb[n] = ((char)w >= 0x20 && (char)w < 0x7f) ? (char)w : '?';
             }
             sb[n] = 0;
-            fprintf(stderr, "  MLDR_TRAP_STR %s -> \"%s\" (len %d)\n", sreg, sb, n);
-            fprintf(stderr, "  MLDR_TRAP_STR hex:");
+            TRAPLOG("  MLDR_TRAP_STR %s -> \"%s\" (len %d)\n", sreg, sb, n);
+            TRAPLOG("  MLDR_TRAP_STR hex:");
             for (int k = 0; base != 0 && k < 64; k++) {
                 uint64_t w = 0;
 
                 if (!mldr_dump_read_guarded((uintptr_t)base + (uintptr_t)k, &w))
                     break;
-                fprintf(stderr, " %02x", (unsigned)(w & 0xff));
+                TRAPLOG(" %02x", (unsigned)(w & 0xff));
             }
-            fprintf(stderr, "\n");
+            TRAPLOG("\n");
         }
     }
 
     /* Control #103/#107: host thr_self names the thread; the TSD id is the one
      * the lock uses (the abort's rdi is exactly this TSD id, #104). */
-    fprintf(stderr, "  guest tid = 0x%lx\n", (unsigned long)host_tid);
-    fprintf(stderr, "  guest TSD tid = 0x%lx (%%gs:0x18)\n",
+    TRAPLOG("  guest tid = 0x%lx\n", (unsigned long)host_tid);
+    TRAPLOG("  guest TSD tid = 0x%lx (%%gs:0x18)\n",
             (unsigned long)tsd_tid);
 
     /* __cxa_throw(void *exc, std::type_info *tinfo, void (*dest)(void*)) —
@@ -1859,14 +1905,14 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
             (const char *const *)(uintptr_t)(mc->mc_rsi + 8);
 
         if (*namep != NULL)
-            fprintf(stderr, "  exception type: %s\n", *namep);
+            TRAPLOG("  exception type: %s\n", *namep);
     }
 
     /* rip is AT the ud2, so nothing has been pushed yet: [rsp] is still the
      * caller's return address. */
     const uintptr_t *sp = (const uintptr_t *)(uintptr_t)mc->mc_rsp;
 
-    fprintf(stderr, "  called from %s\n",
+    TRAPLOG("  called from %s\n",
             mldr_describe_addr(sp[0], buf, sizeof(buf)));
 
     /* Control #112: dump the bytes at the trap site and, for a lazy stub's
@@ -1887,10 +1933,10 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
             code[i] = (uint8_t)w;
         }
         if (ok) {
-            fprintf(stderr, "  code @rip:");
+            TRAPLOG("  code @rip:");
             for (int i = 0; i < 16; i++)
-                fprintf(stderr, " %02x", code[i]);
-            fprintf(stderr, "\n");
+                TRAPLOG(" %02x", code[i]);
+            TRAPLOG("\n");
             if (code[0] == 0xff && code[1] == 0x25) {
                 int32_t d = 0;
                 uintptr_t ptr;
@@ -1899,29 +1945,28 @@ mldr_report_trap(struct mldr_trap *trap, const mcontext_t *mc)
                 memcpy(&d, code + 2, 4);
                 ptr = (uintptr_t)mc->mc_rip + 6 + (intptr_t)d;
                 if (mldr_dump_read_guarded(ptr, &tgt))
-                    fprintf(stderr, "  stub jmp *0x%llx -> 0x%llx %s\n",
+                    TRAPLOG("  stub jmp *0x%llx -> 0x%llx %s\n",
                             (unsigned long long)ptr, (unsigned long long)tgt,
                             mldr_describe_addr(tgt, buf, sizeof(buf)));
             }
         }
     }
 
-    fprintf(stderr, "  stack slots resolving into known images:\n");
+    TRAPLOG("  stack slots resolving into known images:\n");
     for (int i = 0; i < 48; i++) {
         uintptr_t slot = sp[i];
 
         for (int j = 0; j < _mldr_image_count; j++) {
             if (slot >= _mldr_images[j].base
                 && slot < _mldr_images[j].base + _mldr_images[j].size) {
-                fprintf(stderr, "    [rsp+%3d] %s\n", i * 8,
+                TRAPLOG("    [rsp+%3d] %s\n", i * 8,
                         mldr_describe_addr(slot, buf, sizeof(buf)));
                 break;
             }
         }
     }
     if (watch[0] != '\0')
-        fprintf(stderr, "  %s\n", watch);
-    fflush(stderr);
+        TRAPLOG("  %s\n", watch);
 }
 
 /*
@@ -1970,7 +2015,7 @@ mldr_note_mapping(void *base, size_t size, int fd, bool executable)
     if (log_enabled < 0)
         log_enabled = (getenv("MLDR_LOG_MAPPINGS") != NULL);
     if (log_enabled)
-        fprintf(stderr, "[darling-mldr] %s-mapping %p+0x%zx fd=%d %s\n",
+        TRAPLOG("[darling-mldr] %s-mapping %p+0x%zx fd=%d %s\n",
                 executable ? "exec" : "data", base, size, fd, path);
 
     const char *name = mldr_basename(path);
@@ -2070,6 +2115,69 @@ mldr_abort_trace(const mcontext_t *mc)
 #undef AP
     if (len >= sizeof(out)) len = sizeof(out) - 1;
     freebsd_raw_syscall(SYS_write, 2, (long)out, (long)len, 0, 0, 0);
+}
+
+/*
+ * Linux x86-64 struct sysinfo, spelled out (the guest sees the Linux layout, not FreeBSD headers):
+ * 112 bytes. loads[] are fixed point with 16 fractional bits (SI_LOAD_SHIFT). Fields with no cheap
+ * host source stay 0 rather than being invented: procs, sharedram, bufferram, totalswap/freeswap,
+ * totalhigh/freehigh. mem_unit is 1, so the ram fields are bytes.
+ */
+struct mldr_linux_sysinfo {
+    long          uptime;
+    unsigned long loads[3];
+    unsigned long totalram, freeram, sharedram, bufferram, totalswap, freeswap;
+    unsigned short procs;
+    unsigned short pad;
+    unsigned long totalhigh, freehigh;
+    unsigned int  mem_unit;
+    char          _f[20 - 2 * sizeof(long) - sizeof(int)];
+};
+_Static_assert(sizeof(struct mldr_linux_sysinfo) == 112, "Linux x86-64 struct sysinfo is 112 bytes");
+
+/*
+ * purpose:  Linux sysinfo(2). Runs inside the SIGILL handler: no stdio, no malloc, only raw
+ *           syscalls and sysctl(3) on fixed or by-name mibs (sysctlnametomib allocates nothing).
+ * input:    out — guest struct sysinfo*
+ * output:   0, or -EFAULT for a NULL pointer
+ * sideEffects: writes the whole 112-byte struct; a field whose sysctl fails stays 0.
+ */
+static long
+mldr_linux_sysinfo(void *out)
+{
+    struct mldr_linux_sysinfo si;
+    if (out == NULL)
+        return -EFAULT;
+    memset(&si, 0, sizeof(si));
+
+    struct timespec ts;
+    if (freebsd_raw_syscall(SYS_clock_gettime, CLOCK_UPTIME, (long)&ts, 0, 0, 0, 0) == 0)
+        si.uptime = (long)ts.tv_sec;
+
+    struct loadavg la;
+    size_t len = sizeof(la);
+    int mib_la[2] = { CTL_VM, VM_LOADAVG };
+    if (sysctl(mib_la, 2, &la, &len, NULL, 0) == 0 && len == sizeof(la) && la.fscale > 0) {
+        for (int i = 0; i < 3; i++)
+            si.loads[i] = (unsigned long)(((unsigned long long)la.ldavg[i] << 16) / (unsigned long)la.fscale);
+    }
+
+    unsigned long physmem = 0;
+    len = sizeof(physmem);
+    int mib_pm[2] = { CTL_HW, HW_PHYSMEM };
+    if (sysctl(mib_pm, 2, &physmem, &len, NULL, 0) == 0 && len == sizeof(physmem))
+        si.totalram = physmem;
+
+    unsigned int freepages = 0;
+    len = sizeof(freepages);
+    if (sysctlbyname("vm.stats.vm.v_free_count", &freepages, &len, NULL, 0) == 0 && len == sizeof(freepages)) {
+        unsigned long fr = (unsigned long)freepages * (unsigned long)getpagesize();
+        si.freeram = (si.totalram != 0 && fr > si.totalram) ? si.totalram : fr;
+    }
+
+    si.mem_unit = 1;
+    memcpy(out, &si, sizeof(si));
+    return 0;
 }
 
 /*
@@ -2287,6 +2395,10 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         return freebsd_raw_syscall(SYS_dup2, a1, a2, 0, 0, 0, 0);
     case LINUX_SYS_getpid:
         return freebsd_raw_syscall(SYS_getpid, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_getppid:
+        if (g_mldr_guest_ppid > 0)
+            return (long)g_mldr_guest_ppid;
+        return freebsd_raw_syscall(SYS_getppid, 0, 0, 0, 0, 0, 0);
     case LINUX_SYS_setsid: /* no arguments, same semantics and EPERM on both sides */
         return freebsd_raw_syscall(SYS_setsid, 0, 0, 0, 0, 0, 0);
     case LINUX_SYS_getxattr: /* path is a host path: vchroot-expanded by the guest */
@@ -2341,18 +2453,29 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             /* RPC diagnostic: the 16-byte header of a darlingserver call is
              * {callnum, pid, tid, arch}; print which call this is. */
             const int *hd = (const int *)mh->msg_iov[0].iov_base;
-            fprintf(stderr, "[traplog] sendmsg fd=%ld callnum=%d pid=%d tid=%d len=%zu\n",
-                    (long)a1, hd[0], hd[1], hd[2], (size_t)mh->msg_iov[0].iov_len);
+            {
+                struct mldr_tlb t; t.n = 0;
+                mldr_tlb_s(&t, "[traplog] sendmsg fd="); mldr_tlb_d(&t, (long)a1);
+                mldr_tlb_s(&t, " callnum="); mldr_tlb_d(&t, hd[0]);
+                mldr_tlb_s(&t, " pid="); mldr_tlb_d(&t, hd[1]);
+                mldr_tlb_s(&t, " tid="); mldr_tlb_d(&t, hd[2]);
+                mldr_tlb_s(&t, " len="); mldr_tlb_d(&t, (long)mh->msg_iov[0].iov_len);
+                mldr_tlb_emit(&t);
+            }
             if (hd[0] == 4 && mh->msg_iov[0].iov_len >= 32) {
                 /* kprintf: show the text (step 57) */
                 const uint64_t *kb = (const uint64_t *)((const char *)mh->msg_iov[0].iov_base + 16);
                 uint64_t kw = 0;
                 if (mldr_dump_read_guarded((uintptr_t)kb[0], &kw)) {
                     int kl = kb[1] > 100 ? 100 : (int)kb[1];
-                    fprintf(stderr, "[traplog] kprintf-text tid=%d \"%.*s\"\n", hd[2], kl, (const char *)kb[0]);
+                    struct mldr_tlb t; t.n = 0;
+                    mldr_tlb_s(&t, "[traplog] kprintf-text tid="); mldr_tlb_d(&t, hd[2]);
+                    mldr_tlb_s(&t, " \"");
+                    mldr_tlb_mem(&t, (const char *)kb[0], kl);
+                    mldr_tlb_s(&t, "\"");
+                    mldr_tlb_emit(&t);
                 }
             }
-            fflush(stderr);
         }
         mldr_cmsg_convert(mh->msg_control, (size_t)mh->msg_controllen, 1);
         long r = freebsd_raw_syscall(SYS_sendmsg, a1, a2, a3, 0, 0, 0);
@@ -2401,19 +2524,26 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             mh->msg_controllen = sizeof(big_ctl);
         }
         if (mldr_trap_log_enabled) {
-            fprintf(stderr, "[traplog] recvmsg-enter fd=%ld\n", (long)a1);
-            fflush(stderr);
+            struct mldr_tlb t; t.n = 0;
+            mldr_tlb_s(&t, "[traplog] recvmsg-enter fd="); mldr_tlb_d(&t, (long)a1);
+            mldr_tlb_emit(&t);
         }
         long r = freebsd_raw_syscall(SYS_recvmsg, a1, a2, a3, 0, 0, 0);
         if (mldr_trap_log_enabled) {
             if (r >= 8 && mh->msg_iov != NULL && mh->msg_iovlen >= 1) {
                 const int *hd = (const int *)mh->msg_iov[0].iov_base;
-                fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld replynum=%d code=%d\n",
-                        (long)a1, r, hd[0], hd[1]);
+                struct mldr_tlb t; t.n = 0;
+                mldr_tlb_s(&t, "[traplog] recvmsg-leave fd="); mldr_tlb_d(&t, (long)a1);
+                mldr_tlb_s(&t, " ret="); mldr_tlb_d(&t, r);
+                mldr_tlb_s(&t, " replynum="); mldr_tlb_d(&t, hd[0]);
+                mldr_tlb_s(&t, " code="); mldr_tlb_d(&t, hd[1]);
+                mldr_tlb_emit(&t);
             } else {
-                fprintf(stderr, "[traplog] recvmsg-leave fd=%ld ret=%ld\n", (long)a1, r);
+                struct mldr_tlb t; t.n = 0;
+                mldr_tlb_s(&t, "[traplog] recvmsg-leave fd="); mldr_tlb_d(&t, (long)a1);
+                mldr_tlb_s(&t, " ret="); mldr_tlb_d(&t, r);
+                mldr_tlb_emit(&t);
             }
-            fflush(stderr);
         }
 
         if (orig_ctl != NULL && orig_ctllen > 0) {
@@ -2458,11 +2588,10 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
                 }
                 memcpy(orig_ctl, big_ctl, outlen);
                 if (mldr_trap_log_enabled && outlen >= 20) {
-                    fprintf(stderr, "[traplog] recvmsg-cmsg controllen=%zu len=%llu level=%d type=%d fd0=%d\n",
+                    TRAPLOG("[traplog] recvmsg-cmsg controllen=%zu len=%llu level=%d type=%d fd0=%d\n",
                             outlen, (unsigned long long)*(const uint64_t *)big_ctl,
                             *(const int *)(big_ctl + 8), *(const int *)(big_ctl + 12),
                             *(const int *)(big_ctl + 16));
-                    fflush(stderr);
                 }
             }
             mh->msg_control = orig_ctl;
@@ -2686,17 +2815,16 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         if (log_epoll < 0)
             log_epoll = (getenv("MLDR_LOG_EPOLL") != NULL);
         if (log_epoll) {
-            fprintf(stderr, "[darling-mldr] epoll_wait(kq=%d) -> %ld event(s)\n",
+            TRAPLOG("[darling-mldr] epoll_wait(kq=%d) -> %ld event(s)\n",
                     epfd, n);
             for (long i = 0; i < n; i++) {
-                fprintf(stderr,
+                TRAPLOG(
                     "    ident=%ld filter=%d flags=0x%x fflags=0x%x"
                     " data=%ld udata=%p\n",
                     (long)kev[i].ident, (int)kev[i].filter,
                     (unsigned)kev[i].flags, (unsigned)kev[i].fflags,
                     (long)kev[i].data, kev[i].udata);
             }
-            fflush(stderr);
         }
 
         for (long i = 0; i < n; i++) {
@@ -2948,7 +3076,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
          * delay. Fail loudly rather than return a plausible-looking zero that
          * a caller would read as "timer disarmed".
          */
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] timerfd_gettime is not implemented (kqueue exposes"
             " no residual delay) — ENOSYS\n");
         return -ENOSYS;
@@ -3030,7 +3158,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             /* REQUEUE/CMP_REQUEUE/WAKE_OP/priority-inheritance ops have no
              * _umtx_op equivalent that preserves their semantics. Fail loudly
              * rather than silently mistranslating a lock handoff. */
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] futex op %d (raw 0x%lx) unimplemented"
                 " — ENOSYS\n", futex_op, (unsigned long)a2);
             return -ENOSYS;
@@ -3075,7 +3203,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
          * per-thread wd), clean bytes mean it is at or below the host
          * call. */
         const unsigned char *sb = (const unsigned char *)(long)a2;
-        fprintf(stderr,
+        TRAPLOG(
                 "[gsw-bisect] connect fd=%ld len=%ld bytes=%02x %02x %02x %02x\n",
                 (long)a1, (long)a3,
                 ((long)a3 >= 1 && sb != NULL) ? sb[0] : 0,
@@ -3100,7 +3228,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
          * paper (linux_family = 2 for AF_INET), so a run must show what
          * actually arrives. */
         const unsigned char *sb = (const unsigned char *)(long)a2;
-        fprintf(stderr,
+        TRAPLOG(
                 "[gsw-bisect] bind fd=%ld len=%ld bytes=%02x %02x %02x %02x\n",
                 (long)a1, (long)a3,
                 ((long)a3 >= 1 && sb != NULL) ? sb[0] : 0,
@@ -3288,6 +3416,8 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
     case LINUX_SYS_sched_yield:
         /* Linux sched_yield() == FreeBSD sched_yield(2) (syscall 331). */
         return freebsd_raw_syscall(SYS_sched_yield, 0, 0, 0, 0, 0, 0);
+    case LINUX_SYS_sysinfo:
+        return mldr_linux_sysinfo((void *)a1);
     case LINUX_SYS_uname: {
         /* Linux struct new_utsname: six char[65] fields (sysname, nodename,
          * release, version, machine, domainname), 390 bytes. FreeBSD's
@@ -3321,8 +3451,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
          * Anything else is EINVAL, which callers of prctl already handle,
          * rather than ENOSYS. */
         if (mldr_trap_log_enabled) {
-            fprintf(stderr, "[darling-mldr] prctl option=%ld arg2=0x%lx\n", a1, (unsigned long)a2);
-            fflush(stderr);
+            TRAPLOG("[darling-mldr] prctl option=%ld arg2=0x%lx\n", a1, (unsigned long)a2);
         }
         switch (a1) {
         case 1:  /* PR_SET_PDEATHSIG */
@@ -3388,11 +3517,10 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             void *newh = (a2 != NULL) ? *(void **)a2 : (void *)0;
             char cb[256];
             mldr_describe_addr((uintptr_t)__builtin_return_address(0), cb, sizeof(cb));
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] SIGTRAP-AUDIT: rt_sigaction(5) from %s"
                 " old=%p new=%p\n",
                 cb, mldr_sat_sigtrap_disposition(), newh);
-            fflush(stderr);
         }
         if (mldr_trap_log_enabled && (int)a1 >= 32) {
             /* real-time signal audit (DARLING_TRAP_LOG): who registers a
@@ -3402,10 +3530,9 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
                                             (void *)a3, (size_t)a4);
             char cb[256];
             mldr_describe_addr((uintptr_t)__builtin_return_address(0), cb, sizeof(cb));
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] RTSIG-AUDIT: rt_sigaction(%d) handler=%p"
                 " ret=%ld from %s\n", (int)a1, newh, rr, cb);
-            fflush(stderr);
             return rr;
         }
         return mldr_sys_rt_sigaction((int)a1, (const void *)a2,
@@ -3516,7 +3643,12 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
                             && nn != SIGILL && nn != SIGSYS) {
                             sigaddset(&nset, nn);
                             if (mldr_trap_log_enabled && nn >= 65)
-                                fprintf(stderr, "[traplog] sigprocmask SETMASK keeps native %d blocked\n", nn);
+                                {
+                                    struct mldr_tlb t; t.n = 0;
+                                    mldr_tlb_s(&t, "[traplog] sigprocmask SETMASK keeps native "); mldr_tlb_d(&t, nn);
+                                    mldr_tlb_s(&t, " blocked");
+                                    mldr_tlb_emit(&t);
+                                }
                         }
                     }
                 }
@@ -3543,9 +3675,11 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
     }
 
     case LINUX_SYS_exit:
+        mldr_sig65_report();
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
         __builtin_unreachable();
     case LINUX_SYS_exit_group:
+        mldr_sig65_report();
         /* FreeBSD has no process-group exit_group; _exit(2) is the closest
          * single-thread-process equivalent dyld's bootstrap needs. */
         freebsd_raw_syscall(SYS__exit, a1, 0, 0, 0, 0, 0);
@@ -3573,7 +3707,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             /* Can only happen if a future ud2-patched signature ever routes
              * arch_prctl through sigill_handler, which doesn't have a
              * matching mcontext-patch story yet. */
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] arch_prctl: no mcontext available for op"
                 " 0x%lx — ENOSYS\n", a1);
             return -ENOSYS;
@@ -3591,7 +3725,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             *(long *)a2 = mc->mc_gsbase;
             return 0;
         }
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] arch_prctl: unhandled op 0x%lx — ENOSYS\n", a1);
         return -ENOSYS;
 
@@ -3617,7 +3751,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
      *             callers need to be steered to mmap(MAP_ANON) instead. */
     default:
     unhandled:
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] unhandled Linux syscall %u — ENOSYS\n", linux_nr);
 #if defined(__x86_64__)
         /* Control #64: name the guest site of each unhandled raw syscall, so
@@ -3628,7 +3762,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
             if (mc != NULL && mldr_raw_site_logged < 32) {
                 char site[256];
                 mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
-                fprintf(stderr,
+                TRAPLOG(
                     "[darling-mldr]   at %s rip=0x%llx rax=0x%llx\n",
                     site, (unsigned long long)mc->mc_rip,
                     (unsigned long long)mc->mc_rax);
@@ -3953,14 +4087,14 @@ sigsys_handler_inner(int signo, siginfo_t *info, void *uctx_void)
 
     if (raw_eax == 0) {
         /* Could not recover — dump 16 bytes before rip for diagnosis */
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] SIGSYS: cannot recover syscall nr at rip=0x%llx\n"
             "  bytes[-16..+1]:",
             (unsigned long long)mc->mc_rip);
         for (int i = -16; i <= 1; i++) {
-            fprintf(stderr, " %02x", (unsigned)rip[i]);
+            TRAPLOG(" %02x", (unsigned)rip[i]);
         }
-        fprintf(stderr, "\n");
+        TRAPLOG("\n");
         if (mldr_trap_log_enabled && mldr_trap_log_handlers)
             mldr_tlog("SIGSYS RE-RAISE(recover-fail)", (long)mc->mc_rip, 0);
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
@@ -4021,7 +4155,7 @@ sigsys_handler_inner(int signo, siginfo_t *info, void *uctx_void)
         linux_abi_retval = true;
     } else {
         /* Unknown syscall class — log and re-raise as default signal */
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] SIGSYS: unhandled syscall class 0x%02x (raw_eax=0x%08x)"
             " at rip=0x%llx\n",
             (raw_eax >> 24) & 0xff, raw_eax,
@@ -4104,7 +4238,7 @@ sigsys_handler_inner(int signo, siginfo_t *info, void *uctx_void)
         ret = dispatch_mach_trap(trap_nr, a1, a2, a3, a4, a5, a6, stack_arg1);
     } else {
         /* Unknown syscall class — log and re-raise as default signal */
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] SIGSYS(aarch64): unhandled class 0x%02x"
             " (x16=0x%08x) at elr=0x%llx\n",
             (raw_x16 >> 24) & 0xff, raw_x16,
@@ -4223,12 +4357,234 @@ mldr_path_log(unsigned int nr, long a1, long a2)
  *              actually executed by the CPU); re-raises as the default
  *              action for any #UD that isn't one of our own patches.
  */
+/* Step 56 residual-path diagnostics (DARLING_SIG65_COUNT set). Per thread (slot = tid & 63, no TLS: guest threads rewrite fsbase): sigill_handler
+ * depth, signal 65+ trampoline depth, and sequence numbers of the last emulated ud2 (rip += 2) and of the last signal 65+ entry. A duplicate
+ * (Step 56 branch) records si_addr - rip, whether sigill_handler is nested on the thread, whether a signal 65+ handler is running on the
+ * thread, and whether the thread entered a signal 65+ handler after its last emulation. Fixed array claimed by one atomic add; no locks,
+ * stdio or malloc in the handler. The histogram is written from atexit with write(2). */
+#define MLDR_DUPREC_MAX 256
+struct mldr_duprec { long delta; unsigned long long ns, gap_ns; long tid; int si_code, si_pid; unsigned char nested, sig65_active, sig65_since_emu, valid; };
+static struct mldr_duprec mldr_duprecs[MLDR_DUPREC_MAX];
+static volatile unsigned long mldr_duprec_n;
+static volatile int mldr_sigill_depth[64];
+static volatile int mldr_sig65_depth[64];
+static volatile unsigned long mldr_emu_seq[64], mldr_sig65_seq[64];
+static volatile unsigned long long mldr_emu_ns[64];   /* CLOCK_MONOTONIC ns of the last emulation on the thread */
+
+static unsigned long long
+mldr_dupdiag_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
+}
+static volatile unsigned long mldr_dupdiag_seq;
+static int mldr_dupdiag_on = -1;
+
+static int
+mldr_dupdiag_enabled(void)
+{
+    if (mldr_dupdiag_on < 0)
+        mldr_dupdiag_on = getenv("DARLING_SIG65_COUNT") != NULL;
+    return mldr_dupdiag_on;
+}
+
+static long mldr_dupdiag_last_tid;   /* racy: only for the record just made by the caller's thread, see mldr_dupdiag_record */
+static int
+mldr_dupdiag_slot(void)
+{
+    long ht = 0;
+    freebsd_raw_syscall(SYS_thr_self, (long)&ht, 0, 0, 0, 0, 0);
+    mldr_dupdiag_last_tid = ht;
+    return (int)(ht & 63);
+}
+
+void
+mldr_dupdiag_sig65_enter(void)
+{
+    int slot;
+    if (!mldr_dupdiag_enabled())
+        return;
+    slot = mldr_dupdiag_slot();
+    __atomic_add_fetch(&mldr_sig65_depth[slot], 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&mldr_sig65_seq[slot], __atomic_add_fetch(&mldr_dupdiag_seq, 1, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+}
+
+void
+mldr_dupdiag_sig65_leave(void)
+{
+    if (!mldr_dupdiag_enabled())
+        return;
+    __atomic_sub_fetch(&mldr_sig65_depth[mldr_dupdiag_slot()], 1, __ATOMIC_RELAXED);
+}
+
+static void
+mldr_dupdiag_emulated(void)
+{
+    if (!mldr_dupdiag_enabled())
+        return;
+    int slot = mldr_dupdiag_slot();
+    __atomic_store_n(&mldr_emu_seq[slot], __atomic_add_fetch(&mldr_dupdiag_seq, 1, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+    __atomic_store_n(&mldr_emu_ns[slot], mldr_dupdiag_now(), __ATOMIC_RELAXED);
+}
+
+static void
+mldr_dupdiag_record(long delta, const siginfo_t *info)
+{
+    unsigned long idx;
+    int slot;
+    if (!mldr_dupdiag_enabled())
+        return;
+    idx = __atomic_fetch_add(&mldr_duprec_n, 1, __ATOMIC_RELAXED);
+    if (idx >= MLDR_DUPREC_MAX)
+        return;
+    slot = mldr_dupdiag_slot();
+    mldr_duprecs[idx].ns = mldr_dupdiag_now();
+    mldr_duprecs[idx].gap_ns = mldr_duprecs[idx].ns - __atomic_load_n(&mldr_emu_ns[slot], __ATOMIC_RELAXED);
+    mldr_duprecs[idx].tid = mldr_dupdiag_last_tid;
+    mldr_duprecs[idx].si_code = info->si_code;
+    mldr_duprecs[idx].si_pid = (int)info->si_pid;
+    mldr_duprecs[idx].delta = delta;
+    mldr_duprecs[idx].nested = __atomic_load_n(&mldr_sigill_depth[slot], __ATOMIC_RELAXED) > 1;
+    mldr_duprecs[idx].sig65_active = __atomic_load_n(&mldr_sig65_depth[slot], __ATOMIC_RELAXED) > 0;
+    mldr_duprecs[idx].sig65_since_emu = __atomic_load_n(&mldr_sig65_seq[slot], __ATOMIC_RELAXED) > __atomic_load_n(&mldr_emu_seq[slot], __ATOMIC_RELAXED);
+    __atomic_store_n(&mldr_duprecs[idx].valid, 1, __ATOMIC_RELEASE);
+}
+
+static void
+mldr_dupdiag_fmt(char **pp, long v)
+{
+    char tmp[24];
+    char *e = tmp + sizeof(tmp);
+    char *lo;
+    char *p = *pp;
+    if (v < 0) {
+        *p++ = '-';
+        v = -v;
+    }
+    lo = mldr_fmt_dec(e, v);
+    while (lo < e)
+        *p++ = *lo++;
+    *pp = p;
+}
+
+static volatile int mldr_dupdiag_reported;
+static void
+mldr_dupdiag_report(void)
+{
+    static const char tag[] = "[sigill-dup-hist] delta nested sig65_on_thread sig65_since_emu count\n";
+    static const char ovf[] = "[sigill-dup-hist] overflow (records beyond 256 dropped)\n";
+    unsigned long n = __atomic_load_n(&mldr_duprec_n, __ATOMIC_RELAXED);
+    unsigned char done[MLDR_DUPREC_MAX];
+    if (n == 0 || __atomic_exchange_n(&mldr_dupdiag_reported, 1, __ATOMIC_RELAXED))
+        return;
+    if (n > MLDR_DUPREC_MAX)
+        n = MLDR_DUPREC_MAX;
+    memset(done, 0, sizeof(done));
+    (void)!write(2, tag, sizeof(tag) - 1);
+    for (unsigned long i = 0; i < n; i++) {
+        char rb[192];
+        char *q = rb;
+        if (!mldr_duprecs[i].valid)
+            continue;
+        memcpy(q, "[sigill-dup-rec] ns=", 20);
+        q += 20;
+        mldr_dupdiag_fmt(&q, (long)mldr_duprecs[i].ns);
+        memcpy(q, " tid=", 5); q += 5;
+        mldr_dupdiag_fmt(&q, mldr_duprecs[i].tid);
+        memcpy(q, " delta=", 7); q += 7;
+        mldr_dupdiag_fmt(&q, mldr_duprecs[i].delta);
+        memcpy(q, " si_code=", 9); q += 9;
+        mldr_dupdiag_fmt(&q, mldr_duprecs[i].si_code);
+        memcpy(q, " si_pid=", 8); q += 8;
+        mldr_dupdiag_fmt(&q, mldr_duprecs[i].si_pid);
+        memcpy(q, " gap_ns=", 8); q += 8;
+        mldr_dupdiag_fmt(&q, (long)mldr_duprecs[i].gap_ns);
+        *q++ = '\n';
+        (void)!write(2, rb, (size_t)(q - rb));
+    }
+    for (unsigned long i = 0; i < n; i++) {
+        long cnt = 0;
+        char buf[96];
+        char *p = buf;
+        if (done[i] || !__atomic_load_n(&mldr_duprecs[i].valid, __ATOMIC_ACQUIRE))
+            continue;
+        for (unsigned long j = i; j < n; j++) {
+            if (!done[j] && mldr_duprecs[j].valid && mldr_duprecs[j].delta == mldr_duprecs[i].delta &&
+                mldr_duprecs[j].nested == mldr_duprecs[i].nested && mldr_duprecs[j].sig65_active == mldr_duprecs[i].sig65_active &&
+                mldr_duprecs[j].sig65_since_emu == mldr_duprecs[i].sig65_since_emu) {
+                done[j] = 1;
+                cnt++;
+            }
+        }
+        memcpy(p, "[sigill-dup-hist] ", 18);
+        p += 18;
+        mldr_dupdiag_fmt(&p, mldr_duprecs[i].delta);
+        *p++ = ' ';
+        mldr_dupdiag_fmt(&p, mldr_duprecs[i].nested);
+        *p++ = ' ';
+        mldr_dupdiag_fmt(&p, mldr_duprecs[i].sig65_active);
+        *p++ = ' ';
+        mldr_dupdiag_fmt(&p, mldr_duprecs[i].sig65_since_emu);
+        *p++ = ' ';
+        mldr_dupdiag_fmt(&p, cnt);
+        *p++ = '\n';
+        (void)!write(2, buf, (size_t)(p - buf));
+    }
+    if (__atomic_load_n(&mldr_duprec_n, __ATOMIC_RELAXED) > MLDR_DUPREC_MAX)
+        (void)!write(2, ovf, sizeof(ovf) - 1);
+}
+__attribute__((constructor)) static void
+mldr_dupdiag_register_atexit(void)
+{
+    atexit(mldr_dupdiag_report);
+}
+
 /* sig-reentry diagnostic (DARLING_TRAP_LOG only): the last SIGILL frame seen per host
  * thread. Racy by design, nothing is printed on the hot path; the not-ours branch
  * below prints the previous and the current record. */
 struct mldr_h1rec { long tid; uintptr_t uctx, info, rip_in, rip_out; unsigned long rax_out, seq; };
 static struct mldr_h1rec mldr_h1[64];
 static unsigned long mldr_h1_seq;
+
+/* Step 56 duplicates: SIGILL deliveries of a trap that was already emulated (resumed without touching the context). The count is written at
+ * process exit with write(2), without stdio, when DARLING_SIG65_COUNT is set (the same switch as the signal 65 trampoline counter); the
+ * probe turns it into the SIGILL-DUP=N item of its summary. The report runs from mldr_sig65_report (the exit syscall paths, via
+ * mldr_exit_report_hook of mldr-sig65-unblock-count.patch) and from atexit (the guest process normally leaves through exit()). */
+volatile unsigned long mldr_sigill_dups = 0;
+static volatile int mldr_sigill_dups_reported = 0;
+static void
+mldr_sigill_dup_write_report(void)
+{
+    char buf[64];
+    char *p = buf;
+    char *e;
+    char tmp[24];
+    char *lo;
+    static const char tag[] = "[sigill-dup] dups=";
+    if (getenv("DARLING_SIG65_COUNT") == NULL)
+        return;
+    if (__atomic_exchange_n(&mldr_sigill_dups_reported, 1, __ATOMIC_RELAXED))
+        return;
+    memcpy(p, tag, sizeof(tag) - 1);
+    p += sizeof(tag) - 1;
+    e = tmp + sizeof(tmp);
+    lo = mldr_fmt_dec(e, (long)__atomic_load_n(&mldr_sigill_dups, __ATOMIC_RELAXED));
+    while (lo < e)
+        *p++ = *lo++;
+    *p++ = '\n';
+    (void)!write(2, buf, (size_t)(p - buf));
+}
+void
+mldr_exit_report_hook(void)
+{
+    mldr_sigill_dup_write_report();
+}
+__attribute__((constructor)) static void
+mldr_sigill_dup_register_atexit(void)
+{
+    atexit(mldr_sigill_dup_write_report);
+}
 
 static void
 sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
@@ -4264,8 +4620,8 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
     if (info->si_addr != NULL && (uintptr_t)info->si_addr != (uintptr_t)mc->mc_rip) {
         for (int i = 0; i < _mldr_ud2_site_count; i++) {
             if (_mldr_ud2_sites[i] == (uintptr_t)info->si_addr) {
-                static volatile unsigned long dups;
-                unsigned long n = ++dups;
+                unsigned long n = __atomic_add_fetch(&mldr_sigill_dups, 1, __ATOMIC_RELAXED);
+                mldr_dupdiag_record((long)((intptr_t)info->si_addr - (intptr_t)mc->mc_rip), info);
                 if (mldr_trap_log_enabled)
                     mldr_tlogx("SIGILL DUPLICATE-RESUME", pc, (long)n);
                 return;
@@ -4284,19 +4640,19 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
             mldr_tlogx("SIGILL-FAULT rip", pc, (long)mc->mc_rax);
             /* who raised it: a #UD has si_code ILL_*, a signal sent by another
              * thread or process has SI_USER/SI_LWP and a pid */
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] SIGILL-FAULT info: si_code=0x%x si_pid=%d si_uid=%d"
                 " si_addr=%p rip=%p bytes=%02x %02x\n",
                 (unsigned)info->si_code, (int)info->si_pid, (int)info->si_uid,
                 info->si_addr, (const void *)pc, pc[0], pc[1]);
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] SIGILL-FAULT ctx: trapno=%ld err=%ld flags=0x%lx onstack=%ld"
                 " rsp=0x%llx altstack sp=%p size=%zu flags=0x%x si_trapno=%d\n",
                 (long)mc->mc_trapno, (long)mc->mc_err, (unsigned long)mc->mc_flags,
                 (long)mc->mc_onstack, (unsigned long long)mc->mc_rsp,
                 uctx->uc_stack.ss_sp, (size_t)uctx->uc_stack.ss_size,
                 (unsigned)uctx->uc_stack.ss_flags, (int)info->si_trapno);
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] SIGILL-FAULT h1: prev tid=%ld seq=%lu uctx=%p info=%p rip_in=%p rip_out=%p rax_out=0x%lx |"
                 " now seq=%lu uctx=%p info=%p rip=%p rsp=%p sigmask0=0x%x\n",
                 h1prev.tid, h1prev.seq, (void *)h1prev.uctx, (void *)h1prev.info, (void *)h1prev.rip_in,
@@ -4377,7 +4733,7 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
                     mc->mc_rip = tgt;
                     return;
                 }
-                fprintf(stderr,
+                TRAPLOG(
                     "[darling-mldr] resume: stack below rsp unreadable,"
                     " dying honestly\n");
             } else if (t->resume && t->emulate == 2) {
@@ -4394,7 +4750,7 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
                     mc->mc_rip = t->addr + 2;
                     return;
                 }
-                fprintf(stderr,
+                TRAPLOG(
                     "[darling-mldr] resume: lock word unreadable,"
                     " dying honestly\n");
             } else {
@@ -4428,7 +4784,7 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
         if (!is_ours) {
             char site[256];
             mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] genuine SIGILL (ud2, not a patched trampoline)"
                 " at %s rip=0x%llx rax=0x%llx\n",
                 site, (unsigned long long)mc->mc_rip,
@@ -4446,7 +4802,7 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
                 int ok[4];
                 for (int i = 0; i < 4; i++)
                     ok[i] = mldr_dump_read_guarded(lp + (uintptr_t)(8 * i), &w[i]);
-                fprintf(stderr,
+                TRAPLOG(
                     "[darling-mldr] lock word @0x%llx:"
                     " %016llx %016llx %016llx %016llx (ok=%d%d%d%d rdi=0x%llx)\n",
                     (unsigned long long)lp,
@@ -4455,7 +4811,6 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
                     ok[0], ok[1], ok[2], ok[3],
                     (unsigned long long)mc->mc_rdi);
             }
-            fflush(stderr);
             /* Control #71/#72: name the re-entry. Print the host thread id
              * (thr_self, which is also what the guest gettid() returns — see
              * LINUX_SYS_gettid above) next to the guest pid, and walk the
@@ -4464,7 +4819,7 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
             {
                 long host_tid = 0;
                 freebsd_raw_syscall(SYS_thr_self, (long)&host_tid, 0, 0, 0, 0, 0);
-                fprintf(stderr,
+                TRAPLOG(
                     "[darling-mldr] reentry: host_tid=%ld guest_pid=%ld rsp=0x%llx\n",
                     host_tid, (long)getpid(), (unsigned long long)mc->mc_rsp);
             }
@@ -4479,11 +4834,10 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
                         continue;
                     mldr_describe_addr((uintptr_t)w, ws, sizeof(ws));
                     if (strstr(ws, "<unknown>") == NULL)
-                        fprintf(stderr, "[darling-mldr]   stack[%d] 0x%llx %s\n",
+                        TRAPLOG("[darling-mldr]   stack[%d] 0x%llx %s\n",
                                 i, (unsigned long long)w, ws);
                 }
             }
-            fflush(stderr);
             crash_debug_handler(signo, info, uctx);
             return;
         }
@@ -4504,6 +4858,7 @@ sigill_handler_inner(int signo, siginfo_t *info, void *uctx_void)
      * that convention belongs to the macOS BSD-syscall class only. */
     mc->mc_rax = (uint64_t)ret;
     mc->mc_rip += 2; /* skip the ud2 the CPU never actually executed */
+    mldr_dupdiag_emulated();
     if (h1 != NULL) { h1->rip_out = (uintptr_t)mc->mc_rip; h1->rax_out = (unsigned long)mc->mc_rax; }
     if (mldr_trap_log_enabled && mldr_trap_log_handlers)
         mldr_tlog("SIGILL LEAVE", (long)mc->mc_rax, (long)linux_nr);
@@ -4543,10 +4898,9 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
 
     /* Control #148 step 26: this handler being reached means mldr's own
      * SIGTRAP disposition won at delivery time. */
-    fprintf(stderr,
+    TRAPLOG(
         "[darling-mldr] SIGTRAP-AUDIT-DELIVER: mldr sigtrap_handler reached,"
         " site=%s\n", descr);
-    fflush(stderr);
 
     if (at[0] == 0xcc && strstr(descr, "+0x64d020") != NULL) {
         uint64_t ret = 0;
@@ -4560,7 +4914,7 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
             mldr_describe_addr((uintptr_t)ret, caller, sizeof(caller));
         else
             snprintf(caller, sizeof(caller), "<unreadable>");
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] stub-entry: int3 hit #%d at %s (site=0x%llx)"
             " rsp=0x%llx [rsp]=0x%llx %s\n",
             hit, descr, (unsigned long long)site,
@@ -4572,12 +4926,11 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
                 uint64_t w = 0;
                 int ok = mldr_dump_read_guarded(
                     (uintptr_t)mc->mc_rsp + (uintptr_t)(8 * i), &w);
-                fprintf(stderr,
+                TRAPLOG(
                     "[darling-mldr] stub-entry: stack[%d]=0x%016llx%s\n",
                     i, (unsigned long long)w, ok ? "" : " (unreadable)");
             }
         }
-        fflush(stderr);
         /* Emulate the overwritten `pushq %rbp` (original first byte 0x55)
          * and resume past the int3, so the next entry traps again. */
         {
@@ -4589,10 +4942,9 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
                 mc->mc_rip = site + 1;
                 return;
             }
-            fprintf(stderr,
+            TRAPLOG(
                 "[darling-mldr] stub-entry: stack below rsp unreadable,"
                 " dying honestly\n");
-            fflush(stderr);
         }
     }
     /* Not our site (or cannot resume): honest death. */
@@ -4603,7 +4955,7 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
          * byte before it is the last byte of the preceding instruction. */
         uint64_t prev = 0;
         int prev_ok = mldr_dump_read_guarded((uintptr_t)(site - 1), &prev);
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] sigtrap NOT-OUR-SITE: rip=0x%016llx si_code=%d"
             " si_addr=0x%016llx byte[rip-1]=0x%02x byte[rip-2]=0x%02x%s"
             " site=%s\n",
@@ -4611,7 +4963,6 @@ sigtrap_handler(int signo, siginfo_t *info, void *uctx_void)
             (unsigned long long)(uintptr_t)info->si_addr,
             (unsigned)at[0], (unsigned)(prev & 0xff),
             prev_ok ? "" : "(unreadable)", descr);
-        fflush(stderr);
         struct sigaction sa_dfl = { .sa_handler = SIG_DFL };
         sigaction(signo, &sa_dfl, NULL);
         raise(signo);
@@ -4650,7 +5001,7 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
         freebsd_raw_syscall(SYS_write, 2, (long)mk, (long)(sizeof(mk) - 1), 0, 0, 0);
     }
 
-    fprintf(stderr,
+    TRAPLOG(
         "[darling-mldr] FATAL signal %d (code=%d) at addr=%p\n"
         /* survive-window slice: name the sender — si_pid is the killer for
          * SI_QUEUE/SI_USER signals, si_value carries the queued payload. */
@@ -4673,14 +5024,13 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
         (unsigned long long)mc->mc_r10, (unsigned long long)mc->mc_r11,
         (unsigned long long)mc->mc_r12, (unsigned long long)mc->mc_r13,
         (unsigned long long)mc->mc_r14, (unsigned long long)mc->mc_r15);
-    fflush(stderr);
 
     /* Guest frame-pointer walk (guarded reads, cannot fault). */
     {
         char site[256];
         uintptr_t fp = (uintptr_t)mc->mc_rbp;
         mldr_describe_addr((uintptr_t)mc->mc_rip, site, sizeof(site));
-        fprintf(stderr,
+        TRAPLOG(
             "[darling-mldr] fatal stack: signal=%d rip=0x%llx addr=%p\n"
             "[darling-mldr]   at %s rip=0x%llx\n",
             signo, (unsigned long long)mc->mc_rip, info->si_addr, site,
@@ -4691,13 +5041,12 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
                 !mldr_dump_read_guarded(fp + 8, &ret) || ret == 0)
                 break;
             mldr_describe_addr((uintptr_t)ret, site, sizeof(site));
-            fprintf(stderr, "[darling-mldr]   at %s rip=0x%llx\n", site,
+            TRAPLOG("[darling-mldr]   at %s rip=0x%llx\n", site,
                 (unsigned long long)ret);
             if (nfp <= fp)
                 break;
             fp = (uintptr_t)nfp;
         }
-        fflush(stderr);
     }
 
     /* DIAG (Chrome dyld-init crash hunt): backtrace_symbols on the live stack
@@ -4705,14 +5054,9 @@ crash_debug_handler(int signo, siginfo_t *info, void *uctx_void)
     {
         void *frames[32];
         int n = backtrace(frames, 32);
-        char **names = backtrace_symbols(frames, n);
-        fprintf(stderr, "  backtrace (%d frames):\n", n);
-        for (int i = 0; i < n; i++) {
-            fprintf(stderr, "    #%02d %p  %s\n", i, frames[i],
-                    (names && names[i]) ? names[i] : "?");
-        }
-        fflush(stderr);
-        if (names) free(names);
+        TRAPLOG("  backtrace (%d frames):\n", n);
+        /* backtrace_symbols_fd, not backtrace_symbols: no malloc in the crash handler */
+        backtrace_symbols_fd(frames, n, STDERR_FILENO);
     }
 
     /* DEBUG: dump the GUEST stack at rsp (backtrace(3) on FreeBSD only walks
@@ -4764,7 +5108,23 @@ name(int signo, siginfo_t *info, void *uctx_void)                               
 #define MLDR_UCTX_RSP(u) ((uintptr_t)0)
 #endif
 MLDR_TRAP_WRAPPER(sigsys_handler)
-MLDR_TRAP_WRAPPER(sigill_handler)
+/* sigill_handler: the MLDR_TRAP_WRAPPER shape plus the per-thread depth of the duplicate diagnostics. */
+static void
+sigill_handler(int signo, siginfo_t *info, void *uctx_void)
+{
+    struct mldr_sigstk_hdr *h = mldr_cur_hdr();
+    uintptr_t prev = h ? h->trap_guest_rsp : 0;
+    int slot = -1;
+    if (h) h->trap_guest_rsp = MLDR_UCTX_RSP(uctx_void);
+    if (mldr_dupdiag_enabled()) {
+        slot = mldr_dupdiag_slot();
+        __atomic_add_fetch(&mldr_sigill_depth[slot], 1, __ATOMIC_RELAXED);
+    }
+    sigill_handler_inner(signo, info, uctx_void);
+    if (slot >= 0)
+        __atomic_sub_fetch(&mldr_sigill_depth[slot], 1, __ATOMIC_RELAXED);
+    if (h) h->trap_guest_rsp = prev;
+}
 
 /*
  * purpose:  Give the calling thread its own alternate signal stack, so the
@@ -4872,6 +5232,11 @@ setup_macos_syscall_trap(void)
         sigaddset(&trapset, SIGSYS);
         sigaddset(&trapset, SIGSEGV);
         sigaddset(&trapset, SIGBUS);
+        /* The guest's sigexc_setup2 meant to unblock the real-time signals 65/66 (thread_suspend, S2C) but its 8-byte
+         * mask cannot name them (1ull << 64 is bit 0, SIGHUP): a process that inherits them blocked would never see a
+         * suspend signal. Unblock them here, where the mask is native. */
+        sigaddset(&trapset, 65);
+        sigaddset(&trapset, 66);
         if (sigprocmask(SIG_UNBLOCK, &trapset, &oldset) == 0) {
             int was = sigismember(&oldset, SIGILL) || sigismember(&oldset, SIGSYS)
                 || sigismember(&oldset, SIGSEGV) || sigismember(&oldset, SIGBUS);

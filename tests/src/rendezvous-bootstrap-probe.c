@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <stdlib.h>
+#include <errno.h>
 
 typedef unsigned int mp_t;
 typedef int kern_return_t;
@@ -85,8 +86,9 @@ int main(void)
 		_exit((ppid_match && lookup_ok) ? 0 : 2);
 	}
 
-	if (waitpid(child, &status, 0) < 0) {
-		printf("RBP waitpid failed\n");
+	while (waitpid(child, &status, 0) < 0) {
+		if (errno == EINTR) continue;
+		printf("RBP waitpid failed errno=%d\n", errno);
 		printf("RBP RESULT fail waitpid\n");
 		return 1;
 	}
