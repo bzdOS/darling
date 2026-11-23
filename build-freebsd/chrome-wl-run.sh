@@ -104,6 +104,8 @@ TL=""; _tl="${DARLING_TRAP_LOG-1}"
 #   MLDR_LOG_MAPPINGS MLDR_LOG_EPOLL   exec-mapping / epoll log switches
 #   DARLING_SIG65_COUNT        per-instance sig65 count diagnostic (mldr, sigaction_translate)
 #   DARLING_TRAP_LOG_HANDLERS  per-handler traplog filter (DARLING_TRAP_LOG is passed below)
+#   DYLD_PRINT_SEGMENTS        guest-side dyld (not mldr): "dyld: Mapping"/"__TEXT at" lines,
+#                              the segment table build-freebsd/decode-crash.py resolves against
 ( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
@@ -126,6 +128,7 @@ TL=""; _tl="${DARLING_TRAP_LOG-1}"
   ${MLDR_TRAP_WATCH:+MLDR_TRAP_WATCH=$MLDR_TRAP_WATCH} ${MLDR_TRAP_WATCH_OFF:+MLDR_TRAP_WATCH_OFF=$MLDR_TRAP_WATCH_OFF} \
   ${MLDR_TRAP_STR:+MLDR_TRAP_STR=$MLDR_TRAP_STR} \
   ${MLDR_LOG_MAPPINGS:+MLDR_LOG_MAPPINGS=$MLDR_LOG_MAPPINGS} ${MLDR_LOG_EPOLL:+MLDR_LOG_EPOLL=$MLDR_LOG_EPOLL} \
+  ${DYLD_PRINT_SEGMENTS:+DYLD_PRINT_SEGMENTS=$DYLD_PRINT_SEGMENTS} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
   $KT timeout -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
