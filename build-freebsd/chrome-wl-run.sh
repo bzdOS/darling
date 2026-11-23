@@ -92,6 +92,18 @@ RDP=$!
 # DARLING_TRAP_LOG from the environment, default 1; an empty value leaves the variable out of the guest environment altogether
 TL=""; _tl="${DARLING_TRAP_LOG-1}"
 [ -n "$_tl" ] && TL="DARLING_TRAP_LOG=$_tl"
+# Probe variables set in the calling environment must be listed here explicitly: sudo resets
+# the environment, so a name outside this list does not exist for the guest (measured: a flag
+# set before the run arrived empty at the guest and cost a probe round). Names are the getenv
+# readers in mldr (src/startup/mldr/freebsd_syscall_trap.c), not memory:
+#   MLDR_ABORT_TRACE           ABORT-TRACE/ABORT-FRAME/ABORT-STR lines at guest kill(self,SIGABRT);
+#                              parsed by guest-abort-symbolize.sh
+#   MLDR_TRAP_AT MLDR_TRAP_RESUME_AT   trap/resume probes at guest addresses
+#   MLDR_TRAP_WATCH MLDR_TRAP_WATCH_OFF    data-watchpoint probe
+#   MLDR_TRAP_STR              trap when a pointed-to string matches
+#   MLDR_LOG_MAPPINGS MLDR_LOG_EPOLL   exec-mapping / epoll log switches
+#   DARLING_SIG65_COUNT        per-instance sig65 count diagnostic (mldr, sigaction_translate)
+#   DARLING_TRAP_LOG_HANDLERS  per-handler traplog filter (DARLING_TRAP_LOG is passed below)
 ( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
@@ -107,6 +119,13 @@ TL=""; _tl="${DARLING_TRAP_LOG-1}"
   ${DARLING_SHIM_TRACE:+DARLING_SHIM_TRACE=$DARLING_SHIM_TRACE} \
   ${DARLING_APPKIT_TRACE:+DARLING_APPKIT_TRACE=$DARLING_APPKIT_TRACE} \
   ${DSERVER_DIAG_RING:+DSERVER_DIAG_RING=$DSERVER_DIAG_RING} \
+  ${MLDR_ABORT_TRACE:+MLDR_ABORT_TRACE=$MLDR_ABORT_TRACE} \
+  ${DARLING_SIG65_COUNT:+DARLING_SIG65_COUNT=$DARLING_SIG65_COUNT} \
+  ${DARLING_TRAP_LOG_HANDLERS:+DARLING_TRAP_LOG_HANDLERS=$DARLING_TRAP_LOG_HANDLERS} \
+  ${MLDR_TRAP_AT:+MLDR_TRAP_AT=$MLDR_TRAP_AT} ${MLDR_TRAP_RESUME_AT:+MLDR_TRAP_RESUME_AT=$MLDR_TRAP_RESUME_AT} \
+  ${MLDR_TRAP_WATCH:+MLDR_TRAP_WATCH=$MLDR_TRAP_WATCH} ${MLDR_TRAP_WATCH_OFF:+MLDR_TRAP_WATCH_OFF=$MLDR_TRAP_WATCH_OFF} \
+  ${MLDR_TRAP_STR:+MLDR_TRAP_STR=$MLDR_TRAP_STR} \
+  ${MLDR_LOG_MAPPINGS:+MLDR_LOG_MAPPINGS=$MLDR_LOG_MAPPINGS} ${MLDR_LOG_EPOLL:+MLDR_LOG_EPOLL=$MLDR_LOG_EPOLL} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
   $KT timeout -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
