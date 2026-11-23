@@ -5257,6 +5257,11 @@ setup_macos_syscall_trap(void)
         sigaddset(&trapset, SIGSYS);
         sigaddset(&trapset, SIGSEGV);
         sigaddset(&trapset, SIGBUS);
+        /* The guest's sigexc_setup2 meant to unblock the real-time signals 65/66 (thread_suspend, S2C) but its 8-byte
+         * mask cannot name them (1ull << 64 is bit 0, SIGHUP): a process that inherits them blocked would never see a
+         * suspend signal. Unblock them here, where the mask is native. */
+        sigaddset(&trapset, 65);
+        sigaddset(&trapset, 66);
         if (sigprocmask(SIG_UNBLOCK, &trapset, &oldset) == 0) {
             int was = sigismember(&oldset, SIGILL) || sigismember(&oldset, SIGSYS)
                 || sigismember(&oldset, SIGSEGV) || sigismember(&oldset, SIGBUS);
