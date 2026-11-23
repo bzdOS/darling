@@ -1215,7 +1215,8 @@ fprintf(stderr, "[launch] STAGE-STEP pre-dserver t=%lds\n", (long)(time(NULL) - 
      * build-freebsd/build-bootstrap-shim.sh) serves bootstrap_check_in/look_up from inside the guest.
      * DARLING_NO_BOOTSTRAP_SHIM=1 turns the insertion off. */
     if (!getenv("DARLING_NO_BOOTSTRAP_SHIM") &&
-        (strcmp(test_bin, "chrome-macho") == 0 || strcmp(test_bin, "bootstrap-probe-macho") == 0)) {
+        (strcmp(test_bin, "chrome-macho") == 0 || strcmp(test_bin, "bootstrap-probe-macho") == 0 ||
+         strcmp(test_bin, "rendezvous-bootstrap-probe-macho") == 0)) {
         const char *cur = getenv("DYLD_INSERT_LIBRARIES");
         char combined[1024];
         snprintf(combined, sizeof(combined), "/usr/lib/darling-bootstrap.dylib%s%s",
