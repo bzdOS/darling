@@ -81,16 +81,33 @@ rm -f "$RCF"
 # timeout without --foreground is the reaper (procctl) of the whole tree: on expiry every descendant gets TERM/KILL,
 # so guest helpers whose parent died do not survive the run with ppid 1.
 # CHROME_SR_SERVER_LOG=<level> starts the server with DSERVER_LOG_LEVEL=<level>.
-# Log cap: the run writes into a FIFO read by one awk (RDP) that drops the traplog/prctl lines (and the lone quote lines their multi-line records leave behind) and stops appending to the
-# log after CHROME_SR_LOG_CAP bytes (default 200 MB; it keeps reading, so the run is never blocked or killed by the cap).
-# A single reader process, so it can be stopped by pid once the run is over (daemons may keep the FIFO open).
+# Log cap: each channel of the run writes into its own FIFO, read by one awk (RDP for stdout, RDP2 for
+# stderr) that drops the traplog/prctl lines (and the lone quote lines their multi-line records leave
+# behind) and stops appending to the log after CHROME_SR_LOG_CAP bytes (default 200 MB; it keeps reading,
+# so the run is never blocked or killed by the cap).
+# stdout and stderr must NOT share one pipe: the two writers (guest stdio flush blocks are larger than
+# PIPE_BUF, mldr writes its own warnings) interleave mid-write and tear records apart — measured:
+# "dyld: Mapping" lines arrived as fragments interleaved with patch_linux_raw_syscalls warnings, while
+# the direct run with no competing writer printed 38 whole lines from the same binary. One writer per
+# FIFO keeps every source line one whole log record; both readers append the same log.
+# Readers are stopped by pid once the run is over (daemons may keep the FIFOs open).
 FIFO=$BASE.fifo.$$
-rm -f "$FIFO"; mkfifo "$FIFO" || exit 1
+FIFO2=$BASE.fifo2.$$
+rm -f "$FIFO" "$FIFO2"; mkfifo "$FIFO" "$FIFO2" || exit 1
 LC_ALL=C awk -v cap="${CHROME_SR_LOG_CAP:-209715200}" -v out="$LOG" \
   '!/traplog|prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO" &
 RDP=$!
-# DARLING_TRAP_LOG from the environment, default 1; an empty value leaves the variable out of the guest environment altogether
-TL=""; _tl="${DARLING_TRAP_LOG-1}"
+LC_ALL=C awk -v cap="${CHROME_SR_LOG_CAP:-209715200}" -v out="$LOG" \
+  '!/traplog|prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO2" &
+RDP2=$!
+# DARLING_TRAP_LOG from the environment, default 0; an empty value leaves the variable out of the guest
+# environment altogether. The default was 1: the flood's per-syscall marker lines share guest stderr
+# (one write(2) per marker) with dyld's own stderr output, and interleaving with dyld's larger stdio
+# flush blocks tore records apart — measured on the probe run: with the flood on, "dyld: Mapping" and
+# "__TEXT at" lines lost their heads around marker writes (0 whole records), with it off 38 whole
+# Mapping lines with the mldr warnings intact. Lanes that want the markers set DARLING_TRAP_LOG=1
+# explicitly; this log's reader drops marker lines either way.
+TL=""; _tl="${DARLING_TRAP_LOG-0}"
 [ -n "$_tl" ] && TL="DARLING_TRAP_LOG=$_tl"
 # Probe variables set in the calling environment must be listed here explicitly: sudo resets
 # the environment, so a name outside this list does not exist for the guest (measured: a flag
@@ -135,7 +152,7 @@ TL=""; _tl="${DARLING_TRAP_LOG-1}"
   ${DYLD_LIBRARY_PATH:+DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH} \
   "$@" CHROME_APP="$CHROME_APP" \
   sh -c 'if [ -n "$CORE_DIR" ]; then exec sh "$DARLING_SRC_DIR/build-freebsd/core-wrap.sh" run "$@"; fi; exec "$@"' sh \
-  $KT timeout -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2>&1 &
+  $KT timeout -k 5 "$T" "$LAUNCH"; echo $? > "$RCF" ) > "$FIFO" 2> "$FIFO2" &
 BGP=$!
 # Hang dump: CHROME_SR_DUMP_LEAD seconds (default 40) before the timeout, if the run is still alive, run
 # ds-microthreads-dump.sh on the server pid and guest-threads-snapshot.sh on the guest pid. Both pids come from the
@@ -169,9 +186,9 @@ wait $BGP
 [ -n "$SEGVP" ] && wait $SEGVP
 RC=$(cat "$RCF" 2>/dev/null); RC=${RC:-1}
 rm -f "$RCF"
-# let the reader drain what is already in the FIFO, then stop it by pid
-i=0; while [ $i -lt 3 ] && kill -0 $RDP 2>/dev/null; do sleep 1; i=$((i+1)); done
-kill $RDP 2>/dev/null; wait $RDP 2>/dev/null; rm -f "$FIFO"
+# let the readers drain what is already in the FIFOs, then stop them by pid
+i=0; while [ $i -lt 3 ] && { kill -0 $RDP 2>/dev/null || kill -0 $RDP2 2>/dev/null; }; do sleep 1; i=$((i+1)); done
+kill $RDP $RDP2 2>/dev/null; wait $RDP $RDP2 2>/dev/null; rm -f "$FIFO" "$FIFO2"
 # server log (only with CHROME_SR_SERVER_LOG), copied before the prefix is removed; capped at 100 MB (tail)
 if [ -n "$CHROME_SR_SERVER_LOG" ]; then
 	$SUDO tail -c 100000000 "$DARLING_PREFIX/private/var/log/dserver.log" > "$BASE-dserver.txt" 2>/dev/null
