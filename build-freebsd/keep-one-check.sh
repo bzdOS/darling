@@ -30,7 +30,9 @@
 #     stray_builds, fail the verdict); the dir itself is kept. Skipped while anything inside changed in the last
 #     10 minutes (a build in progress) or when the dir is the real build dir.
 #  6. scratch files: top-level files in build/ matching KEEPONE_SCRATCH_BUILD (default "*.diagbak *.fixed *.condfix
-#     fix*.py *-series-[0-9]*.out": source backups and edit scripts of a diagnosis, redirected probe-series output) and files matching KEEPONE_SCRATCH_TMP (default
+#     fix*.py *-series-[0-9]*.out commitmsg-*.txt": source backups, edit scripts of a diagnosis, redirected
+#     probe-series output, and the commit-message files a series writes for its commits — the last ones are written
+#     once and never re-read, so they are removed by --apply and never by hand) and files matching KEEPONE_SCRATCH_TMP (default
 #     "/tmp/fixcond-*.py /tmp/claude-*.txt") are candidates (type scratch / tmpscratch, counted in scratch_files, fail the verdict).
 #     Also untracked or ignored *.orig files (patch leftovers) in the source tree <root>/src and its submodules, from
 #     git status --porcelain --ignored (type srcorig, counted in scratch_files); apply re-checks each is untracked.
@@ -294,7 +296,7 @@ done; set +f
 # ---- 6. scratch files of a diagnosis ----
 # SCRB is a pattern list applied inside $B. The shell must not expand the patterns against the caller's CWD before the
 # loop (the same trap as KEEP_DIRS: from build-freebsd/ fix*.py hit real files); each pattern is expanded only as "$B"/<pattern>.
-SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py *-series-[0-9]*.out}"
+SCRB="${KEEPONE_SCRATCH_BUILD-*.diagbak *.fixed *.condfix fix*.py *-series-[0-9]*.out commitmsg-*.txt}"
 SCRT="${KEEPONE_SCRATCH_TMP-/tmp/fixcond-*.py /tmp/claude-*.txt}"
 set -f; for g in $SCRB; do set +f
 	for f in "$B"/$g; do
