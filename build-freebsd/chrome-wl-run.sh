@@ -56,6 +56,16 @@ PROV_LIBEXEC=${DARLING_INSTALLED_LIBEXEC:-/usr/local/libexec/darling/usr/libexec
 	echo "PROVENANCE git_head=$(cd "$DARLING_SRC_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo unknown) overlay_appkitextras=$(prov_md5 "$DARLING_OVERLAY/usr/lib/AppKitExtras.dylib")"
 	echo "PROVENANCE mldr_installed=$(prov_md5 "$PROV_LIBEXEC/mldr") darlingserver_installed=$(prov_md5 "$PROV_LIBEXEC/darlingserver")"
 	echo "PROVENANCE mldr_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr") darlingserver_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/darlingserver")"
+	_GUARD_MLDR_B=$(prov_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
+	_GUARD_MLDR_I=$(prov_md5 "$PROV_LIBEXEC/mldr")
+	if [ "$_GUARD_MLDR_B" != "$_GUARD_MLDR_I" ] && [ "$_GUARD_MLDR_I" != "MISSING" ] && [ "$_GUARD_MLDR_B" != "MISSING" ]; then
+		echo "GUARD-FAIL mldr installed $_GUARD_MLDR_I != build $_GUARD_MLDR_B — rebuild mldr or sync installed copy (explicit reject, not silent stale)"
+	fi
+	_GUARD_APPKIT="$DARLING_OVERLAY/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"
+	if [ -f "$_GUARD_APPKIT" ]; then
+		python3 "$DARLING_SRC_DIR/build-freebsd/patch-dylib-compat.py" "$_GUARD_APPKIT" 2>&1 | grep -E "0xffffffff|already" && echo "GUARD AppKit compat checked (patched if was 0.0.0)" || true
+	fi
+	unset _GUARD_APPKIT
 } > "$LOG"
 SUDO=${CHROME_SR_SUDO:-/usr/local/bin/sudo -n}
 LAUNCH=${CHROME_SR_LAUNCH:-$DARLING_BUILD_DIR/launch-dynamic}
