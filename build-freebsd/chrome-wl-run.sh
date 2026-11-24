@@ -19,6 +19,10 @@
 #                      that list: it holds the ProcessSingleton socket directory,
 #                      and a run without DARLING_KEEP_LOCAL rebuilds the guest
 #                      root from scratch, which leaves no /tmp behind.
+#   DARLING_GUEST_DEV   colon separated device names (null, zero, urandom) linked
+#                      into the guest /dev. Defaults to null:zero:urandom:
+#                      without /dev/null crashpad's CloseStdio CHECK-fails at
+#                      close_stdio.cc:39 before any window is created.
 #   DARLING_GUEST_COPY    colon separated host=guest file pairs copied into the
 #                      guest root (the local page).
 #   CHROME_ARGS        space separated argv for Chrome (launch-dynamic splits
@@ -159,6 +163,22 @@ case ":${DARLING_GUEST_MKDIR:-}:" in
 *) DARLING_GUEST_MKDIR="${DARLING_GUEST_MKDIR:+$DARLING_GUEST_MKDIR:}/tmp" ;;
 esac
 # END_GUEST_TMPDIR
+# Contract: the guest always has /dev/null, /dev/zero and /dev/urandom.
+# input:  DARLING_GUEST_DEV — the caller's colon list, may be unset or empty
+# output: at least "null:zero:urandom", a value from the caller kept as it is
+# sideEffects: launch-dynamic links <guest>/dev/<name> -> /Volumes/SystemRoot/dev/<name>
+#   after the rebuild (DARLING_GUEST_DEV block in tests/launch-dynamic-smoke.c)
+# Why it is here: without /dev/null crashpad dies on startup —
+#   third_party/crashpad/crashpad/util/posix/close_stdio.cc:39
+#   "Check failed: . open: No such file or directory (2)" (PLOG FATAL ->
+#   ImmediateCrash), so the guest exits with status 0x5/0x4 before NSWindow is
+#   ever created. Measured: chrome-wl-tsfix3 (2 FATAL lines, no "guest device:"
+#   line, GUEST-EXIT status=0x5 t=15s, SNAP windows absent) and chrome-wl-tsdbg3
+#   (FATAL present, GUEST-EXIT status=0x4 t=47s) against chrome-sr-ts7b1 with
+#   DARLING_GUEST_DEV set by its caller (3 "guest device:" lines, 0 FATAL).
+# START_GUEST_DEV
+: "${DARLING_GUEST_DEV:=null:zero:urandom}"
+# END_GUEST_DEV
 ( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
