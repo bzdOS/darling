@@ -183,7 +183,7 @@ load-wayland-backend: infoDictionary NSPrincipalClass=WaylandDisplay
 
 **Задача 2.3.1 ЗАКРЫТА:** `_OBJC_METACLASS_$_NSObject` резолвится из `libobjc.A.dylib` штатным биндом dyld (1333 сайта, ненулевое значение; только `DYLD_PRINT_BINDINGS` его показывает) — `build-freebsd/DYLD-BINDINGS.md`.
 
-**Следующий шаг (стена №6):** dyld падает в `ImageLoader::trieWalk+0xa4` (разд. 9.9); фронтир — пересборка dyld с лог-патчем и gate (`build-freebsd/DYLD-REBUILD.md`).
+**Следующий шаг (фронтир 2026-11, разд. 9.12):** путь поверхности пройден (`wl_surface` + configure roundtrip против sway, AppKit-окно создаётся и делается видимым в AppKit), но гость умирает CHECK-крашем (`ImmediateCrash`, SIGTRAP) на `ChromeFW+0x1E3A378` сразу после создания `NSWindow`, до первого attach буфера — кадр композитора пуст.
 
 **Запуск для проверки:**
 ```sh
@@ -890,6 +890,7 @@ stat=0 + image not found, 3: dyld-trace + clean dlopen failure). Фикс =
 
 
 #### 9.11 Фронтир 2026-10 (октябрьская серия build-freebsd/CFT-DLOPEN.md)
+> **SUPERSEDED (2026-11):** архив; актуальный фронтир — §9.12 (ноябрьская серия: AppKit-окно живо, гость умирает CHECK-крашем после его создания).
 
 **Где стоим:** dyld мапит Chrome Framework; dlopen доходит до инициализаторов;
 краш — рекурсивный abort `os_unfair_lock` (`libsystem_platform.dylib+0x8237`,
@@ -921,6 +922,51 @@ llvm-objdump -d --start-address=0xccdb60 --stop-address=0xccdc00 "$DARLING_OVERL
 Ожидаемо: ближайший символ ниже 0xccdb60 (или подтверждение stripped) +
 дизасм caller-функции; дальше — решение по цепи.
 
+
+#### 9.12 Фронтир 2026-11: CHECK-краш после создания окна (ноябрьская серия)
+
+**Где стоим (2026-11-24):** путь поверхности пройден и доказан рантайм-зондом
+(ветка зонда принята и влита: `build-freebsd/chrome-wl-run.sh` — канон запуска,
+`nsstart-probe.c` — зонд в госте; `WLPROBE waylandWindowInit ret` не-nil,
+`xdg_surface`→`xdg_toplevel` configure roundtrip против sway (headless) проходит).
+AppKit-окно ЖИВО: `ORDERFRONT-PROBE: visible=1 occlusion=2 windows=1` в 4/4
+свежих прогонов fd-серии. Но буфер не аттачится никогда: гость умирает
+CHECK-крашем — `ImmediateCrash` (ud2 внутри int3/ud2-последовательности,
+SIGTRAP, статус 0x5) на `ChromeFW+0x1E3A378` — через <1 c после создания
+`NSWindow`/`makeKeyAndOrderFront`, до первого `cgContext`. Композиторская
+сторона: `swaymsg get_tree` 651 тик 0 con-узлов; grim-кадры все одинаковые
+(md5 594f78d2…, 6004 Б) — кадра нет.
+
+**Замеры краша:** rip−база = `0x1E3A378` стабильно 2/2 (as/au серия,
+rip=0x…b8f378 при базах 0x…55000) и воспроизводится в ts/of-серии
+(SIGTRAP t=4–10 с); esi ∈ {0x107, 0xbe8b}; «Check failed» в лог не печатается.
+Локальная символизация невозможна: nm фреймворка даёт 3 экспорта
+(ChromeAppModeStart_v8, ChromeMain, ChromeWebAppShortcutCopierMain),
+llvm-symbolizer по всем смещениям отвечает «ChromeMain ??:0:0» (фолбэк),
+.dSYM в бандле нет, breakpad .sym по LC_UUID
+`4C4C4409-5555-3144-A170-AD4644F310AD` → 404. Имя CHECK взять неоткуда —
+нужен dSYM/символ-файл/сборка с символами 154.0.8029.0 mac-x64; окно
+добивается БЕЗ имени CHECK (обход/симуляция по факту падения).
+
+**Что НЕ блокирует (снято в ноябре):** шторм «queued for replay» pending-call
+queue — гонка, в of-серии шторма нет (у аварии другой профиль смерти);
+потеря сигнала 65 через PT_DETACH; SIGPIPE сервера; дубли SIGILL (~850 → 10–27).
+Стена «wl_surface не создаётся» снята: поверхность создаётся и конфигурируется.
+
+**Первый шаг фронтира:** разобрать расхождение маркеров `visible=0` при
+`occlusion=2` в ts-серии (occlusion 2 = `NSWindowOcclusionStateVisible` — зонд,
+вероятно, считает не тот бит/окно). Затем — инструментировать наш AppKit-путь
+вокруг `_createPlatformWindowOnMainThread`/`makeKeyAndOrderFront` (что Chrome
+спрашивает у нашего AppKit и что тот возвращает) и править backend, после
+которой прогон жив ≥10 с с окном: `visible>=1`, `SNAP windows>=1`, кадр
+композитора отличим от пустого.
+
+**Канон запуска/проверки:**
+```sh
+sh build-freebsd/chrome-wl-run.sh <суффикс>   # из корня дерева
+# в логе: WLPROBE waylandWindowInit ret не-nil; ORDERFRONT-PROBE visible=… ;
+# SNAP windows=…; смерть — SIGTRAP-AUDIT-DELIVER rip=0x…f378
+```
 
 #### 9.4 Полезные артефакты
 - `tests/dlopen-probe-macho` + `/tmp/gen-all-extras.py` + `/tmp/gen-stub-frameworks.sh`
