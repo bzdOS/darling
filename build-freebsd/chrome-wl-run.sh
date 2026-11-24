@@ -15,7 +15,10 @@
 #                      root at the same path. Must cover XDG_RUNTIME_DIR (the
 #                      socket is only connect()ed, so a link is enough).
 #   DARLING_GUEST_MKDIR   colon separated guest directories created for real in
-#                      the guest root (the profile directory).
+#                      the guest root (the profile directory). /tmp is always on
+#                      that list: it holds the ProcessSingleton socket directory,
+#                      and a run without DARLING_KEEP_LOCAL rebuilds the guest
+#                      root from scratch, which leaves no /tmp behind.
 #   DARLING_GUEST_COPY    colon separated host=guest file pairs copied into the
 #                      guest root (the local page).
 #   CHROME_ARGS        space separated argv for Chrome (launch-dynamic splits
@@ -135,6 +138,27 @@ TL=""; _tl="${DARLING_TRAP_LOG-0}"
 #                              the segment table build-freebsd/decode-crash.py resolves against
 #   DYLD_INSERT_LIBRARIES      injected probe dylib via launch-dynamic guest env (darling-bootstrap/dyld-trace)
 #   DYLD_LIBRARY_PATH          guest dylib search override (step B probe)
+# Contract: the guest always has its temp directory before the guest starts.
+# input:  DARLING_GUEST_MKDIR — the caller's colon list, may be unset or empty
+# output: that same list with /tmp appended only when it is not on it yet
+# sideEffects: launch-dynamic then creates <guest root>/tmp for real, and it does
+#   so after the wipe (DARLING_GUEST_MKDIR handling runs after the
+#   DARLING_KEEP_LOCAL check in tests/launch-dynamic-smoke.c)
+# Why it is here: ProcessSingleton puts its socket in a directory under the guest
+#   temp dir; TMPDIR is not in the sudo env list below, so Chromium falls back to
+#   /tmp, and a run without DARLING_KEEP_LOCAL rebuilds the guest root from
+#   scratch, which has no /tmp (only frameworks, usr/lib, etc, tz, the binary and
+#   whatever GUEST_EXPOSE/GUEST_MKDIR/GUEST_COPY put there). Measured on the
+#   direct run: kdump shows fstatat "/tmp/darling-local-overlay/tmp" -1 errno 2
+#   twice, no mkdir of a socket directory after it, then
+#   process_singleton_posix.cc:1043 "Failed to create socket directory." and
+#   GUEST-EXIT status=0x1500 (21) t=10s (t=19s on the reproduction).
+# START_GUEST_TMPDIR
+case ":${DARLING_GUEST_MKDIR:-}:" in
+*:\/tmp:*) ;;
+*) DARLING_GUEST_MKDIR="${DARLING_GUEST_MKDIR:+$DARLING_GUEST_MKDIR:}/tmp" ;;
+esac
+# END_GUEST_TMPDIR
 ( $SUDO env \
   DARLING_SRC_DIR="$DARLING_SRC_DIR" DARLING_OVERLAY="$DARLING_OVERLAY" \
   DARLING_BUILD_DIR="$DARLING_BUILD_DIR" CORE_DIR="$CORE_DIR" CORE_LIMIT_KB="$CORE_LIMIT_KB" DARLING_PREFIX="$DARLING_PREFIX" \
