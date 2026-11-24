@@ -17,8 +17,10 @@ struct mach_header;
 extern void _dyld_register_func_for_add_image(void (*func)(const struct mach_header *, long));
 typedef struct { const char *dli_fname; void *dli_fbase; const char *dli_sname; void *dli_saddr; } Dl_info_x;
 extern int dladdr(const void *, Dl_info_x *);
+extern int dprintf(int, const char *, ...);
 
-static IMP orig_finish, orig_pwin, orig_create;
+static IMP orig_finish, orig_pwin, orig_create, orig_run, orig_modal;
+static IMP orig_isvis, orig_occ, orig_orderfront, orig_ofr, orig_mkaf, orig_owr, orig_setvis;
 
 static void say(const char *m)
 {
@@ -26,6 +28,29 @@ static void say(const char *m)
     while (*p)
         p++;
     write(2, m, p - m);
+}
+
+static void visprobe_caller(const char *sel, id self)
+{
+    void *ra = __builtin_return_address(1);
+    Dl_info_x di;
+    const char *img = "?";
+    unsigned long off = (unsigned long)ra;
+    if (dladdr(ra, &di) && di.dli_fname) {
+        img = di.dli_fname;
+        off = (unsigned long)ra - (unsigned long)di.dli_fbase;
+    }
+    dprintf(2, "VISPROBE: %s self=%p caller=%s+0x%lx\n", sel, self, img, off);
+}
+
+static unsigned long window_count(void)
+{
+    id app = MSG(id, id, SEL)((id)objc_getClass("NSApplication"), S("sharedApplication"));
+    id wins;
+    if (!app)
+        return 0;
+    wins = MSG(id, id, SEL)(app, S("windows"));
+    return wins ? MSG(unsigned long, id, SEL)(wins, S("count")) : 0;
 }
 
 static void my_finish(id self, SEL cmd)
@@ -45,8 +70,6 @@ static id my_pwin(id self, SEL cmd)
     return ((id (*)(id, SEL))orig_pwin)(self, cmd);
 }
 
-extern int dprintf(int, const char *, ...);
-
 /* Order-front probe: forcing makeKeyAndOrderFront/orderFrontRegardless from this
  * hook crashes a Chrome Framework notification observer (SIGSEGV addr=0xe0, rdi=0x0,
  * null deref at +0xe0 in ChromeFW during NSWindowDidUpdateNotification posted by
@@ -58,12 +81,76 @@ static void my_create(id self, SEL cmd)
     say("NSSTART-PROBE: _createPlatformWindowOnMainThread enter\n");
     ((void (*)(id, SEL))orig_create)(self, cmd);
     say("NSSTART-PROBE: _createPlatformWindowOnMainThread exit\n");
-    visible = MSG(signed char, id, SEL)(self, S("isVisible"));
-    occ = MSG(unsigned long, id, SEL)(self, S("occlusionState"));
-    dprintf(2, "ORDERFRONT-PROBE: visible=%d occlusion=%lu\n", (int)visible, occ);
+    visible = orig_isvis ? ((signed char (*)(id, SEL))orig_isvis)(self, S("isVisible"))
+                         : MSG(signed char, id, SEL)(self, S("isVisible"));
+    occ = orig_occ ? ((unsigned long (*)(id, SEL))orig_occ)(self, S("occlusionState"))
+                   : MSG(unsigned long, id, SEL)(self, S("occlusionState"));
+    dprintf(2, "ORDERFRONT-PROBE: visible=%d occlusion=%lu windows=%lu\n", (int)visible, occ, window_count());
 }
 
-static IMP orig_run, orig_modal;
+static signed char my_isvis(id self, SEL cmd)
+{
+    signed char r = orig_isvis ? ((signed char (*)(id, SEL))orig_isvis)(self, cmd) : 0;
+    visprobe_caller("isVisible", self);
+    dprintf(2, "VISPROBE: isVisible self=%p -> %d\n", self, (int)r);
+    return r;
+}
+
+static unsigned long my_occ(id self, SEL cmd)
+{
+    unsigned long r = orig_occ ? ((unsigned long (*)(id, SEL))orig_occ)(self, cmd) : 0;
+    visprobe_caller("occlusionState", self);
+    dprintf(2, "VISPROBE: occlusionState self=%p -> %lu\n", self, r);
+    return r;
+}
+
+static void my_orderfront(id self, SEL cmd, id sender)
+{
+    visprobe_caller("orderFront:", self);
+    dprintf(2, "VISPROBE: orderFront: self=%p sender=%p windows=%lu\n", self, sender, window_count());
+    if (orig_orderfront)
+        ((void (*)(id, SEL, id))orig_orderfront)(self, cmd, sender);
+    if (orig_isvis)
+        dprintf(2, "VISPROBE: orderFront: done visible=%d\n", (int)((signed char (*)(id, SEL))orig_isvis)(self, S("isVisible")));
+}
+
+static void my_ofr(id self, SEL cmd)
+{
+    visprobe_caller("orderFrontRegardless", self);
+    dprintf(2, "VISPROBE: orderFrontRegardless self=%p windows=%lu\n", self, window_count());
+    if (orig_ofr)
+        ((void (*)(id, SEL))orig_ofr)(self, cmd);
+    if (orig_isvis)
+        dprintf(2, "VISPROBE: orderFrontRegardless done visible=%d\n", (int)((signed char (*)(id, SEL))orig_isvis)(self, S("isVisible")));
+}
+
+static void my_mkaf(id self, SEL cmd, id sender)
+{
+    visprobe_caller("makeKeyAndOrderFront:", self);
+    dprintf(2, "VISPROBE: makeKeyAndOrderFront: self=%p sender=%p windows=%lu\n", self, sender, window_count());
+    if (orig_mkaf)
+        ((void (*)(id, SEL, id))orig_mkaf)(self, cmd, sender);
+    if (orig_isvis)
+        dprintf(2, "VISPROBE: makeKeyAndOrderFront: done visible=%d\n", (int)((signed char (*)(id, SEL))orig_isvis)(self, S("isVisible")));
+}
+
+static void my_owr(id self, SEL cmd, long place, long other)
+{
+    visprobe_caller("orderWindow:relativeTo:", self);
+    dprintf(2, "VISPROBE: orderWindow:relativeTo: self=%p place=%ld other=%ld\n", self, place, other);
+    if (orig_owr)
+        ((void (*)(id, SEL, long, long))orig_owr)(self, cmd, place, other);
+    if (orig_isvis)
+        dprintf(2, "VISPROBE: orderWindow:relativeTo: done visible=%d\n", (int)((signed char (*)(id, SEL))orig_isvis)(self, S("isVisible")));
+}
+
+static void my_setvis(id self, SEL cmd, signed char v)
+{
+    visprobe_caller("setIsVisible:", self);
+    dprintf(2, "VISPROBE: setIsVisible: self=%p v=%d\n", self, (int)v);
+    if (orig_setvis)
+        ((void (*)(id, SEL, signed char))orig_setvis)(self, cmd, v);
+}
 
 static void my_run(id self, SEL cmd)
 {
@@ -93,6 +180,13 @@ static void probe_add(void)
     orig_run = class_replaceMethod(ca, S("run"), (IMP)my_run, "v16@0:8");
     orig_pwin = class_replaceMethod(cw, S("platformWindow"), (IMP)my_pwin, "@16@0:8");
     orig_create = class_replaceMethod(cw, S("_createPlatformWindowOnMainThread"), (IMP)my_create, "v16@0:8");
+    orig_isvis = class_replaceMethod(cw, S("isVisible"), (IMP)my_isvis, "c16@0:8");
+    orig_occ = class_replaceMethod(cw, S("occlusionState"), (IMP)my_occ, "Q16@0:8");
+    orig_orderfront = class_replaceMethod(cw, S("orderFront:"), (IMP)my_orderfront, "v24@0:8@16");
+    orig_ofr = class_replaceMethod(cw, S("orderFrontRegardless"), (IMP)my_ofr, "v16@0:8");
+    orig_mkaf = class_replaceMethod(cw, S("makeKeyAndOrderFront:"), (IMP)my_mkaf, "v24@0:8@16");
+    orig_owr = class_replaceMethod(cw, S("orderWindow:relativeTo:"), (IMP)my_owr, "v32@0:8q16q24");
+    orig_setvis = class_replaceMethod(cw, S("setIsVisible:"), (IMP)my_setvis, "v20@0:8c16");
     {
         Class na = objc_getClass("NSAlert");
         if (na)

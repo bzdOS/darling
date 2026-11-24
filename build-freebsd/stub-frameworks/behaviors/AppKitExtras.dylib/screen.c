@@ -136,7 +136,15 @@ static double window_backing_scale(id self, SEL cmd)
     (void)cmd;
     return sc ? MSG(double, id, SEL)(sc, S("backingScaleFactor")) : 1.0;
 }
-static unsigned long window_occlusion(id self, SEL cmd) { (void)self; (void)cmd; return 2; }
+/* NSWindowOcclusionStateVisible = 1<<1. Report visible only when the window is
+ * actually visible; always-visible lied to Chrome (isVisible=0, occlusion=2) and
+ * preceded SIGTRAP CHECK crashes on the window path. */
+static unsigned long window_occlusion(id self, SEL cmd)
+{
+    signed char vis = MSG(signed char, id, SEL)(self, S("isVisible"));
+    (void)cmd;
+    return vis ? 2UL : 0UL;
+}
 
 static int done;
 
