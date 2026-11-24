@@ -6,12 +6,12 @@ evidence package: log facts + code quotes from both sides.
 
 ## Fresh runs (this branch, trunk 5e9099c40, env canon /tmp/ts9-run.sh)
 
-- tsa1 (/opt/darling/build/chrome-sr-tsa1.log): `queued for replay` = 0,
+- tsa1 (chrome-sr-tsa1.log in the build dir): `queued for replay` = 0,
   `_createPlatformWindowOnMainThread enter` = 0, GUEST-EXIT 0x6 at t=6s
   (early abort, died before the storm window at ~t=20s).
-- tsb1 (/opt/darling/build/chrome-sr-tsb1.log): `queued for replay` = 0,
+- tsb1 (chrome-sr-tsb1.log in the build dir): `queued for replay` = 0,
   `NSApplication run enter` reached, GUEST-EXIT 0x5 (SIGTRAP) at t=5s.
-- Reference storm run hd1 (/opt/darling/build/chrome-sr-hd1.log, same trunk):
+- Reference storm run hd1 (chrome-sr-hd1.log in the build dir, same trunk):
   `queued for replay` = 12, enter NOT reached, GUEST-EXIT 0x6 at t=22s,
   abort rip=0x22a2c4 (mldr text 20b000-231000).
 
