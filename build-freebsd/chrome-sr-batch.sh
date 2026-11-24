@@ -15,6 +15,21 @@ if [ -z "$DARLING_LOCK_HELD" ]; then
 fi
 P=${1:?}; N=${2:?}; T=${3:-120}
 : "${DARLING_SRC_DIR:?}" "${DARLING_OVERLAY:?}" "${DARLING_BUILD_DIR:?}"
+# OVERLAY-GUARD (task/batch-overlay-guard): explicit, not silent stale.
+# Catches AppKit compat gate (0.0.0 vs 45 aborts crashpad) and mldr divergence
+# (installed bb857 vs build 7aba hides rsi). Idempotent: patch is no-op if
+# already 0xffffffff, GUARD-FAIL is explicit stderr not hidden exit.
+guard_md5() { [ -f "$1" ] || { echo MISSING; return; }; md5 -q "$1" 2>/dev/null || md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
+_GUARD_MLDR_B=$(guard_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
+_GUARD_MLDR_I=$(guard_md5 "${DARLING_INSTALLED_LIBEXEC:-/usr/local/libexec/darling/usr/libexec/darling}/mldr")
+if [ "$_GUARD_MLDR_B" != "$_GUARD_MLDR_I" ] && [ "$_GUARD_MLDR_I" != "MISSING" ] && [ "$_GUARD_MLDR_B" != "MISSING" ]; then
+	echo "GUARD-FAIL mldr installed $_GUARD_MLDR_I != build $_GUARD_MLDR_B — rebuild mldr or sync installed copy (explicit reject, not silent stale)" >&2
+fi
+_GUARD_APPKIT="$DARLING_OVERLAY/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"
+if [ -f "$_GUARD_APPKIT" ]; then
+	python3 "$DARLING_SRC_DIR/build-freebsd/patch-dylib-compat.py" "$_GUARD_APPKIT" 2>&1 | grep -E "0xffffffff|already" && echo "GUARD AppKit compat checked (patched if was 0.0.0)" >&2 || true
+fi
+unset _GUARD_APPKIT
 RUN=/tmp/sr56-run
 mkdir -p "$RUN" && chmod 700 "$RUN"
 [ -f "$RUN/page.html" ] || cp /tmp/or55-run/page.html "$RUN/page.html"

@@ -53,7 +53,7 @@ prov_md5() { [ -f "$1" ] || { echo MISSING; return; }; md5 -q "$1" 2>/dev/null |
 PROV_LIBEXEC=${DARLING_INSTALLED_LIBEXEC:-/usr/local/libexec/darling/usr/libexec/darling}
 {
 	echo "WRAPPER_START=$START timeout=$T"
-	echo "PROVENANCE git_head=$(cd "$DARLING_SRC_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo unknown)"
+	echo "PROVENANCE git_head=$(cd "$DARLING_SRC_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo unknown) overlay_appkitextras=$(prov_md5 "$DARLING_OVERLAY/usr/lib/AppKitExtras.dylib")"
 	echo "PROVENANCE mldr_installed=$(prov_md5 "$PROV_LIBEXEC/mldr") darlingserver_installed=$(prov_md5 "$PROV_LIBEXEC/darlingserver")"
 	echo "PROVENANCE mldr_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr") darlingserver_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/darlingserver")"
 } > "$LOG"
