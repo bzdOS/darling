@@ -63,6 +63,16 @@ PROV_LIBEXEC=${DARLING_INSTALLED_LIBEXEC:-/usr/local/libexec/darling/usr/libexec
 	echo "PROVENANCE git_head=$(cd "$DARLING_SRC_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo unknown) overlay_appkitextras=$(prov_md5 "$DARLING_OVERLAY/usr/lib/AppKitExtras.dylib")"
 	echo "PROVENANCE mldr_installed=$(prov_md5 "$PROV_LIBEXEC/mldr") darlingserver_installed=$(prov_md5 "$PROV_LIBEXEC/darlingserver")"
 	echo "PROVENANCE mldr_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr") darlingserver_build=$(prov_md5 "$DARLING_BUILD_DIR/dserver/darlingserver")"
+	# The guest's AppKit and its Wayland backend bundle are separate images; a rebuild of one without
+	# the other is undetectable from the log without their md5s (a series that rebuilt mid-way measured
+	# its wall on two different binaries). MISSING says the file is absent, not a silent zero.
+	echo "PROVENANCE appkit_overlay=$(prov_md5 "$DARLING_OVERLAY/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit") wayland_backend_overlay=$(prov_md5 "$DARLING_OVERLAY/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/Backends/Wayland.backend/Contents/MacOS/Wayland")"
+	# DARLING_KEEP_LOCAL=1 (chrome-sr-batch runs with it) skips re-staging: the guest root keeps the
+	# probe dylib it already has, which can be older than the overlay copy this line above names.
+	# Record the staged copy and say so explicitly instead of letting a run silently exercise a
+	# different probe than the one its PROVENANCE named (measured 24.11: three runs reported the
+	# fresh overlay md5 while the guest executed the morning copy).
+	echo "PROVENANCE appkitextras_staged=$(prov_md5 /tmp/darling-local-overlay/usr/lib/AppKitExtras.dylib)"
 	_GUARD_MLDR_B=$(prov_md5 "$DARLING_BUILD_DIR/dserver/mldr-real/mldr")
 	_GUARD_MLDR_I=$(prov_md5 "$PROV_LIBEXEC/mldr")
 	if [ "$_GUARD_MLDR_B" != "$_GUARD_MLDR_I" ] && [ "$_GUARD_MLDR_I" != "MISSING" ] && [ "$_GUARD_MLDR_B" != "MISSING" ]; then

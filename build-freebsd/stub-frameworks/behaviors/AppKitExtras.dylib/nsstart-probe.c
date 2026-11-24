@@ -22,6 +22,12 @@ extern int dprintf(int, const char *, ...);
 static IMP orig_finish, orig_pwin, orig_create, orig_run, orig_modal;
 static IMP orig_isvis, orig_occ, orig_orderfront, orig_ofr, orig_mkaf, orig_owr, orig_setvis;
 
+static void wl_install(Class dispClass);
+static id my_curdisp(id self, SEL cmd);
+static IMP orig_curdisp, orig_nww, orig_wwinit, orig_wwsurface;
+static int wl_diag, wl_hooks_done;
+static int probe_done;
+
 static void say(const char *m)
 {
     const char *p = m;
@@ -74,13 +80,23 @@ static id my_pwin(id self, SEL cmd)
  * hook crashes a Chrome Framework notification observer (SIGSEGV addr=0xe0, rdi=0x0,
  * null deref at +0xe0 in ChromeFW during NSWindowDidUpdateNotification posted by
  * -[NSWindow update]). Report window state without forcing the crashing path. */
+static int wl_diag;
+
 static void my_create(id self, SEL cmd)
 {
     signed char visible;
     unsigned long occ;
     say("NSSTART-PROBE: _createPlatformWindowOnMainThread enter\n");
+    if (!wl_diag) {
+        wl_diag = 1;
+        dprintf(2, "WLPROBE-DIAG nsdisplay=%p probe_done=%d curdisp=%p nww=%p waylandwindow=%p\n",
+                objc_getClass("NSDisplay"), probe_done, (void *)orig_curdisp,
+                (void *)orig_nww, (void *)objc_getClass("WaylandWindow"));
+    }
+    wl_install(0);
     ((void (*)(id, SEL))orig_create)(self, cmd);
     say("NSSTART-PROBE: _createPlatformWindowOnMainThread exit\n");
+    wl_install(0);
     visible = orig_isvis ? ((signed char (*)(id, SEL))orig_isvis)(self, S("isVisible"))
                          : MSG(signed char, id, SEL)(self, S("isVisible"));
     occ = orig_occ ? ((unsigned long (*)(id, SEL))orig_occ)(self, S("occlusionState"))
@@ -152,6 +168,70 @@ static void my_setvis(id self, SEL cmd, signed char v)
         ((void (*)(id, SEL, signed char))orig_setvis)(self, cmd, v);
 }
 
+/* Wayland backend probe: which backend class actually serves the windows, whether
+ * its window object is created, and whether a surface pointer is ever handed out.
+ * The deployed Wayland.backend bundle predates this tree's sources, so only the
+ * running image can answer what the source tree cannot. */
+
+extern const char *class_getName(Class cls);
+
+static id my_nww(id self, SEL cmd, id delegate)
+{
+    id w = orig_nww ? ((id (*)(id, SEL, id))orig_nww)(self, cmd, delegate) : 0;
+    dprintf(2, "WLPROBE: newWindowWithDelegate self=%p delegate=%p ret=%p\n", self, delegate, w);
+    return w;
+}
+
+static id my_wwinit(id self, SEL cmd, id delegate)
+{
+    id w = orig_wwinit ? ((id (*)(id, SEL, id))orig_wwinit)(self, cmd, delegate) : 0;
+    dprintf(2, "WLPROBE: waylandWindowInit self=%p delegate=%p ret=%p\n", self, delegate, w);
+    return w;
+}
+
+static void *my_wwsurface(id self, SEL cmd)
+{
+    void *s = orig_wwsurface ? ((void *(*)(id, SEL))orig_wwsurface)(self, cmd) : 0;
+    visprobe_caller("surface", self);
+    dprintf(2, "WLPROBE: surface self=%p -> %p\n", self, s);
+    return s;
+}
+
+static void wl_install(Class dispClass)
+{
+    Class nd, ww;
+    if (wl_hooks_done)
+        return;
+    nd = objc_getClass("NSDisplay");
+    if (nd && orig_curdisp == 0)
+        orig_curdisp = class_replaceMethod(object_getClass(nd), S("currentDisplay"),
+                                           (IMP)my_curdisp, "@16@0:8");
+    if (dispClass && orig_nww == 0) {
+        orig_nww = class_replaceMethod(dispClass, S("newWindowWithDelegate:"),
+                                       (IMP)my_nww, "@24@0:8@16");
+        dprintf(2, "WLPROBE: newWindowWithDelegate hooked on %s prev=%p\n",
+                class_getName(dispClass), (void *)orig_nww);
+    }
+    ww = objc_getClass("WaylandWindow");
+    if (ww && orig_wwinit == 0) {
+        orig_wwinit = class_replaceMethod(ww, S("initWithDelegate:"), (IMP)my_wwinit, "@24@0:8@16");
+        orig_wwsurface = class_replaceMethod(ww, S("surface"), (IMP)my_wwsurface, "^v16@0:8");
+        dprintf(2, "WLPROBE: WaylandWindow init+surface hooked\n");
+    }
+    if (orig_nww && orig_wwinit)
+        wl_hooks_done = 1;
+}
+
+static id my_curdisp(id self, SEL cmd)
+{
+    id d = orig_curdisp ? ((id (*)(id, SEL))orig_curdisp)(self, cmd) : 0;
+    if (d) {
+        dprintf(2, "WLPROBE: currentDisplay class=%s\n", class_getName(object_getClass(d)));
+        wl_install(object_getClass(d));
+    }
+    return d;
+}
+
 static void my_run(id self, SEL cmd)
 {
     say("NSSTART-PROBE: NSApplication run enter\n");
@@ -164,8 +244,6 @@ static long my_modal(id self, SEL cmd)
     say("NSSTART-PROBE: NSAlert runModal enter\n");
     return ((long (*)(id, SEL))orig_modal)(self, cmd);
 }
-
-static int probe_done;
 
 static void probe_add(void)
 {
@@ -192,6 +270,9 @@ static void probe_add(void)
         if (na)
             orig_modal = class_replaceMethod(na, S("runModal"), (IMP)my_modal, "q16@0:8");
     }
+    {
+        wl_install(0);
+    }
     probe_done = 1;
     if (orig_finish && orig_pwin && orig_create)
         say("NSSTART-PROBE installed\n");
@@ -206,6 +287,8 @@ static void probe_on_image(const struct mach_header *mh, long slide)
     Dl_info_x di;
     static int armed;
     (void)slide;
+    if (!wl_hooks_done)
+        wl_install(0);
     if (probe_done)
         return;
     if (!armed) {
