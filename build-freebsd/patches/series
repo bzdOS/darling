@@ -94,5 +94,7 @@ xnu xnu-stub-files.patch
 darlingserver darlingserver-s2c-mmap-eintr-retry.patch
 # darlingserver-pending-call-queue.patch: a regular call that arrives while another call is still pending is queued behind it (replayed from _pendingInterrupts) instead of dropped with "pending call overwritten while active" (the client got no reply); the replay no longer throws when a call arrived meanwhile.
 darlingserver darlingserver-pending-call-queue.patch
+# darlingserver-suspend-continuation-guard.patch: a regular call arriving while the thread is parked with a pending continuation no longer takes _pendingCall (doWork() aborts the server on "pending call + pending continuation"); it queues behind the park like an overlap. Depends on darlingserver-pending-call-queue.patch.
+darlingserver darlingserver-suspend-continuation-guard.patch
 # darlingserver-freebsd-vm-region.patch: memoryRegionInfo and getNextRegion read the process vm map with kinfo_getvmmap on the FreeBSD port (there is no /proc/<pid>/maps), so vm_region_64 finds the region of an address instead of KERN_INVALID_ADDRESS (Chrome allocator_interception_apple.mm).
 darlingserver darlingserver-freebsd-vm-region.patch

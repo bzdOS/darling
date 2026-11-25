@@ -1,0 +1,28 @@
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -332,6 +332,25 @@
+ 			return;
+ 		}
+ 	}
++	if (newPendingCall && _continuationCallback && newPendingCall->number() != Call::Number::InterruptEnter) {
++		// A thread parked with a pending continuation (e.g. parked by a profiler's thread_suspend while
++		// inside an interrupted call) must not take a regular call into _pendingCall: doWork() treats
++		// "pending call + pending continuation" as a fatal invariant and aborts the server. A burst of
++		// such calls buffered while the thread stayed parked made the first call take the slot and the
++		// rest pile up as overlaps right before the abort. Queue it behind the park instead; the
++		// doneWorking drain replays it from _pendingInterrupts once the park ends. InterruptEnter is
++		// excluded: doWork() unwraps the continuation for it before that invariant is checked.
++		static std::atomic<unsigned long> contParkCount{0};
++		unsigned long cn = ++contParkCount;
++		if (cn <= 50 || (cn & (cn - 1)) == 0) {
++			fprintf(stderr, "[dserver] tid=%d(%d): call %d arrived while thread is parked with a continuation (interrupts %zu, queued %zu); queued behind continuation-park (#%lu)\n",
++				(int)_tid, (int)_nstid, (int)newPendingCall->number(),
++				_interrupts.size(), _pendingInterrupts.size(), cn);
++			fflush(stderr);
++		}
++		_pendingInterrupts.push(newPendingCall);
++		return;
++	}
+ 	_pendingCall = newPendingCall;
+ };
+ 
