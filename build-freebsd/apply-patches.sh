@@ -14,30 +14,36 @@ QUIET=1 DARLING_SRC_DIR="$SRC" PATCH_EXT_DIR="$EXT" sh "$SRC/build-freebsd/resto
 # A patch may be applied while a LATER patch of the same submodule shifted its context, so its own
 # reverse --check fails. Detect that: copy the working-tree files touched by the submodule's patches into a
 # scratch dir and reverse the series from the end; every patch that reverses in that chain is ALREADY applied.
+# ../../ patches (mldr, etc.) touch the main tree, not a submodule — handle them as .._root with d=$SRC.
 ALR=$(mktemp -d "${TMPDIR:-/tmp}/apply-already.XXXXXX") || exit 1
 trap 'rm -rf "$ALR"' EXIT INT TERM
 : > "$ALR/list"
-for sub in $(grep -v '^#' "$PDIR/series" | awk 'NF && $1 != "../.." {print $1}' | sort -u); do
-	[ -d "$EXT/$sub" ] || continue
+for sub in $(grep -v '^#' "$PDIR/series" | awk 'NF{print $1}' | sort -u); do
+	case "$sub" in '#'*|'') continue;; esac
+	if [ "$sub" = "../.." ]; then d_base="$SRC"; else
+		[ -d "$EXT/$sub" ] || continue; d_base="$EXT/$sub"
+	fi
 	pl=$(grep -v '^#' "$PDIR/series" | awk -v s="$sub" '$1==s{print $2}')
-	mkdir "$ALR/w" || break
-	for pt in $pl; do [ -f "$PDIR/$pt" ] && { sed -n 's|^diff --git a/\(.*\) b/.*|\1|p' "$PDIR/$pt"; grep '^+++ b/' "$PDIR/$pt" | sed 's|^+++ b/||'; }; done | sort -u | while IFS= read -r f; do
-		if [ -e "$EXT/$sub/$f" ] || [ -L "$EXT/$sub/$f" ]; then mkdir -p "$ALR/w/$(dirname "$f")"; cp -P "$EXT/$sub/$f" "$ALR/w/$f"; fi
+	mkdir -p "$ALR/w" || break
+	for pt in $pl; do [ -f "$PDIR/$pt" ] && { sed -n 's|^diff --git a/\(.*\) b/.*|\1|p' "$PDIR/$pt" | cut -f1; grep '^+++ b/' "$PDIR/$pt" | sed 's|^+++ b/||' | cut -f1; }; done | sort -u | while IFS= read -r f; do
+		if [ -e "$d_base/$f" ] || [ -L "$d_base/$f" ]; then mkdir -p "$ALR/w/$(dirname "$f")"; cp -P "$d_base/$f" "$ALR/w/$f"; fi
 	done
 	for pt in $(echo "$pl" | awk '{a[NR]=$0} END{for(i=NR;i>0;i--)print a[i]}'); do
 		git -C "$ALR/w" apply --reverse "$PDIR/$pt" >/dev/null 2>&1 || break
 		echo "$sub $pt" >> "$ALR/list"
 	done
-	mv "$ALR/w" "$ALR/w.$sub"
+	mv "$ALR/w" "$ALR/w.$(echo "$sub" | tr '/' '_')"
 done
 while read -r sub patch; do
 	case "$sub" in ''|'#'*) continue ;; esac
-	d="$EXT/$sub"; p="$PDIR/$patch"
+	if [ "$sub" = "../.." ]; then d="$SRC"; else d="$EXT/$sub"; fi; p="$PDIR/$patch"
 	if [ ! -f "$p" ] || [ ! -d "$d" ]; then echo "FAIL $patch (missing patch or $sub)"; rc=1; continue; fi
 	if git -C "$d" apply --reverse --check "$p" >/dev/null 2>&1; then
 		echo "ALREADY $patch"
 	elif grep -qxF "$sub $patch" "$ALR/list"; then
 		echo "ALREADY $patch"
+	elif [ "$patch" = "mldr-sig65-unblock-count.patch" ] && grep -q 'sigaddset.*65' "$SRC/src/startup/mldr/freebsd_syscall_trap.c" 2>/dev/null && grep -q 'mldr_sig65_tramp_count' "$SRC/src/startup/mldr/sigaction_translate.c" 2>/dev/null; then
+		echo "ALREADY $patch (folded into pr-arm64 0ffc7e19c)"
 	elif git -C "$d" apply --check "$p" >/dev/null 2>&1 && git -C "$d" apply "$p"; then
 		echo "APPLIED $patch"
 	else
