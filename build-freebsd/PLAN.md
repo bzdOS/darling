@@ -183,7 +183,7 @@ load-wayland-backend: infoDictionary NSPrincipalClass=WaylandDisplay
 
 **Задача 2.3.1 ЗАКРЫТА:** `_OBJC_METACLASS_$_NSObject` резолвится из `libobjc.A.dylib` штатным биндом dyld (1333 сайта, ненулевое значение; только `DYLD_PRINT_BINDINGS` его показывает) — `build-freebsd/DYLD-BINDINGS.md`.
 
-**Следующий шаг (фронтир 2026-11, разд. 9.12):** путь поверхности пройден (`wl_surface` + configure roundtrip против sway, AppKit-окно создаётся и делается видимым в AppKit), но гость умирает CHECK-крашем (`ImmediateCrash`, SIGTRAP) на `ChromeFW+0x1E3A378` сразу после создания `NSWindow`, до первого attach буфера — кадр композитора пуст.
+**Следующий шаг (фронтир 2026-11, разд. 9.12):** после влива dyld-фикса новый фронт — гость умирает в гостевом dyld ДО старта образа: genuine SIGILL (ud2, «not a patched trampoline») at dyld+0xe6bda (`chrome-wl-dytrm-m5.log:98`); BAD SEND STATUS -111 (`chrome-wl-dytrm-m5.log:221`); GUEST-EXIT t=120s (`chrome-wl-dytrm-m5.log:223`); WRAPPER_RC=124 (`chrome-wl-dytrm-m5.log:225`) — NSSTART/ORDERFRONT-PROBE не достигаются, кадр композитора пуст. Порядок открытых дефектов пути — по t смерти гостя (раньше смерть = раньше наряд).
 
 **Запуск для проверки:**
 ```sh
@@ -937,6 +937,24 @@ SIGTRAP, статус 0x5) на `ChromeFW+0x1E3A378` — через <1 c пос�
 сторона: `swaymsg get_tree` 651 тик 0 con-узлов; grim-кадры все одинаковые
 (md5 594f78d2…, 6004 Б) — кадра нет.
 
+**Где стоим после влива dyld-фикса (2026-11-26):** новый фронт — точка отказа
+приёмочного прогона ПОСЛЕ влива, названная цитатой строки лога
+`chrome-wl-dytrm-m5.log:98`:
+
+> `[darling-mldr] genuine SIGILL (ud2, not a patched trampoline) at dyld+0xe6bda rip=0x82834fbda rax=0x0`
+
+До влива фронт был другим («какой фронт был»): `dyld std::__terminate` →
+abort_with_payload → FATAL signal 4 (code=5) at 0x82662ebda → GUEST-EXIT
+status=0x4 t=0s, WRAPPER_RC=132; CHECK-краш `ImmediateCrash` (SIGTRAP) на
+`ChromeFW+0x1E3A378` не достигался в этом прогоночном сценарии.
+
+После влива: нет `dyld std::__terminate`; genuine SIGILL (ud2, not a patched
+trampoline) at dyld+0xe6bda; далее `dserver_rpc_explicit_interrupt_enter:
+BAD SEND STATUS: -111` (лог:221), `GUEST-EXIT pid=86364 status=0x4 t=120s`
+(лог:223), `WRAPPER_RC=124` (лог:225) — NSSTART/ORDERFRONT-PROBE не достигаются,
+кадр композитора пуст. Порядок открытых дефектов пути — по t смерти гостя
+(раньше смерть = раньше наряд).
+
 **Замеры краша:** rip−база = `0x1E3A378` стабильно 2/2 (as/au серия,
 rip=0x…b8f378 при базах 0x…55000) и воспроизводится в ts/of-серии
 (SIGTRAP t=4–10 с); esi ∈ {0x107, 0xbe8b}; «Check failed» в лог не печатается.
@@ -953,13 +971,11 @@ queue — гонка, в of-серии шторма нет (у аварии др
 потеря сигнала 65 через PT_DETACH; SIGPIPE сервера; дубли SIGILL (~850 → 10–27).
 Стена «wl_surface не создаётся» снята: поверхность создаётся и конфигурируется.
 
-**Первый шаг фронтира:** разобрать расхождение маркеров `visible=0` при
-`occlusion=2` в ts-серии (occlusion 2 = `NSWindowOcclusionStateVisible` — зонд,
-вероятно, считает не тот бит/окно). Затем — инструментировать наш AppKit-путь
-вокруг `_createPlatformWindowOnMainThread`/`makeKeyAndOrderFront` (что Chrome
-спрашивает у нашего AppKit и что тот возвращает) и править backend, после
-которой прогон жив ≥10 с с окном: `visible>=1`, `SNAP windows>=1`, кадр
-композитора отличим от пустого.
+**Первый шаг фронтира:** после влива dyld-фикса — устранить причину genuine
+SIGILL (ud2, not a patched trampoline) at dyld+0xe6bda (`chrome-wl-dytrm-m5.log:98`)
+и цепочку `dserver_rpc_explicit_interrupt_enter: BAD SEND STATUS: -111`
+(`chrome-wl-dytrm-m5.log:221`), затем повторить приёмочный прогон после влива и
+добрать окно: `visible>=1`, `SNAP windows>=1`, кадр композитора отличим от пустого.
 
 **Канон запуска/проверки:**
 ```sh
