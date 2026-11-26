@@ -98,3 +98,5 @@ darlingserver darlingserver-pending-call-queue.patch
 darlingserver darlingserver-suspend-continuation-guard.patch
 # darlingserver-freebsd-vm-region.patch: memoryRegionInfo and getNextRegion read the process vm map with kinfo_getvmmap on the FreeBSD port (there is no /proc/<pid>/maps), so vm_region_64 finds the region of an address instead of KERN_INVALID_ADDRESS (Chrome allocator_interception_apple.mm).
 darlingserver darlingserver-freebsd-vm-region.patch
+# darlingserver-null-task-context-dispose.patch: the dispose hook crashed on a NULL task context. dtape_task_init creates the kernel task with context=NULL by design; the dispose hook (reached via task_deallocate -> dtape_task_destroy) dereferenced it without a check and SIGSEGV'd at _dispose(this=0x0) (fault address 0x160 = offsetof(Process, _selfReference)). The eternal_id hook right below already checks for NULL; this adds the same guard. Reproduce (crash alone): `darlingserver <prefix> 1001 1001 3 0` -> signal 11 before the first RPC.
+darlingserver darlingserver-null-task-context-dispose.patch
