@@ -2356,7 +2356,7 @@ dispatch_linux_syscall_host_errno(unsigned int linux_nr,
         if (mr >= 0 && (int)a5 >= 0) {
             bool executable = (a3 & PROT_EXEC) != 0;
 
-            mldr_note_mapping((void *)mr, (size_t)a2, (int)a5, executable);
+            mldr_register_image_mapping((void *)mr, (size_t)a2, (int)a5, executable, NULL);
             if (executable)
                 mldr_patch_linux_raw_syscalls((void *)mr, (size_t)a2);
         }
@@ -3943,6 +3943,32 @@ patch_one_signature(uint8_t *base, size_t size,
     }
 
     return found;
+}
+
+void
+mldr_register_image_mapping(void *base, size_t size, int fd, bool executable, const char *name)
+{
+#if defined(__x86_64__)
+	if (name != NULL) {
+		/* Register with a caller-supplied name (e.g. dyld, whose fd is
+		 * already closed by the time registration runs, so F_KINFO cannot
+		 * resolve the path). The name is used for MLDR_TRAP_AT matching
+		 * and address resolution. */
+		if (_mldr_image_count < MLDR_MAX_IMAGES) {
+			struct mldr_image *img = &_mldr_images[_mldr_image_count++];
+			img->base = (uintptr_t)base;
+			img->size = size;
+			snprintf(img->name, sizeof(img->name), "%s%s",
+			         name, executable ? "" : " (data)");
+		}
+		if (executable)
+			mldr_plant_traps((uintptr_t)base, size, name);
+	} else {
+		mldr_note_mapping(base, size, fd, executable);
+	}
+#else
+	(void)base; (void)size; (void)fd; (void)executable; (void)name;
+#endif
 }
 
 void

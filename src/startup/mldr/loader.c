@@ -316,6 +316,10 @@ no_slide:
 						sect++;
 					}
 				}
+				if (expect_dylinker) {
+					lr->dyld_mapped_size = mmapSize;
+					lr->dyld_fd = fd;
+				}
 				break;
 			}
 			case LC_UNIXTHREAD:

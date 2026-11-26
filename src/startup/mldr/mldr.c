@@ -309,6 +309,18 @@ int main(int argc, char** argv, char** envp)
 	 * instruction (eax = 0x2000000 | nr) causes an unhandled SIGSYS
 	 * because FreeBSD does not know those syscall numbers. */
 	setup_macos_syscall_trap();
+#if defined(__x86_64__)
+	/* dyld is mapped by loader.c, not by a guest mmap syscall, so the mmap
+	 * trap's mldr_note_mapping() never sees it. Register it explicitly so
+	 * MLDR_TRAP_AT/MLDR_TRAP_RESUME_AT can arm sites in dyld and stack
+	 * addresses inside dyld resolve to "dyld+0x..." in trap reports. */
+	if (mldr_load_results.dyld_mh != 0 && mldr_load_results.dyld_fd >= 0) {
+		mldr_register_image_mapping((void *)mldr_load_results.dyld_mh,
+		                            mldr_load_results.dyld_mapped_size,
+		                            mldr_load_results.dyld_fd, true,
+		                            "dyld");
+	}
+#endif
 #endif
 
 #ifdef DARLING_FREEBSD

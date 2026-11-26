@@ -122,10 +122,10 @@ FIFO=$BASE.fifo.$$
 FIFO2=$BASE.fifo2.$$
 rm -f "$FIFO" "$FIFO2"; mkfifo "$FIFO" "$FIFO2" || exit 1
 LC_ALL=C awk -v cap="${CHROME_SR_LOG_CAP:-209715200}" -v out="$LOG" \
-  '!/traplog|prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO" &
+  '!/prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO" &
 RDP=$!
 LC_ALL=C awk -v cap="${CHROME_SR_LOG_CAP:-209715200}" -v out="$LOG" \
-  '!/traplog|prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO2" &
+  '!/prctl/ && $0 != "\"" { if (n < cap) { n += length($0) + 1; print >> out; fflush(out) } else if (!w) { w = 1; print "LOG-CAPPED at " cap " bytes" >> out; fflush(out) } }' < "$FIFO2" &
 RDP2=$!
 # DARLING_TRAP_LOG from the environment, default 0; an empty value leaves the variable out of the guest
 # environment altogether. The default was 1: the flood's per-syscall marker lines share guest stderr

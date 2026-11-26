@@ -81,6 +81,22 @@ void mldr_call_guest_handler(uintptr_t intr_rsp, int sa_onstack, void (*fn)(void
  *              every EXEC segment contains these trampolines).
  */
 void mldr_patch_linux_raw_syscalls(void *base, size_t size);
+
+/*
+ * purpose:   Register a guest image mapping in mldr's image registry and arm
+ *            any MLDR_TRAP_AT/MLDR_TRAP_RESUME_AT sites that name it. The mmap
+ *            syscall trap calls this for dyld-mapped images; mldr calls it
+ *            directly for dyld itself because dyld is mapped by loader.c, not
+ *            by a guest mmap syscall.
+ * input:     base/size — mapped range; fd — backing fd (for path lookup via
+ *            F_KINFO, -1 if unavailable); executable — PROT_EXEC;
+ *            name — image name for trap matching and address resolution
+ *            (NULL to derive from fd via F_KINFO).
+ * output:    none.
+ * sideEffects: appends to image registry, logs when MLDR_LOG_MAPPINGS is set,
+ *              may plant ud2 traps in executable images.
+ */
+void mldr_register_image_mapping(void *base, size_t size, int fd, bool executable, const char *name);
 #endif /* __x86_64__ */
 
 #endif /* DARLING_FREEBSD */

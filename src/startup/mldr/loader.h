@@ -21,6 +21,13 @@ struct load_results {
 	 * to be answered by subtracting a constant from the boot entry point
 	 * because this field did not exist. */
 	unsigned long dyld_mh;
+	/* Mapped size of dyld's executable image and the fd it was loaded from.
+	 * Used to register dyld in mldr's image registry so MLDR_TRAP_AT sites
+	 * in dyld can be armed and dyld addresses symbolicate in trap reports.
+	 * dyld is mapped by loader.c, not by a guest mmap syscall, so the mmap
+	 * trap never sees it. */
+	unsigned long dyld_mapped_size;
+	int dyld_fd;
 	uint8_t uuid[16];
 
 	unsigned long vm_addr_max;
